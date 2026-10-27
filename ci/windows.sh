@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Builds on Windows (Git Bash), with the Visual Studio environment of the
 # toolset and the SDK upstream.env names, as the upstream CI does:
-#   windows.sh free       makes room on C:, where the libraries are built:
-#                         unused SDKs of the image go when less than
-#                         PLUMA_MIN_FREE_GB (default 80) is free;
 #   windows.sh libraries  the libraries, with Telegram/build/prepare/prepare.py
 #                         (Qt 6, the release and the debug builds) into
 #                         ../Libraries/win64 and ../ThirdParty next to the
@@ -19,27 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
 . ./config/app.env
-mode=${1:?usage: windows.sh free|libraries|trim|client}
-
-if [ "$mode" = free ]; then
-	free_gb() {
-		df -k /c | awk 'NR == 2 {print int($4 / 1048576)}'
-	}
-	need=${PLUMA_MIN_FREE_GB:-80}
-	df -h /c /d 2>/dev/null || true
-	for d in /c/Android /c/hostedtoolcache/windows/CodeQL /c/ghcup /c/Miniconda /c/Julia; do
-		if [ "$(free_gb)" -ge "$need" ]; then
-			break
-		fi
-		if [ -d "$d" ]; then
-			cmd.exe //d //c rmdir /s /q "$(cygpath -w "$d")" || true
-			echo "windows: $(free_gb) GB free on C: without $d"
-		fi
-	done
-	echo "windows: $(free_gb) GB free on C:, $need wanted"
-	exit 0
-fi
-
+mode=${1:?usage: windows.sh libraries|trim|client}
 dir=$(cd "${UPSTREAM_DIR:?UPSTREAM_DIR is not set}" && pwd)
 root=$(dirname "$dir")
 libs=$root/Libraries/win64
@@ -117,7 +94,7 @@ libraries)
 	# fill the disk.
 	# shellcheck disable=SC2016 # CMake's variables, not the shell's
 	sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
-	df -h /c /d 2>/dev/null || true
+	df -h "$root"
 	in_vcvars "cd /d \"$windir\"" \
 		"call Telegram\\build\\prepare\\win.bat silent qt6"
 	;;
@@ -128,7 +105,7 @@ trim)
 		-o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' \
 		-o -empty ')' -delete
 	du -sh "$libs" "$root/ThirdParty"
-	df -h /c /d 2>/dev/null || true
+	df -h "$root"
 	;;
 client)
 	in_vcvars "cd /d \"$windir\\Telegram\"" \
@@ -142,7 +119,7 @@ client)
 	echo "windows: $exe ($(du -h "$exe" | awk '{print $1}'))"
 	;;
 *)
-	echo "usage: windows.sh free|libraries|trim|client" >&2
+	echo "usage: windows.sh libraries|trim|client" >&2
 	exit 2
 	;;
 esac

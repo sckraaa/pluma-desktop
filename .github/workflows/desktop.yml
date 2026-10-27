@@ -242,14 +242,15 @@ jobs:
         with:
           persist-credentials: false
       # The paths of the libraries are part of their cache keys
-      # (prepare.py): the same every run, as upstream's %USERPROFILE%\TBuild.
+      # (prepare.py): the same every run. On D:, unlike upstream's
+      # %USERPROFILE%\TBuild: C: of the image has about 30 GB free, too few
+      # for the release and debug builds of Qt, D: about 150 GB.
       - name: Paths
         run: |
-          tbuild="$(cygpath -u "$USERPROFILE")/TBuild"
+          tbuild=/d/TBuild
           echo "UPSTREAM_DIR=$tbuild/tdesktop" >>"$GITHUB_ENV"
           echo "TBUILD=$(cygpath -w "$tbuild")" >>"$GITHUB_ENV"
-      - name: Free disk space
-        run: ci/windows.sh free
+          df -h /c /d
       - name: Fetch upstream
         run: ci/fetch-upstream.sh full
       - name: Patch
