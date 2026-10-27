@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Keys of the GitHub Actions cache of the libraries that
 # Telegram/build/prepare/prepare.py builds (Windows, macOS):
-#   cache-key.sh prepare      a hash of prepare.py of $UPSTREAM_DIR: the
-#                             libraries of the same script are restored first;
+#   cache-key.sh prepare      a hash of the pinned upstream's prepare.py in
+#                             $UPSTREAM_DIR, as committed: the libraries of the
+#                             same script are restored first. ci/patch.py's
+#                             edits of it (backports) do not count here: the
+#                             stage keys of the state below cover them, so an
+#                             edit rebuilds only the stages it changes;
 #   cache-key.sh state <dir>  a hash of the stage keys prepare.py wrote under
 #                             each <dir>/cache_keys: the state of what is
 #                             built, so an unchanged state is not saved again.
@@ -20,7 +24,7 @@ sha256() {
 
 case $mode in
 prepare)
-	key=$(sha256 <"${UPSTREAM_DIR:?UPSTREAM_DIR is not set}/Telegram/build/prepare/prepare.py")
+	key=$(git -C "${UPSTREAM_DIR:?UPSTREAM_DIR is not set}" show HEAD:Telegram/build/prepare/prepare.py | sha256)
 	;;
 state)
 	if [ $# = 0 ]; then

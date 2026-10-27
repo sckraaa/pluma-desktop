@@ -24,6 +24,9 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - Windows: the AppUserModelID `Pluma.PlumaDesktop` (taskbar, notifications), Pluma's own GUIDs for the single-instance lock, the COM class that notifications activate and the application, shortcuts named `Pluma.lnk` (Start menu, autostart, Send To), and "Pluma" in the file's version information.
 - **Links.** `tg://` and `tonsite://` stay with Telegram Desktop installed on the same computer. Pluma does not register them at its first start, and its macOS bundle and Linux `.desktop` file do not declare them. Telegram's web links open Telegram, whose accounts they belong to. Typing `registertg` in Settings still takes the schemes over, under Pluma's own names.
 
+- **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
+  - tdesktop `b244f1b3`: `prepare.py` takes the UCRT packages of MSYS2 (`mingw-w64-ucrt-x86_64-*`) and a newer MSYS2 installer. MSYS2 removed the msvcrt-based `mingw-w64-x86_64-*` packages that 7.0.9 asks for, and the Windows libraries could not be built.
+
 After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - no address in Telegram's published ranges and no MTProto key of Telegram's;
 - the server key and nothing else (three copies);
@@ -183,7 +186,8 @@ ci/package.sh linux|windows|macos dev  # out/pluma-desktop-<version>-<system>-de
 
 1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks.
 2. Run `ci/fetch-upstream.sh sparse` and the tests.
-3. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.
+3. Remove the backports the new release already has: their edits no longer match.
+4. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.
 
 ## Setting up the repository
 

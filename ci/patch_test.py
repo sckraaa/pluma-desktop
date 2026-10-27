@@ -250,6 +250,12 @@ DAMAGE = (
     (patch.DOCKER_ENV + "/build.sh", 'cmake --build ../out --config "${CONFIG:-Release}"', "cmake --build ../out --config Release"),
     (patch.DOCKER_ENV + "/gen_dockerfile.py", 'LTO=checkEnv("LTO", True),', 'LTO=checkEnv("ENABLE_LTO", True),'),
     (patch.PREPARE, "        elif arg == 'silent':\n", "        elif arg == 'quiet':\n"),
+    # The MSYS2 backport: a changed package list, and an upstream that has
+    # the fix already (the backport must go then).
+    (patch.PREPARE, "        mingw-w64-x86_64-gperf ^\n", "        mingw-w64-x86_64-gperf-git ^\n"),
+    (patch.PREPARE, "'ThirdParty\\\\msys64\\\\mingw64\\\\bin'", "'ThirdParty\\\\msys64\\\\ucrt64\\\\bin'"),
+    (patch.PREPARE, "stage('python', \"\"\"\n",
+     "stage('python', \"\"\"\nwin:\n    pacman -S --noconfirm mingw-w64-x86_64-cmake\n"),
     (patch.CMAKE_VARIABLES, "option(DESKTOP_APP_DISABLE_AUTOUPDATE ", "option(DESKTOP_APP_NO_AUTOUPDATE "),
     (DC, '{ 5, "149.154.171.5"  , 443 },', '{ 5, "149.154.171.6"  , 443 },'),
     (DC, "MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaOW622Aa9Bd4ZHLl+TuFQ4lo4g", "MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaOW622Aa9Bd4ZHLl+TuFQ4lo4h"),
@@ -404,6 +410,10 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("\nExec=Pluma -- %U\n", desktop)
         self.assertNotIn("MimeType", desktop)
         self.assertIn("server key 0x", tree.read(patch.MARKER))
+        prepare = tree.read(patch.PREPARE)
+        self.assertIn("    'ThirdParty\\\\msys64\\\\ucrt64\\\\bin',\n", prepare)
+        self.assertIn("msys2-base-x86_64-20260927.sfx.exe", prepare)
+        self.assertEqual(prepare.count("        mingw-w64-ucrt-x86_64-"), 5)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")

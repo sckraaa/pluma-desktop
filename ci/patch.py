@@ -403,7 +403,31 @@ CMAKE_DEFINITIONS = "target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABL
 # The files the patch edits; it refuses CRLF in any of them.
 EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY_DATA, APPLICATION, LAUNCHER,
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
-          PLIST, DESKTOP_FILE)
+          PLIST, DESKTOP_FILE, PREPARE)
+
+
+# Backports of upstream fixes to the build scripts, each as (file, the
+# pinned upstream's text, the fixed text), byte for byte as upstream wrote
+# them. Once upstream.env pins a release that has a fix, its edit no longer
+# matches and the patch stops: the backport goes then.
+BACKPORTS = (
+    # tdesktop b244f1b3 (2026-09-30, "Update msys2 and use ucrt versions of
+    # packages"): MSYS2 removed the msvcrt-based mingw-w64-x86_64-* packages,
+    # so prepare.py of 7.0.9 fails on Windows at its second stage.
+    (PREPARE, "    'ThirdParty\\\\msys64\\\\mingw64\\\\bin',\n", "    'ThirdParty\\\\msys64\\\\ucrt64\\\\bin',\n"),
+    (PREPARE, "releases/download/2025-08-30/msys2-base-x86_64-20250830.sfx.exe\"\n",
+     "releases/download/2026-09-27/msys2-base-x86_64-20260927.sfx.exe\"\n"),
+    (PREPARE, "        mingw-w64-x86_64-diffutils ^\n"
+              "        mingw-w64-x86_64-gperf ^\n"
+              "        mingw-w64-x86_64-nasm ^\n"
+              "        mingw-w64-x86_64-perl ^\n"
+              "        mingw-w64-x86_64-pkgconf\n",
+     "        mingw-w64-ucrt-x86_64-diffutils ^\n"
+     "        mingw-w64-ucrt-x86_64-gperf ^\n"
+     "        mingw-w64-ucrt-x86_64-nasm ^\n"
+     "        mingw-w64-ucrt-x86_64-perl ^\n"
+     "        mingw-w64-ucrt-x86_64-pkgconf\n"),
+)
 
 
 def check_upstream(tree, c):
@@ -436,6 +460,9 @@ def check_upstream(tree, c):
 
 def patch(tree, c):
     check_upstream(tree, c)
+
+    for rel, old, new in BACKPORTS:
+        tree.replace(rel, old, new)
 
     # Datacenters: the Pluma server is the only built-in one, datacenter 1,
     # for the production and the test backend alike; a fresh install starts
@@ -689,6 +716,9 @@ def verify(tree, c):
         for s in traces:
             if s in text:
                 raise PatchError(f"{rel}: Telegram Desktop's {s!r} is still there")
+    prepare = tree.read(PREPARE)
+    if "mingw-w64-x86_64-" in prepare or "msys64\\\\mingw64" in prepare:
+        raise PatchError(f"{PREPARE}: still asks MSYS2 for the msvcrt-based packages it removed")
     if f'constexpr auto AppName = "{c.app_name}"_cs;' not in tree.read(VERSION_H):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):
