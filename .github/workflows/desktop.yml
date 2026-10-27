@@ -52,9 +52,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: desktop-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Each system queues on its own: a run does not wait for another run's job of
+# another system, and no job runs twice at once for one branch.
 
 jobs:
   check:
@@ -114,6 +113,10 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'linux'
     runs-on: ubuntu-24.04
     timeout-minutes: 340
+    # One image build at a time for every branch: they build the same tags.
+    concurrency:
+      group: desktop-linux-env
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -132,6 +135,9 @@ jobs:
     needs: [check, linux-env]
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    concurrency:
+      group: desktop-linux-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
       packages: read
@@ -221,6 +227,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'windows'
     runs-on: windows-2025
     timeout-minutes: 355
+    concurrency:
+      group: desktop-windows-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     defaults:
       run:
         shell: bash
@@ -306,6 +315,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'macos'
     runs-on: macos-26
     timeout-minutes: 355
+    concurrency:
+      group: desktop-macos-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       TARGET: ${{ needs.check.outputs.target }}
       # The paths of the libraries are part of their cache keys
@@ -385,6 +397,9 @@ jobs:
     if: always() && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    concurrency:
+      group: desktop-prune-caches
+      cancel-in-progress: false
     permissions:
       actions: write
       contents: read
