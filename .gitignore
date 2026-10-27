@@ -1,0 +1,5 @@
+/upstream/
+/out/
+/.ccache/
+__pycache__/
+*.agekey
