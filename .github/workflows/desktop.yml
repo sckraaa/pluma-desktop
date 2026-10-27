@@ -257,6 +257,11 @@ jobs:
         run: ci/configure.sh "$TARGET"
       - name: age
         run: ci/setup.sh age
+      # ci/windows.sh starts cmd.exe with the PATH of a cmd step, as the
+      # upstream CI runs prepare.py: Git Bash puts its own tools in front.
+      - name: PATH of a cmd step
+        shell: cmd
+        run: echo PLUMA_CMD_PATH=%PATH%>>"%GITHUB_ENV%"
       - name: Key of the libraries
         id: keys
         run: echo "prepare=$(ci/cache-key.sh prepare)" >>"$GITHUB_OUTPUT"

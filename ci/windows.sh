@@ -31,15 +31,19 @@ fi
 # "shell: cmd" step, as in the upstream CI: Git Bash's launcher puts its
 # MinGW and MSYS directories in front of the PATH, and their find.exe,
 # sort.exe and link.exe would shadow Windows' own (libwebp's Makefile.vc
-# pipes cl through find).
+# pipes cl through find). CI passes the PATH of a cmd step in
+# PLUMA_CMD_PATH; elsewhere the launcher's directories are dropped.
 in_vcvars() {
-	local vswhere vs bat line path=$PATH
-	while :; do
-		case $path in
-		/mingw64/bin:* | /usr/bin:* | /usr/local/bin:* | /bin:*) path=${path#*:} ;;
-		*) break ;;
-		esac
-	done
+	local vswhere vs bat line path=$PATH cmd_path=${PLUMA_CMD_PATH:-}
+	if [ -z "$cmd_path" ]; then
+		while :; do
+			case $path in
+			"$HOME/bin:"* | /mingw64/bin:* | /usr/bin:* | /usr/local/bin:* | /bin:*) path=${path#*:} ;;
+			*) break ;;
+			esac
+		done
+		cmd_path=$(cygpath -w -p "$path")
+	fi
 	vswhere="$(cygpath -u "${ProgramFiles:-C:\\Program Files} (x86)")/Microsoft Visual Studio/Installer/vswhere.exe"
 	vs=$("$vswhere" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
 		-property installationPath | tr -d '\r')
@@ -50,6 +54,7 @@ in_vcvars() {
 	bat=$(mktemp -d)/run.cmd
 	{
 		printf '@echo off\r\n'
+		printf '%s\r\n' 'set "PATH=%PLUMA_CMD_PATH%"'
 		printf 'call "%s\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 %s -vcvars_ver=%s\r\n' "$vs" "$WINDOWS_SDK" "$MSVC_TOOLSET"
 		printf 'if errorlevel 1 exit /b 1\r\n'
 		# Windows' find.exe must come first (see above).
@@ -57,7 +62,7 @@ in_vcvars() {
 			"for /f \"delims=\" %%i in ('where find.exe') do (set \"PLUMA_FIND=%%i\" & goto found)" \
 			':found' \
 			'echo windows: find is %PLUMA_FIND%' \
-			'if /i not "%PLUMA_FIND%"=="%SystemRoot%\System32\find.exe" exit /b 1'
+			'if /i not "%PLUMA_FIND%"=="%SystemRoot%\System32\find.exe" (where find.exe & exit /b 1)'
 		for line in "$@"; do
 			printf '%s\r\n' "$line"
 			printf 'if errorlevel 1 exit /b 1\r\n'
@@ -67,7 +72,7 @@ in_vcvars() {
 	# shells of prepare.py (libvpx, ffmpeg) set up MinGW instead of MSYS.
 	(
 		unset MSYSTEM
-		PATH=$path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+		PLUMA_CMD_PATH=$cmd_path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
 			"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" /d /c "$(cygpath -w "$bat")"
 	)
 }
