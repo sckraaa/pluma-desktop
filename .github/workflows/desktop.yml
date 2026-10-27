@@ -1,0 +1,398 @@
+# Builds the Pluma desktop client for Linux, Windows and macOS from the
+# tdesktop release upstream.env pins.
+#
+#   check         the scripts' tests, the patch on a sparse checkout of the
+#                 pinned upstream (layer 228, the server key, no Telegram
+#                 address or fallback; for the development server, and for
+#                 the server of the repository variables when they are set),
+#                 and lint: seconds, on Linux;
+#   linux-env     the upstream's Linux build environment as a Docker image in
+#                 ghcr.io, built only when its sources change (two to four
+#                 hours, once);
+#   linux         the client, in that image, through ccache;
+#   windows       the libraries of Telegram/build/prepare/prepare.py, cached
+#                 by their state, then the client;
+#   macos         the same on macOS; the app is signed ad hoc;
+#   prune-caches  keeps the newest cache of each kind.
+#
+# A build targets the server of the repository variables when they are set,
+# and the development server of config/dev otherwise (or when a manual run
+# asks for it). Development builds carry only the development server's
+# address and public key and stay plain artifacts for seven days. Builds for
+# a real server leave their job only encrypted for the owner (age): artifacts
+# of a public repository are readable by anyone (ADR 0010 of the server
+# repository).
+#
+# The weekly run is a canary: it builds the pinned upstream for the
+# development server on fresh runner images, so a removed Xcode or a broken
+# download shows up before an update is needed, and it keeps the caches from
+# expiring.
+name: desktop
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+  schedule:
+    - cron: "41 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Systems to build"
+        type: choice
+        options: [all, linux, windows, macos]
+        default: all
+      dev:
+        description: "Build for the development server even when the server variables are set"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      target: ${{ steps.target.outputs.target }}
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch upstream (the files the patch reads)
+        run: ci/fetch-upstream.sh sparse
+      - name: Tests
+        run: python3 -I -m unittest discover -s ci -p '*_test.py' -v
+      - name: Patch for the development server
+        run: ci/configure.sh dev
+      - name: Target
+        id: target
+        env:
+          SERVER_SET: ${{ vars.PLUMA_SERVER_IPV4 }}${{ vars.PLUMA_SERVER_PORT }}${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          FORCE_DEV: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dev) }}
+        run: |
+          if [ -n "$SERVER_SET" ] && [ "$FORCE_DEV" != true ]; then
+            echo "target=server" >>"$GITHUB_OUTPUT"
+          else
+            echo "target=dev" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Patch for the server of the repository variables
+        if: steps.target.outputs.target == 'server'
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+        run: |
+          ci/fetch-upstream.sh sparse
+          ci/configure.sh server
+      - name: The owner's age key
+        if: steps.target.outputs.target == 'server' && github.event_name != 'pull_request'
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: |
+          if [[ ! "$PLUMA_AGE_RECIPIENT" =~ ^age1[0-9a-z]+$ ]]; then
+            echo "::error::PLUMA_AGE_RECIPIENT is not an age public key; a build for the server would have nowhere to go (README, Builds for a server)."
+            exit 1
+          fi
+      - name: Linux image
+        id: image
+        run: echo "image=$(ci/linux-env.sh ref)" >>"$GITHUB_OUTPUT"
+      - name: Lint
+        run: ci/lint.sh
+
+  linux-env:
+    needs: check
+    if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'linux'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch upstream (the image's sources)
+        run: ci/fetch-upstream.sh sparse
+      - name: Image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/linux-env.sh ensure
+
+  linux:
+    needs: [check, linux-env]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TARGET: ${{ needs.check.outputs.target }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: ${{ vars.PLUMA_CCACHE_SIZE || '3G' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/julia* || true
+          df -h /
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Patch
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+        run: ci/configure.sh "$TARGET"
+      - name: ccache, age
+        run: |
+          ci/setup.sh ccache
+          ci/setup.sh age
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: linux-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            linux-ccache-${{ hashFiles('upstream.env') }}-
+            linux-ccache-
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build
+        id: build
+        env:
+          IMAGE: ${{ needs.check.outputs.image }}
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --zero-stats
+          ci/build-linux.sh "$IMAGE"
+      - name: ccache statistics
+        id: ccache
+        if: always() && steps.build.outcome != 'skipped'
+        run: |
+          ccache --show-stats || true
+          misses=$(ccache --print-stats 2>/dev/null | sed -n 's/^cache_miss\t//p' | head -n 1)
+          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+      # Saved even when the build fails, so a re-run picks up where it
+      # stopped; not saved again when nothing was compiled.
+      - name: Trim ccache
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.event_name != 'pull_request'
+        run: ccache --evict-older-than 1d || true
+      - name: Save ccache
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: linux-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Package
+        run: ci/package.sh linux "$TARGET"
+      - name: Encrypt
+        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: ci/encrypt.sh out
+      - name: Upload
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.TARGET == 'server' && 'pluma-desktop-linux' || 'pluma-desktop-linux-dev' }}
+          path: out/
+          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          if-no-files-found: error
+
+  windows:
+    needs: check
+    if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'windows'
+    runs-on: windows-2025
+    timeout-minutes: 355
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ needs.check.outputs.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The paths of the libraries are part of their cache keys
+      # (prepare.py): the same every run, as upstream's %USERPROFILE%\TBuild.
+      - name: Paths
+        run: |
+          tbuild="$(cygpath -u "$USERPROFILE")/TBuild"
+          echo "UPSTREAM_DIR=$tbuild/tdesktop" >>"$GITHUB_ENV"
+          echo "TBUILD=$(cygpath -w "$tbuild")" >>"$GITHUB_ENV"
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Patch
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+        run: ci/configure.sh "$TARGET"
+      - name: age
+        run: ci/setup.sh age
+      - name: Key of the libraries
+        id: keys
+        run: echo "prepare=$(ci/cache-key.sh prepare)" >>"$GITHUB_OUTPUT"
+      - name: Restore the libraries
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.TBUILD }}\Libraries
+            ${{ env.TBUILD }}\ThirdParty
+          key: windows-libs-${{ steps.keys.outputs.prepare }}
+          restore-keys: |
+            windows-libs-${{ steps.keys.outputs.prepare }}-
+            windows-libs-
+      - name: Libraries
+        id: libraries
+        timeout-minutes: 250
+        run: ci/windows.sh libraries
+      # Saved even when a stage fails, so a re-run picks up at that stage;
+      # not saved again when nothing changed.
+      - name: Trim the libraries
+        id: state
+        if: always() && steps.libraries.outcome != 'skipped'
+        run: |
+          ci/windows.sh trim
+          tbuild=$(dirname "$UPSTREAM_DIR")
+          echo "key=windows-libs-${{ steps.keys.outputs.prepare }}-$(ci/cache-key.sh state "$tbuild/Libraries/win64" "$tbuild/ThirdParty")" >>"$GITHUB_OUTPUT"
+      - name: Save the libraries
+        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.TBUILD }}\Libraries
+            ${{ env.TBUILD }}\ThirdParty
+          key: ${{ steps.state.outputs.key }}
+      - name: Build
+        run: ci/windows.sh client
+      - name: Package
+        run: ci/package.sh windows "$TARGET"
+      - name: Encrypt
+        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: ci/encrypt.sh out
+      - name: Upload
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.TARGET == 'server' && 'pluma-desktop-windows' || 'pluma-desktop-windows-dev' }}
+          path: out/
+          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          if-no-files-found: error
+
+  macos:
+    needs: check
+    if: github.event_name != 'workflow_dispatch' || inputs.os == 'all' || inputs.os == 'macos'
+    runs-on: macos-26
+    timeout-minutes: 355
+    env:
+      TARGET: ${{ needs.check.outputs.target }}
+      # The paths of the libraries are part of their cache keys
+      # (prepare.py): the same every run.
+      UPSTREAM_DIR: /Users/runner/TBuild/tdesktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Xcode, disk space, tools
+        run: ci/macos.sh setup
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Patch
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+        run: ci/configure.sh "$TARGET"
+      - name: age
+        run: ci/setup.sh age
+      - name: Key of the libraries
+        id: keys
+        run: echo "prepare=$(ci/cache-key.sh prepare)" >>"$GITHUB_OUTPUT"
+      - name: Restore the libraries
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /Users/runner/TBuild/Libraries
+            /Users/runner/TBuild/ThirdParty
+          key: macos-libs-${{ steps.keys.outputs.prepare }}
+          restore-keys: |
+            macos-libs-${{ steps.keys.outputs.prepare }}-
+            macos-libs-
+      - name: Libraries
+        id: libraries
+        timeout-minutes: 210
+        run: ci/macos.sh libraries
+      # Saved even when a stage fails, so a re-run picks up at that stage;
+      # not saved again when nothing changed.
+      - name: Trim the libraries
+        id: state
+        if: always() && steps.libraries.outcome != 'skipped'
+        run: |
+          ci/macos.sh trim
+          echo "key=macos-libs-${{ steps.keys.outputs.prepare }}-$(ci/cache-key.sh state /Users/runner/TBuild/Libraries /Users/runner/TBuild/ThirdParty)" >>"$GITHUB_OUTPUT"
+      - name: Save the libraries
+        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /Users/runner/TBuild/Libraries
+            /Users/runner/TBuild/ThirdParty
+          key: ${{ steps.state.outputs.key }}
+      - name: Build
+        run: ci/macos.sh client
+      - name: Package
+        run: ci/package.sh macos "$TARGET"
+      - name: Encrypt
+        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: ci/encrypt.sh out
+      - name: Upload
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.TARGET == 'server' && 'pluma-desktop-macos' || 'pluma-desktop-macos-dev' }}
+          path: out/
+          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          if-no-files-found: error
+
+  prune-caches:
+    needs: [linux, windows, macos]
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Older caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/prune-caches.sh linux-ccache- windows-libs- macos-libs-
