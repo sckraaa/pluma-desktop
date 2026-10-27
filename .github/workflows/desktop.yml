@@ -248,6 +248,8 @@ jobs:
           tbuild="$(cygpath -u "$USERPROFILE")/TBuild"
           echo "UPSTREAM_DIR=$tbuild/tdesktop" >>"$GITHUB_ENV"
           echo "TBUILD=$(cygpath -w "$tbuild")" >>"$GITHUB_ENV"
+      - name: Free disk space
+        run: ci/windows.sh free
       - name: Fetch upstream
         run: ci/fetch-upstream.sh full
       - name: Patch
