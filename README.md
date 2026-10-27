@@ -26,6 +26,7 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 
 - **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
   - tdesktop `b244f1b3`: `prepare.py` takes the UCRT packages of MSYS2 (`mingw-w64-ucrt-x86_64-*`) and a newer MSYS2 installer. MSYS2 removed the msvcrt-based `mingw-w64-x86_64-*` packages that 7.0.9 asks for, and the Windows libraries could not be built.
+- **Build script edits of Pluma's own** (`BUILD_EDITS`): on Windows, `prepare.py` does not build breakpad's `dump_syms`, which makes symbol files for Telegram's crash reports and needs ATL, missing from the image's MSVC 14.44 toolset. Pluma compiles crash reports out, and the upstream CI, building Debug only, never builds it either.
 
 After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - no address in Telegram's published ranges and no MTProto key of Telegram's;

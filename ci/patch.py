@@ -430,6 +430,24 @@ BACKPORTS = (
 )
 
 
+# Pluma's own edits of the build scripts, as (file, the pinned upstream's
+# text, the edited text).
+BUILD_EDITS = (
+    # prepare.py builds breakpad's dump_syms in the release variant on
+    # Windows: symbol files for Telegram's crash reports, which Pluma compiles
+    # out. It needs ATL, which the image's MSVC 14.44 toolset does not have
+    # ("Cannot open include file: 'atlbase.h'"); the upstream CI, building
+    # Debug only, never reaches it.
+    (PREPARE, "    ninja -C out/Release%FolderPostfix% common crash_generation_client exception_handler\n"
+              "    cd tools\\\\windows\\\\dump_syms\n"
+              "    gyp dump_syms.gyp --format=msvs\n"
+              "    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform=\"x64\" %ToolsetProp%\n"
+              "win:\n",
+     "    ninja -C out/Release%FolderPostfix% common crash_generation_client exception_handler\n"
+     "win:\n"),
+)
+
+
 def check_upstream(tree, c):
     """The checkout is the one upstream.env describes: the schema layer the
     server speaks (ADR 0008 of the server repository), the version, the
@@ -461,7 +479,7 @@ def check_upstream(tree, c):
 def patch(tree, c):
     check_upstream(tree, c)
 
-    for rel, old, new in BACKPORTS:
+    for rel, old, new in BACKPORTS + BUILD_EDITS:
         tree.replace(rel, old, new)
 
     # Datacenters: the Pluma server is the only built-in one, datacenter 1,
@@ -719,6 +737,8 @@ def verify(tree, c):
     prepare = tree.read(PREPARE)
     if "mingw-w64-x86_64-" in prepare or "msys64\\\\mingw64" in prepare:
         raise PatchError(f"{PREPARE}: still asks MSYS2 for the msvcrt-based packages it removed")
+    if "dump_syms.vcxproj" in prepare:
+        raise PatchError(f"{PREPARE}: still builds breakpad's dump_syms on Windows")
     if f'constexpr auto AppName = "{c.app_name}"_cs;' not in tree.read(VERSION_H):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):

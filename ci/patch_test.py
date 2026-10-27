@@ -254,6 +254,7 @@ DAMAGE = (
     # the fix already (the backport must go then).
     (patch.PREPARE, "        mingw-w64-x86_64-gperf ^\n", "        mingw-w64-x86_64-gperf-git ^\n"),
     (patch.PREPARE, "'ThirdParty\\\\msys64\\\\mingw64\\\\bin'", "'ThirdParty\\\\msys64\\\\ucrt64\\\\bin'"),
+    (patch.PREPARE, "    gyp dump_syms.gyp --format=msvs\n", "    gyp dump_syms.gyp --format=msvs --depth=.\n"),
     (patch.PREPARE, "stage('python', \"\"\"\n",
      "stage('python', \"\"\"\nwin:\n    pacman -S --noconfirm mingw-w64-x86_64-cmake\n"),
     (patch.CMAKE_VARIABLES, "option(DESKTOP_APP_DISABLE_AUTOUPDATE ", "option(DESKTOP_APP_NO_AUTOUPDATE "),
@@ -414,6 +415,8 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("    'ThirdParty\\\\msys64\\\\ucrt64\\\\bin',\n", prepare)
         self.assertIn("msys2-base-x86_64-20260927.sfx.exe", prepare)
         self.assertEqual(prepare.count("        mingw-w64-ucrt-x86_64-"), 5)
+        self.assertNotIn("dump_syms.vcxproj", prepare)
+        self.assertIn("xcodebuild -project dump_syms.xcodeproj", prepare)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
