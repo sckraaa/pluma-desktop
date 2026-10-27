@@ -27,9 +27,18 @@ if [ ! -f "$dir/pluma-patch.txt" ]; then
 fi
 
 # Runs the command lines given in a cmd.exe with the environment of
-# vcvarsall.bat; each must succeed.
+# vcvarsall.bat; each must succeed. The cmd.exe gets the PATH of a "shell:
+# cmd" step, as in the upstream CI: Git Bash's launcher puts its MinGW and
+# MSYS directories in front, and their find.exe, sort.exe and link.exe would
+# shadow Windows' own (libwebp's Makefile.vc pipes cl through find).
 in_vcvars() {
-	local vswhere vs bat line
+	local vswhere vs bat line path=$PATH
+	while :; do
+		case $path in
+		/mingw64/bin:* | /usr/bin:* | /usr/local/bin:* | /bin:*) path=${path#*:} ;;
+		*) break ;;
+		esac
+	done
 	vswhere="$(cygpath -u "${ProgramFiles:-C:\\Program Files} (x86)")/Microsoft Visual Studio/Installer/vswhere.exe"
 	vs=$("$vswhere" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
 		-property installationPath | tr -d '\r')
@@ -42,12 +51,19 @@ in_vcvars() {
 		printf '@echo off\r\n'
 		printf 'call "%s\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 %s -vcvars_ver=%s\r\n' "$vs" "$WINDOWS_SDK" "$MSVC_TOOLSET"
 		printf 'if errorlevel 1 exit /b 1\r\n'
+		# Windows' find.exe must come first (see above).
+		printf '%s\r\n' \
+			"for /f \"delims=\" %%i in ('where find.exe') do (set \"PLUMA_FIND=%%i\" & goto found)" \
+			':found' \
+			'echo windows: find is %PLUMA_FIND%' \
+			'if /i not "%PLUMA_FIND%"=="%SystemRoot%\System32\find.exe" exit /b 1'
 		for line in "$@"; do
 			printf '%s\r\n' "$line"
 			printf 'if errorlevel 1 exit /b 1\r\n'
 		done
 	} >"$bat"
-	MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c "$(cygpath -w "$bat")"
+	PATH=$path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+		"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" /d /c "$(cygpath -w "$bat")"
 }
 
 windir=$(cygpath -w "$dir")
