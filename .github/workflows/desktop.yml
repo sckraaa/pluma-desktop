@@ -142,7 +142,7 @@ jobs:
       contents: read
       packages: read
     env:
-      TARGET: ${{ needs.check.outputs.target }}
+      PLUMA_TARGET: ${{ needs.check.outputs.target }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: ${{ vars.PLUMA_CCACHE_SIZE || '3G' }}
     steps:
@@ -163,7 +163,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
-        run: ci/configure.sh "$TARGET"
+        run: ci/configure.sh "$PLUMA_TARGET"
       - name: ccache, age
         run: |
           ci/setup.sh ccache
@@ -207,9 +207,9 @@ jobs:
           path: .ccache
           key: linux-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Package
-        run: ci/package.sh linux "$TARGET"
+        run: ci/package.sh linux "$PLUMA_TARGET"
       - name: Encrypt
-        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: env.PLUMA_TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
         run: ci/encrypt.sh out
@@ -217,9 +217,9 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ env.TARGET == 'server' && 'pluma-desktop-linux' || 'pluma-desktop-linux-dev' }}
+          name: ${{ env.PLUMA_TARGET == 'server' && 'pluma-desktop-linux' || 'pluma-desktop-linux-dev' }}
           path: out/
-          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          retention-days: ${{ env.PLUMA_TARGET == 'server' && 30 || 7 }}
           if-no-files-found: error
 
   windows:
@@ -233,8 +233,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    # The libraries' builds see this environment: MSBuild refuses two
+    # variables that differ in case only (a TARGET next to libvpx's target).
     env:
-      TARGET: ${{ needs.check.outputs.target }}
+      PLUMA_TARGET: ${{ needs.check.outputs.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -254,7 +256,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
-        run: ci/configure.sh "$TARGET"
+        run: ci/configure.sh "$PLUMA_TARGET"
       - name: age
         run: ci/setup.sh age
       # ci/windows.sh starts cmd.exe with the PATH of a cmd step, as the
@@ -300,9 +302,9 @@ jobs:
       - name: Build
         run: ci/windows.sh client
       - name: Package
-        run: ci/package.sh windows "$TARGET"
+        run: ci/package.sh windows "$PLUMA_TARGET"
       - name: Encrypt
-        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: env.PLUMA_TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
         run: ci/encrypt.sh out
@@ -310,9 +312,9 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ env.TARGET == 'server' && 'pluma-desktop-windows' || 'pluma-desktop-windows-dev' }}
+          name: ${{ env.PLUMA_TARGET == 'server' && 'pluma-desktop-windows' || 'pluma-desktop-windows-dev' }}
           path: out/
-          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          retention-days: ${{ env.PLUMA_TARGET == 'server' && 30 || 7 }}
           if-no-files-found: error
 
   macos:
@@ -324,7 +326,7 @@ jobs:
       group: desktop-macos-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
-      TARGET: ${{ needs.check.outputs.target }}
+      PLUMA_TARGET: ${{ needs.check.outputs.target }}
       # The paths of the libraries are part of their cache keys
       # (prepare.py): the same every run.
       UPSTREAM_DIR: /Users/runner/TBuild/tdesktop
@@ -342,7 +344,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
-        run: ci/configure.sh "$TARGET"
+        run: ci/configure.sh "$PLUMA_TARGET"
       - name: age
         run: ci/setup.sh age
       - name: Key of the libraries
@@ -382,9 +384,9 @@ jobs:
       - name: Build
         run: ci/macos.sh client
       - name: Package
-        run: ci/package.sh macos "$TARGET"
+        run: ci/package.sh macos "$PLUMA_TARGET"
       - name: Encrypt
-        if: env.TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: env.PLUMA_TARGET == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
         run: ci/encrypt.sh out
@@ -392,9 +394,9 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ env.TARGET == 'server' && 'pluma-desktop-macos' || 'pluma-desktop-macos-dev' }}
+          name: ${{ env.PLUMA_TARGET == 'server' && 'pluma-desktop-macos' || 'pluma-desktop-macos-dev' }}
           path: out/
-          retention-days: ${{ env.TARGET == 'server' && 30 || 7 }}
+          retention-days: ${{ env.PLUMA_TARGET == 'server' && 30 || 7 }}
           if-no-files-found: error
 
   prune-caches:
