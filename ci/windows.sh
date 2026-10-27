@@ -27,10 +27,11 @@ if [ ! -f "$dir/pluma-patch.txt" ]; then
 fi
 
 # Runs the command lines given in a cmd.exe with the environment of
-# vcvarsall.bat; each must succeed. The cmd.exe gets the PATH of a "shell:
-# cmd" step, as in the upstream CI: Git Bash's launcher puts its MinGW and
-# MSYS directories in front, and their find.exe, sort.exe and link.exe would
-# shadow Windows' own (libwebp's Makefile.vc pipes cl through find).
+# vcvarsall.bat; each must succeed. The cmd.exe gets the environment of a
+# "shell: cmd" step, as in the upstream CI: Git Bash's launcher puts its
+# MinGW and MSYS directories in front of the PATH, and their find.exe,
+# sort.exe and link.exe would shadow Windows' own (libwebp's Makefile.vc
+# pipes cl through find).
 in_vcvars() {
 	local vswhere vs bat line path=$PATH
 	while :; do
@@ -62,8 +63,13 @@ in_vcvars() {
 			printf 'if errorlevel 1 exit /b 1\r\n'
 		done
 	} >"$bat"
-	PATH=$path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-		"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" /d /c "$(cygpath -w "$bat")"
+	# The launcher also sets MSYSTEM=MINGW64, which would make the MSYS2 login
+	# shells of prepare.py (libvpx, ffmpeg) set up MinGW instead of MSYS.
+	(
+		unset MSYSTEM
+		PATH=$path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+			"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" /d /c "$(cygpath -w "$bat")"
+	)
 }
 
 windir=$(cygpath -w "$dir")
