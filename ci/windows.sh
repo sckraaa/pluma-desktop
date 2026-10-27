@@ -69,11 +69,14 @@ in_vcvars() {
 		done
 	} >"$bat"
 	# The launcher also sets MSYSTEM=MINGW64, which would make the MSYS2 login
-	# shells of prepare.py (libvpx, ffmpeg) set up MinGW instead of MSYS.
+	# shells of prepare.py (libvpx, ffmpeg) set up MinGW instead of MSYS. No
+	# MSYS_NO_PATHCONV either: in those shells MSYS2 must turn paths into
+	# Windows ones for native tools (perl), so the switches are written //d
+	# //c for Git Bash instead.
 	(
-		unset MSYSTEM
-		PLUMA_CMD_PATH=$cmd_path MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-			"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" /d /c "$(cygpath -w "$bat")"
+		unset MSYSTEM MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+		PLUMA_CMD_PATH=$cmd_path \
+			"$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")" //d //c "$(cygpath -w "$bat")"
 	)
 }
 
