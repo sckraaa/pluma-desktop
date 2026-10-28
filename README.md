@@ -133,9 +133,9 @@ The jobs, and what a build takes:
 |---|---|---|---|
 | `check` | `ubuntu-24.04` | under a minute | under a minute |
 | `linux-env` | `ubuntu-24.04` | 2–4 h, once for each version of the upstream's `centos_env` | a minute: the image is in the registry |
-| `linux` | `ubuntu-24.04`, in that image | about 1.5 h | 15–25 min (ccache) |
-| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client (2 h) | 20–40 min, estimated: the libraries and the client's compilations come from the caches |
-| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | 20–40 min, estimated: the same; the app is universal (arm64, x86-64) |
+| `linux` | `ubuntu-24.04`, in that image | about 1.5 h | about 10 min (ccache) |
+| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client (2 h) | about 15 min: the libraries and the client's compilations come from the caches |
+| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | about 10 min: the same; the app is universal (arm64, x86-64) |
 
 Every build is in the Release configuration. The upstream's CI builds Debug, which is faster but not fit for users. The libraries are therefore built in their release variant too (`prepare.py` without `skip-release`); on macOS, Qt and tg_owt in that variant alone ([What the patch changes](#what-the-patch-changes)).
 
@@ -160,8 +160,8 @@ The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads 
 
 | Entry | Cap | Size | |
 |---|---|---|---|
-| `linux-ccache-…` | 2000 MB | to be measured with ccache 4 | a full Release build |
-| `windows-ccache-…` | 2500 MB | over 1.5 GB: a cap of 1500 MB evicted during a full build | the same |
+| `linux-ccache-…` | 2000 MB | 0.9 GB | a full Release build |
+| `windows-ccache-…` | 2500 MB | 1.6 GB; a cap of 1500 MB evicted during a full build | the same |
 | `macos-ccache-…` | 2250 MB | 1.6 GB: two architectures | the same |
 | `windows-libs-…` | 1500 MB | 1.1 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
 | `macos-libs-…` | 750 MB | 0.45 GB; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
