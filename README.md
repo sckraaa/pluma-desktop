@@ -134,8 +134,8 @@ The jobs, and what a build takes:
 | `check` | `ubuntu-24.04` | under a minute | under a minute |
 | `linux-env` | `ubuntu-24.04` | 2–4 h, once for each version of the upstream's `centos_env` | a minute: the image is in the registry |
 | `linux` | `ubuntu-24.04`, in that image | about 1.5 h | 15–25 min (ccache) |
-| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client | about 1–1.5 h: the libraries come from the cache, the client compiles in full |
-| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | about 1.5–2 h: the same; the app is universal (arm64, x86-64) |
+| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client (2 h) | 20–40 min, estimated: the libraries and the client's compilations come from the caches |
+| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | 20–40 min, estimated: the same; the app is universal (arm64, x86-64) |
 
 Every build is in the Release configuration. The upstream's CI builds Debug, which is faster but not fit for users. The libraries are therefore built in their release variant too (`prepare.py` without `skip-release`); on macOS, Qt and tg_owt in that variant alone ([What the patch changes](#what-the-patch-changes)).
 
@@ -144,7 +144,9 @@ The Linux build runs in the upstream's own build environment, `Telegram/build/do
 A job runs for at most six hours. The libraries step stops earlier (Windows 250 min, macOS 210 min) so that what it built is saved; a first build that needs longer finishes in a second run. A failed job on `main` continues where it stopped after *Re-run failed jobs*:
 - the image's stages come from `buildcache`;
 - the libraries of Windows and macOS are saved even when a stage fails, and `prepare.py` skips the stages built already;
-- the Linux ccache is saved even when the compilation fails.
+- the compiler caches are saved even when the compilation fails.
+
+With the caches, a change of the upstream or of the patch compiles again only what it touches; a development and a server build differ in two source files.
 
 Since the repository is public, set *Settings → Actions → General → Fork pull request workflows* to require approval for all outside collaborators.
 
@@ -159,10 +161,19 @@ The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads 
 | Entry | Cap | Size | |
 |---|---|---|---|
 | `linux-ccache-…` | 1500 MB | 0.9 GB | a full Release build |
+| `windows-ccache-…` | 1500 MB | about 1 GB, estimated | the same |
+| `macos-ccache-…` | 2250 MB | about 1.5–2 GB, estimated: two architectures | the same |
 | `windows-libs-…` | 1750 MB | 1.2 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
 | `macos-libs-…` | 2000 MB | about 1–1.5 GB, estimated; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
 
 The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 9 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
+
+The compiler caches are ccache of `upstream.env`, the version of the upstream's Linux CI, on every system. The log of a build shows their statistics (hits, misses, size) and how long the client took.
+- Linux: the image's own ccache, as upstream has it.
+- Windows: CMake's compiler launcher for the Ninja generator (`CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`). ccache caches MSVC's compilations with precompiled headers too (sloppiness `pch_defines,time_macros`), which the client's own targets use: sccache gives up on those, and the client does not build without them. The client has no debug information (`CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=`, as in the upstream CI; no build ships a PDB), and rcc writes the upstream commit's date for its resources (`QT_RCC_SOURCE_DATE_OVERRIDE`) in place of each file's mtime, which every checkout changes.
+- macOS: Xcode's compiler launcher (`C_COMPILER_LAUNCHER`; CMake has none for the Xcode generator), for the compiles and the precompiled headers of both architectures. The precompiled headers leave out the mtimes of their headers (`-Xclang -fno-pch-timestamp`): Clang would refuse one from the cache after a fresh checkout. Xcode's stat cache of the SDK (`-ivfsstatcache`, in a folder of the runner's user) stays out of the hash.
+
+The paths are the same in every run (`D:\TBuild`, `/Users/runner/TBuild`, the workspace on Linux), so ccache needs no base directory, and no compile line holds a date or the ID of a run.
 
 To give a kind more room, raise its cap and lower another's by as much, here and in `ci/cache-budget.sh` (a test compares the two). A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. Raising the repository's cache limit in *Settings → Actions → Caches* is paid above 10 GB (ADR 0010 of the server repository).
 
@@ -185,12 +196,13 @@ ci/configure.sh dev                  # the development server; set SERVER_IPV4, 
 ci/build-linux.sh <image>            # Linux, in Docker: ghcr.io/sckraaa/pluma-desktop-linux-env:<tag of ci/linux-env.sh ref>
 ci/windows.sh libraries && ci/windows.sh client      # Windows, Visual Studio 2022 or 2026 with the 14.44 toolset, from Git Bash
 ci/macos.sh setup && ci/macos.sh libraries && ci/macos.sh client
+                                     # with CCACHE_DIR set, the client compiles through the ccache on the PATH
 ci/package.sh linux|windows|macos dev  # out/pluma-desktop-<version>-<system>-dev.*
 ```
 
 ## Updating the upstream
 
-1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks.
+1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks. A new ccache also needs the SHA-256 of its macOS and Windows archives in `ci/setup.sh`.
 2. Run `ci/fetch-upstream.sh sparse` and the tests.
 3. Remove the backports the new release already has: their edits no longer match.
 4. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.

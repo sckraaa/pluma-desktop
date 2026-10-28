@@ -8,7 +8,8 @@
 #                       a stage built already is skipped;
 #   macos.sh trim       removes what the client build does not need from the
 #                       libraries, before they are cached (as upstream);
-#   macos.sh client     the client in the Release configuration, unsigned:
+#   macos.sh client     the client in the Release configuration, unsigned,
+#                       through ccache when CCACHE_DIR is set (CI):
 #                       $UPSTREAM_DIR/out/Release/Telegram.app (ci/package.sh
 #                       signs it ad hoc).
 # $UPSTREAM_DIR is the patched checkout (ci/configure.sh). The paths of the
@@ -114,6 +115,23 @@ trim)
 	du -sh "$root/Libraries" "$root/ThirdParty"
 	;;
 client)
+	# ccache is Xcode's own compiler launcher (its C_COMPILER_LAUNCHER
+	# setting; CMake's launchers serve the Makefile and Ninja generators
+	# only), for the compiles and the precompiled headers of both
+	# architectures. The precompiled headers leave out the mtimes of their
+	# headers (-fno-pch-timestamp): after a fresh checkout Clang would refuse
+	# one from the cache, and one compiled anew is the same byte for byte,
+	# so the objects compiled with it are found as well.
+	cache=()
+	if [ -n "${CCACHE_DIR:-}" ]; then
+		if ! ccache=$(command -v ccache); then
+			echo "macos: CCACHE_DIR is set, but there is no ccache (ci/setup.sh ccache)" >&2
+			exit 1
+		fi
+		cache=(-D "CMAKE_XCODE_ATTRIBUTE_C_COMPILER_LAUNCHER=$ccache"
+			-D "CMAKE_XCODE_ATTRIBUTE_OTHER_PRECOMP_CFLAGS=-Xclang -fno-pch-timestamp")
+	fi
+	start=$(date +%s)
 	(
 		cd "$dir/Telegram"
 		./configure.sh \
@@ -122,9 +140,11 @@ client)
 			-D "TDESKTOP_API_ID=$PLUMA_API_ID" \
 			-D "TDESKTOP_API_HASH=$PLUMA_API_HASH" \
 			-D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
-			-D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+			-D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON \
+			${cache[@]+"${cache[@]}"}
 		cmake --build ../out --config Release --parallel
 	)
+	echo "macos: the client took $((($(date +%s) - start) / 60)) min"
 	app="$dir/out/Release/Telegram.app"
 	if [ ! -d "$app" ]; then
 		echo "macos: no $app" >&2

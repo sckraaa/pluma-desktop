@@ -11,7 +11,7 @@
 #                 hours, once);
 #   linux         the client, in that image, through ccache;
 #   windows       the libraries of Telegram/build/prepare/prepare.py, cached
-#                 by their state, then the client;
+#                 by their state, then the client through ccache;
 #   macos         the same on macOS; the app is signed ad hoc;
 #   prune-caches  keeps the newest cache of each kind.
 #
@@ -328,8 +328,54 @@ jobs:
             ${{ env.TBUILD }}\Libraries
             ${{ env.TBUILD }}\ThirdParty
           key: ${{ steps.state.outputs.key }}
+      # After the libraries, so none of their builds meets ccache.
+      - name: ccache
+        run: |
+          ci/setup.sh ccache
+          {
+            echo "CCACHE_DIR=$TBUILD\\ccache"
+            echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap windows-ccache)MB"
+            # Precompiled headers need these (README, Caches).
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
+          } >>"$GITHUB_ENV"
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            windows-ccache-${{ hashFiles('upstream.env') }}-
+            windows-ccache-
       - name: Build
-        run: ci/windows.sh client
+        id: build
+        run: |
+          ccache --zero-stats
+          ci/windows.sh client
+      - name: ccache statistics
+        id: ccache
+        if: always() && steps.build.outcome != 'skipped'
+        run: |
+          ccache --show-stats --verbose || true
+          misses=$(ccache --print-stats 2>/dev/null | tr -d '\r' | awk -F '\t' '$1 == "cache_miss" {print $2; exit}')
+          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+      # Saved even when the build fails, so a re-run picks up where it
+      # stopped; not saved again when nothing was compiled.
+      - name: Trim ccache
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        run: ccache --evict-older-than 1d || true
+      - name: Room for ccache
+        id: ccache-room
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/cache-budget.sh room windows-ccache "$(cygpath -u "$CCACHE_DIR")"
+      - name: Save ccache
+        if: always() && steps.ccache-room.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Package
         run: ci/package.sh windows "$PLUMA_TARGET"
       - name: Encrypt
@@ -423,8 +469,56 @@ jobs:
             /Users/runner/TBuild/Libraries
             /Users/runner/TBuild/ThirdParty
           key: ${{ steps.state.outputs.key }}
+      # After the libraries, so none of their builds meets ccache.
+      - name: ccache
+        run: |
+          ci/setup.sh ccache
+          {
+            echo "CCACHE_DIR=/Users/runner/TBuild/ccache"
+            echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap macos-ccache)MB"
+            # Precompiled headers need these; Xcode's stat cache of the SDK,
+            # in a folder of the runner's user, changes nothing compiled.
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
+            echo "CCACHE_IGNOREOPTIONS=-ivfsstatcache"
+          } >>"$GITHUB_ENV"
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: macos-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            macos-ccache-${{ hashFiles('upstream.env') }}-
+            macos-ccache-
       - name: Build
-        run: ci/macos.sh client
+        id: build
+        run: |
+          ccache --zero-stats
+          ci/macos.sh client
+      - name: ccache statistics
+        id: ccache
+        if: always() && steps.build.outcome != 'skipped'
+        run: |
+          ccache --show-stats --verbose || true
+          misses=$(ccache --print-stats 2>/dev/null | tr -d '\r' | awk -F '\t' '$1 == "cache_miss" {print $2; exit}')
+          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+      # Saved even when the build fails, so a re-run picks up where it
+      # stopped; not saved again when nothing was compiled.
+      - name: Trim ccache
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        run: ccache --evict-older-than 1d || true
+      - name: Room for ccache
+        id: ccache-room
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/cache-budget.sh room macos-ccache "$CCACHE_DIR"
+      - name: Save ccache
+        if: always() && steps.ccache-room.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: macos-ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Package
         run: ci/package.sh macos "$PLUMA_TARGET"
       - name: Encrypt
@@ -459,4 +553,4 @@ jobs:
       - name: Older caches
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ci/prune-caches.sh linux-ccache- windows-libs- macos-libs-
+        run: ci/prune-caches.sh linux-ccache- windows-ccache- macos-ccache- windows-libs- macos-libs-

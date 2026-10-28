@@ -7,7 +7,8 @@
 #                         checkout; a stage built already is skipped;
 #   windows.sh trim       removes what the client build does not need from
 #                         the libraries, before they are cached (as upstream);
-#   windows.sh client     the client in the Release configuration:
+#   windows.sh client     the client in the Release configuration, through
+#                         ccache when CCACHE_DIR is set (CI):
 #                         $UPSTREAM_DIR/out/Release/Telegram.exe.
 # $UPSTREAM_DIR is the patched checkout (ci/configure.sh). The paths of the
 # libraries end up in their cache keys, so CI keeps them the same from run to
@@ -108,9 +109,29 @@ trim)
 	df -h "$root"
 	;;
 client)
+	# ccache is CMake's compiler launcher for the Ninja generator. It caches
+	# MSVC's compilations with the precompiled headers of the client's own
+	# targets too (sccache gives up on those, and the client does not build
+	# without them). Without debug information, as in the upstream CI: no
+	# build ships a PDB, and in every object it would only grow the cache.
+	# rcc writes the upstream commit's date in place of each resource
+	# file's mtime, so a fresh checkout yields the same resource sources.
+	cache=
+	if [ -n "${CCACHE_DIR:-}" ]; then
+		if ! ccache=$(command -v ccache.exe); then
+			echo "windows: CCACHE_DIR is set, but there is no ccache (ci/setup.sh ccache)" >&2
+			exit 1
+		fi
+		ccache=$(cygpath -m "$ccache")
+		cache="-D CMAKE_C_COMPILER_LAUNCHER=$ccache -D CMAKE_CXX_COMPILER_LAUNCHER=$ccache"
+	fi
+	QT_RCC_SOURCE_DATE_OVERRIDE=$(git -C "$dir" log -1 --format=%ct)
+	export QT_RCC_SOURCE_DATE_OVERRIDE
+	start=$(date +%s)
 	in_vcvars "cd /d \"$windir\\Telegram\"" \
-		"call configure.bat -G \"Ninja Multi-Config\" qt6 -D TDESKTOP_API_ID=$PLUMA_API_ID -D TDESKTOP_API_HASH=$PLUMA_API_HASH -D CMAKE_CONFIGURATION_TYPES=Release -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON" \
+		"call configure.bat -G \"Ninja Multi-Config\" qt6 -D TDESKTOP_API_ID=$PLUMA_API_ID -D TDESKTOP_API_HASH=$PLUMA_API_HASH -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON $cache" \
 		"cmake --build ..\\out --config Release --parallel"
+	echo "windows: the client took $((($(date +%s) - start) / 60)) min"
 	exe="$dir/out/Release/Telegram.exe"
 	if [ ! -f "$exe" ]; then
 		echo "windows: no $exe" >&2

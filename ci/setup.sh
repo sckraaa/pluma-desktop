@@ -4,9 +4,10 @@
 # workflow steps:
 #   setup.sh age     age, to encrypt builds for a real server (Linux x86-64,
 #                    macOS arm64, Windows x86-64);
-#   setup.sh ccache  the ccache of upstream.env, for the statistics and the
-#                    trimming of the Linux cache (Linux x86-64; the compiler
-#                    runs through the image's own ccache, as upstream).
+#   setup.sh ccache  the ccache of upstream.env: on Linux x86-64 for the
+#                    statistics and the trimming of the cache (the compiler
+#                    runs through the image's own ccache, as upstream), on
+#                    macOS arm64 and Windows x86-64 for the client's build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
@@ -42,6 +43,18 @@ ccache/Linux_x86_64)
 	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-linux-x86_64-glibc.tar.xz
 	sha256=$CCACHE_SHA256
 	member=ccache-$CCACHE_VERSION-linux-x86_64-glibc/ccache
+	;;
+# The archives of ccache 4.13.6, the CCACHE_VERSION of upstream.env; an update
+# of it changes these too.
+ccache/Darwin_arm64)
+	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz
+	sha256=0274210ec9c9936ed5711d59b0de3167a51216a588ddde35f6bc828f366fe6d9
+	member=ccache-$CCACHE_VERSION-darwin/ccache
+	;;
+ccache/MINGW64_NT*_x86_64 | ccache/MSYS_NT*_x86_64)
+	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-windows-x86_64.zip
+	sha256=3d7cebb05850ad704e197b3f1d3f0f924ab6c9fdfc561578e146184fe9d89380
+	member=ccache-$CCACHE_VERSION-windows-x86_64/ccache.exe
 	;;
 *)
 	echo "setup: no pinned $tool for $platform" >&2

@@ -25,6 +25,8 @@ shift 2
 
 case $kind in
 linux-ccache) cap=1500 ;;
+windows-ccache) cap=1500 ;;
+macos-ccache) cap=2250 ;;
 windows-libs) cap=1750 ;;
 macos-libs) cap=2000 ;;
 *)
