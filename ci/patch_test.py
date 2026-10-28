@@ -2,6 +2,7 @@
 import io
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -255,6 +256,12 @@ DAMAGE = (
     (patch.PREPARE, "        mingw-w64-x86_64-gperf ^\n", "        mingw-w64-x86_64-gperf-git ^\n"),
     (patch.PREPARE, "'ThirdParty\\\\msys64\\\\mingw64\\\\bin'", "'ThirdParty\\\\msys64\\\\ucrt64\\\\bin'"),
     (patch.PREPARE, "    gyp dump_syms.gyp --format=msvs\n", "    gyp dump_syms.gyp --format=msvs --depth=.\n"),
+    # The macOS release variants: a Qt stage with another scope in between
+    # (as a later upstream has), a tg_owt that joins its Debug builds otherwise.
+    (patch.PREPARE, "    CONFIGURATIONS=-debug-and-release\nmac:\n",
+     "    CONFIGURATIONS=-debug-and-release\nmac_asserts:\n    ASSERTS=-force-asserts\nmac:\n"),
+    (patch.PREPARE, "    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a\n",
+     "    lipo -create Debug.*/libtg_owt.a -output Debug/libtg_owt.a\n"),
     (patch.PREPARE, "stage('python', \"\"\"\n",
      "stage('python', \"\"\"\nwin:\n    pacman -S --noconfirm mingw-w64-x86_64-cmake\n"),
     (patch.CMAKE_VARIABLES, "option(DESKTOP_APP_DISABLE_AUTOUPDATE ", "option(DESKTOP_APP_NO_AUTOUPDATE "),
@@ -303,6 +310,27 @@ DAMAGE = (
     (INSTANCE, "void Instance::Private::start() {\n",
      "void Instance::Private::start() {\n\t_domainResolver.reset(new details::DomainResolver(nullptr));\n"),
 )
+
+
+def prepare_scopes(text, part):
+    """The platform scopes (win, mac, ...) of the lines of part, a text of
+    one stage of prepare.py, as its filterByPlatform reads them: a line
+    "name:" opens a scope, a lone "release:" keeps the platform's, and the
+    lines before the first scope are common to all platforms."""
+    def scopes(lines, scope):
+        found = set()
+        for line in lines:
+            m = re.match(r"(!?)([a-z0-9_]+):", line)
+            if m and m.group(2) not in ("depends", "version"):
+                if m.group(2) != "release":
+                    scope = m.group(1) + m.group(2)
+            elif line.strip():
+                found.add(scope)
+        return found, scope
+
+    start = text.index(part)
+    _, scope = scopes(text[text.rindex("stage(", 0, start):start].split("\n")[1:], "common")
+    return scopes(part.split("\n"), scope)[0]
 
 
 def upstream_files():
@@ -417,6 +445,31 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(prepare.count("        mingw-w64-ucrt-x86_64-"), 5)
         self.assertNotIn("dump_syms.vcxproj", prepare)
         self.assertIn("xcodebuild -project dump_syms.xcodeproj", prepare)
+        # macOS: Qt and tg_owt in their release variants alone; Windows
+        # builds both, Qt with debug information, as before.
+        self.assertIn('release:\n    CONFIGURATIONS=-release\nmac:\n    rm -rf "$USED_PREFIX/Qt-$QT"\n'
+                      '    ./configure -prefix "$USED_PREFIX/Qt-$QT" \\\n        $CONFIGURATIONS \\\n'
+                      '        -opensource \\\n', prepare)
+        self.assertNotIn("Debug.x86_64/libtg_owt.a", prepare)
+        self.assertIn("lipo -create Release.arm64/libtg_owt.a Release.x86_64/libtg_owt.a", prepare)
+        self.assertIn("    SET CONFIGURATIONS=-debug-and-release\n", prepare)
+        self.assertEqual(prepare.count("-force-debug-info"), 2)
+
+    def test_build_edits_stay_in_their_platform(self):
+        """Each edit of prepare.py changes the commands of one platform only
+        (filterByPlatform's scopes), so the stage keys of the other platform,
+        and its cached libraries, stay as they are."""
+        tree, _ = self.run_patch()
+        pinned, patched = self.files[patch.PREPARE].decode("utf-8"), tree.read(patch.PREPARE)
+        scopes = []
+        for rel, old, new in patch.BUILD_EDITS:
+            if rel == patch.PREPARE:
+                old_scopes = prepare_scopes(pinned, old)
+                self.assertEqual(len(old_scopes), 1, old[:60])
+                if new:
+                    self.assertEqual(prepare_scopes(patched, new), old_scopes, new[:60])
+                scopes.append(old_scopes.pop())
+        self.assertEqual(scopes, ["win", "mac", "mac"])
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")

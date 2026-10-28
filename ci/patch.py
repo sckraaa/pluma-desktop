@@ -445,6 +445,46 @@ BUILD_EDITS = (
               "win:\n",
      "    ninja -C out/Release%FolderPostfix% common crash_generation_client exception_handler\n"
      "win:\n"),
+    # macOS: the Release client links the release variants of the libraries
+    # alone (cmake_helpers picks them by $<CONFIG>). The libraries took 20 GB
+    # after trimming, 4.8 GB in the cache, above all the debug builds of Qt
+    # and tg_owt and Qt's debug information, which serves symbol files of
+    # crash reports that Pluma compiles out. So Qt is built in its release
+    # variant alone, without -force-debug-info, into an emptied prefix (the
+    # files of a previous build would stay), and tg_owt without its Debug
+    # builds. The Windows libraries stay as they are.
+    (PREPARE, "    CONFIGURATIONS=-debug\n"
+              "release:\n"
+              "    CONFIGURATIONS=-debug-and-release\n"
+              "mac:\n"
+              "    ./configure -prefix \"$USED_PREFIX/Qt-$QT\" \\\n"
+              "        $CONFIGURATIONS \\\n"
+              "        -force-debug-info \\\n",
+     "    CONFIGURATIONS=-debug\n"
+     "release:\n"
+     "    CONFIGURATIONS=-release\n"
+     "mac:\n"
+     "    rm -rf \"$USED_PREFIX/Qt-$QT\"\n"
+     "    ./configure -prefix \"$USED_PREFIX/Qt-$QT\" \\\n"
+     "        $CONFIGURATIONS \\\n"),
+    (PREPARE, "".join(f"    mkdir Debug.{arch}\n"
+                      f"    cd Debug.{arch}\n"
+                      "    cmake \\\n"
+                      "        -DCMAKE_BUILD_TYPE=Debug \\\n"
+                      f"        -DCMAKE_OSX_ARCHITECTURES={arch} \\\n"
+                      "        -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF \\\n"
+                      "        -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \\\n"
+                      "        -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \\\n"
+                      "        -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \\\n"
+                      "        -DTG_OWT_OPUS_INCLUDE_PATH=$OPUS_PATH \\\n"
+                      "        -DTG_OWT_LIBVPX_INCLUDE_PATH=$LIBVPX_PATH \\\n"
+                      "        -DTG_OWT_OPENH264_INCLUDE_PATH=$OPENH264_PATH \\\n"
+                      "        -DTG_OWT_FFMPEG_INCLUDE_PATH=$FFMPEG_PATH ../..\n"
+                      "    cmake --build .\n"
+                      "    cd ..\n" for arch in ("x86_64", "arm64"))
+              + "    mkdir Debug\n"
+                "    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a\n",
+     ""),
 )
 
 
@@ -739,6 +779,13 @@ def verify(tree, c):
         raise PatchError(f"{PREPARE}: still asks MSYS2 for the msvcrt-based packages it removed")
     if "dump_syms.vcxproj" in prepare:
         raise PatchError(f"{PREPARE}: still builds breakpad's dump_syms on Windows")
+    # The macOS configure of Qt, up to the blank line after it.
+    start = prepare.find('    rm -rf "$USED_PREFIX/Qt-$QT"\n    ./configure -prefix "$USED_PREFIX/Qt-$QT"')
+    mac_qt = prepare[start:prepare.find("\n\n", start)] if start >= 0 else ""
+    if (not mac_qt or "-force-debug-info" in mac_qt
+            or "    CONFIGURATIONS=-debug-and-release\n" in prepare
+            or "Debug.arm64/libtg_owt.a" in prepare):
+        raise PatchError(f"{PREPARE}: still builds the debug variants of Qt or tg_owt on macOS")
     if f'constexpr auto AppName = "{c.app_name}"_cs;' not in tree.read(VERSION_H):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):

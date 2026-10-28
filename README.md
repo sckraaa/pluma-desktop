@@ -26,7 +26,9 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 
 - **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
   - tdesktop `b244f1b3`: `prepare.py` takes the UCRT packages of MSYS2 (`mingw-w64-ucrt-x86_64-*`) and a newer MSYS2 installer. MSYS2 removed the msvcrt-based `mingw-w64-x86_64-*` packages that 7.0.9 asks for, and the Windows libraries could not be built.
-- **Build script edits of Pluma's own** (`BUILD_EDITS`): on Windows, `prepare.py` does not build breakpad's `dump_syms`, which makes symbol files for Telegram's crash reports and needs ATL, missing from the image's MSVC 14.44 toolset. Pluma compiles crash reports out, and the upstream CI, building Debug only, never builds it either.
+- **Build script edits of Pluma's own** (`BUILD_EDITS`), each in the commands of one system, so the cached libraries of the other stay valid:
+  - Windows: `prepare.py` does not build breakpad's `dump_syms`, which makes symbol files for Telegram's crash reports and needs ATL, missing from the image's MSVC 14.44 toolset. Pluma compiles crash reports out, and the upstream CI, building Debug only, never builds it either.
+  - macOS: Qt and tg_owt (WebRTC) are built in their release variants alone, and Qt without `-force-debug-info`. The Release client links nothing else (cmake_helpers picks a library's variant by the configuration), and Qt's debug information serves symbol files for crash reports. These debug builds were the bulk of the 20 GB of macOS libraries (4.8 GB in the cache). Qt is installed into an emptied prefix, so a previous build leaves nothing behind there. The small debug builds of other stages stay as upstream has them.
 
 After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - no address in Telegram's published ranges and no MTProto key of Telegram's;
@@ -136,7 +138,7 @@ The jobs, and what a build takes:
 | `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client | about 1–1.5 h: the libraries come from the cache, the client compiles in full |
 | `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | about 1.5–2 h: the same; the app is universal (arm64, x86-64) |
 
-Every build is in the Release configuration. The upstream's CI builds Debug, which is faster but not fit for users. The libraries are therefore built in their release variant too (`prepare.py` without `skip-release`).
+Every build is in the Release configuration. The upstream's CI builds Debug, which is faster but not fit for users. The libraries are therefore built in their release variant too (`prepare.py` without `skip-release`); on macOS, Qt and tg_owt in that variant alone ([What the patch changes](#what-the-patch-changes)).
 
 The Linux build runs in the upstream's own build environment, `Telegram/build/docker/centos_env`: Rocky Linux 8 and every library, Qt included, built from source. `linux-env` builds that image and pushes it to `ghcr.io/sckraaa/pluma-desktop-linux-env`, tagged with the Git tree hash of the directory. The layers of every stage go to the `buildcache` tag, so an image for a changed `centos_env` rebuilds only the changed stages.
 

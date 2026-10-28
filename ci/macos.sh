@@ -2,9 +2,10 @@
 # Builds on macOS, as the upstream CI does:
 #   macos.sh setup      selects the Xcode of upstream.env and installs the
 #                       tools Telegram/build/prepare/prepare.py uses;
-#   macos.sh libraries  the libraries (universal, release and debug builds)
-#                       into ../Libraries and ../ThirdParty next to the
-#                       checkout; a stage built already is skipped;
+#   macos.sh libraries  the libraries (universal; Qt and tg_owt in their
+#                       release variants alone, ci/patch.py) into
+#                       ../Libraries and ../ThirdParty next to the checkout;
+#                       a stage built already is skipped;
 #   macos.sh trim       removes what the client build does not need from the
 #                       libraries, before they are cached (as upstream);
 #   macos.sh client     the client in the Release configuration, unsigned:
@@ -108,6 +109,8 @@ trim)
 	find "$root/Libraries" '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' \
 		-o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' \
 		-o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+	# What each stage leaves, in MB, the largest last.
+	du -sm "$root"/Libraries/* "$root"/Libraries/local/* 2>/dev/null | sort -n | tail -n 12 || true
 	du -sh "$root/Libraries" "$root/ThirdParty"
 	;;
 client)
