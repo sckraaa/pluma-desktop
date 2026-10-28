@@ -169,7 +169,7 @@ The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads 
 The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 9 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
 
 The compiler caches are ccache of `upstream.env`, the version of the upstream's Linux CI, on every system. The log of a build shows their statistics (hits, misses, size) and how long the client took.
-- Linux: the image's own ccache, as upstream has it.
+- Linux: the static build of that ccache, mounted in the image in place of the image's ccache 3.7.7 (EPEL 8). ccache 3 keeps each sixteenth of the cache within a sixteenth of the cap, so it evicted the precompiled headers as soon as it stored them, and 70% of the compilations of a rebuild missed; ccache 4.8 and newer clean by the size of the whole cache. Upstream's CI keeps the image's ccache, with the image's cap of 20 GB.
 - Windows: CMake's compiler launcher for the Ninja generator (`CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`). ccache caches MSVC's compilations with precompiled headers too (sloppiness `pch_defines,time_macros`), which the client's own targets use: sccache gives up on those, and the client does not build without them. The client has no debug information (`CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=`, as in the upstream CI; no build ships a PDB), and rcc writes the upstream commit's date for its resources (`QT_RCC_SOURCE_DATE_OVERRIDE`) in place of each file's mtime, which every checkout changes.
 - macOS: Xcode's compiler launcher (`C_COMPILER_LAUNCHER`; CMake has none for the Xcode generator), for the compiles and the precompiled headers of both architectures. The precompiled headers leave out the mtimes of their headers (`-Xclang -fno-pch-timestamp`): Clang would refuse one from the cache after a fresh checkout. Xcode's stat cache of the SDK stays off (`SDK_STAT_CACHE_ENABLE=NO`): its path, in a folder of the runner's user, would be in every compile line (`-ivfsstatcache`) and in the names of the folders of the precompiled headers.
 
@@ -202,7 +202,7 @@ ci/package.sh linux|windows|macos dev  # out/pluma-desktop-<version>-<system>-de
 
 ## Updating the upstream
 
-1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks. A new ccache also needs the SHA-256 of its macOS and Windows archives in `ci/setup.sh`.
+1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks. A new ccache also needs the SHA-256 of its archives in `ci/setup.sh`: the static Linux build, macOS and Windows.
 2. Run `ci/fetch-upstream.sh sparse` and the tests.
 3. Remove the backports the new release already has: their edits no longer match.
 4. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.

@@ -5,10 +5,15 @@
 # is $UPSTREAM_DIR/out/Release/Telegram; ci/package.sh linux packs it.
 #
 # The compiler runs through ccache in $CCACHE_DIR (default ./.ccache), which
-# the workflow keeps in the GitHub Actions cache.
+# the workflow keeps in the GitHub Actions cache: the static ccache of
+# upstream.env from the PATH (ci/setup.sh ccache) in place of the image's
+# ccache 3.7.7. That one keeps each sixteenth of the cache within a sixteenth
+# of CCACHE_MAXSIZE, so it evicts a precompiled header larger than that as
+# soon as it stores it, and every file built with the header misses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./config/app.env
+. ./upstream.env
 image=${1:?usage: build-linux.sh <image>}
 dir=$(cd "${UPSTREAM_DIR:-upstream}" && pwd)
 ccache_dir=${CCACHE_DIR:-$PWD/.ccache}
@@ -16,6 +21,10 @@ mkdir -p "$ccache_dir"
 
 if [ ! -f "$dir/pluma-patch.txt" ]; then
 	echo "build-linux: $dir is not patched (ci/configure.sh)" >&2
+	exit 1
+fi
+if ! ccache=$(command -v ccache) || ! "$ccache" --version | head -n 1 | grep -qxF "ccache version $CCACHE_VERSION"; then
+	echo "build-linux: no ccache $CCACHE_VERSION on the PATH (ci/setup.sh ccache)" >&2
 	exit 1
 fi
 
@@ -37,6 +46,7 @@ docker run --rm \
 	-u "$(id -u)" \
 	-v "$dir:/usr/src/tdesktop" \
 	-v "$ccache_dir:/var/cache/ccache" \
+	-v "$ccache:/usr/bin/ccache:ro" \
 	-e CONFIG=Release \
 	-e CCACHE_SLOPPINESS=pch_defines,time_macros \
 	-e CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-3G}" \

@@ -4,10 +4,10 @@
 # workflow steps:
 #   setup.sh age     age, to encrypt builds for a real server (Linux x86-64,
 #                    macOS arm64, Windows x86-64);
-#   setup.sh ccache  the ccache of upstream.env: on Linux x86-64 for the
-#                    statistics and the trimming of the cache (the compiler
-#                    runs through the image's own ccache, as upstream), on
-#                    macOS arm64 and Windows x86-64 for the client's build.
+#   setup.sh ccache  the ccache of upstream.env, for the client's build: on
+#                    Linux x86-64 its static build, which ci/build-linux.sh
+#                    also runs in the build image; on macOS arm64 and Windows
+#                    x86-64.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
@@ -39,13 +39,13 @@ age/MINGW64_NT*_x86_64 | age/MSYS_NT*_x86_64)
 	sha256=f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7
 	member=age/age.exe
 	;;
-ccache/Linux_x86_64)
-	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-linux-x86_64-glibc.tar.xz
-	sha256=$CCACHE_SHA256
-	member=ccache-$CCACHE_VERSION-linux-x86_64-glibc/ccache
-	;;
 # The archives of ccache 4.13.6, the CCACHE_VERSION of upstream.env; an update
 # of it changes these too.
+ccache/Linux_x86_64)
+	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-linux-x86_64-musl-static.tar.xz
+	sha256=156ec57c5198cc849d92834023d09910b83dc5504c6cf405d09e6ae7b208a3e5
+	member=ccache-$CCACHE_VERSION-linux-x86_64-musl-static/ccache
+	;;
 ccache/Darwin_arm64)
 	url=https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz
 	sha256=0274210ec9c9936ed5711d59b0de3167a51216a588ddde35f6bc828f366fe6d9
