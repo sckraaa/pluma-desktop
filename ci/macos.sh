@@ -124,13 +124,23 @@ client)
 	# so the objects compiled with it are found as well. Xcode's stat cache
 	# of the SDK stays off: its path, in a folder of the runner's user,
 	# would be in every compile line and in the names of the precompiled
-	# headers' folders.
+	# headers' folders. ccache knows the compiler by the build of its Xcode:
+	# images of the runner install the same Xcode with other mtimes, and by
+	# its default check (the compiler's mtime and size) every compile missed
+	# on an image other than the one that filled the cache.
 	cache=()
 	if [ -n "${CCACHE_DIR:-}" ]; then
 		if ! ccache=$(command -v ccache); then
 			echo "macos: CCACHE_DIR is set, but there is no ccache (ci/setup.sh ccache)" >&2
 			exit 1
 		fi
+		build=$(xcodebuild -version | awk '/^Build version / {print $3}')
+		if [ -z "$build" ]; then
+			echo "macos: xcodebuild -version shows no build version" >&2
+			exit 1
+		fi
+		export CCACHE_COMPILERCHECK="string:Xcode $XCODE_VERSION ($build)"
+		echo "macos: ccache knows the compiler as Xcode $XCODE_VERSION ($build)"
 		cache=(-D "CMAKE_XCODE_ATTRIBUTE_C_COMPILER_LAUNCHER=$ccache"
 			-D "CMAKE_XCODE_ATTRIBUTE_OTHER_PRECOMP_CFLAGS=-Xclang -fno-pch-timestamp"
 			-D CMAKE_XCODE_ATTRIBUTE_SDK_STAT_CACHE_ENABLE=NO)

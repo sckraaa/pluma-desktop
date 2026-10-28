@@ -116,7 +116,12 @@ client)
 	# build ships a PDB, and in every object it would only grow the cache.
 	# rcc writes the upstream commit's date in place of each resource
 	# file's mtime, so a fresh checkout yields the same resource sources.
+	# ccache knows the compiler by the full version of the toolset and its
+	# target, which vcvarsall.bat sets, not by the mtime and size of cl.exe
+	# (its default check): another image of the runner may install the same
+	# compiler with other mtimes, as the macOS images do with Xcode.
 	cache=
+	check=()
 	if [ -n "${CCACHE_DIR:-}" ]; then
 		if ! ccache=$(command -v ccache.exe); then
 			echo "windows: CCACHE_DIR is set, but there is no ccache (ci/setup.sh ccache)" >&2
@@ -124,11 +129,15 @@ client)
 		fi
 		ccache=$(cygpath -m "$ccache")
 		cache="-D CMAKE_C_COMPILER_LAUNCHER=$ccache -D CMAKE_CXX_COMPILER_LAUNCHER=$ccache"
+		check=('if not defined VCToolsVersion (echo windows: vcvarsall.bat set no VCToolsVersion & exit /b 1)'
+			'if not defined VSCMD_ARG_TGT_ARCH (echo windows: vcvarsall.bat set no VSCMD_ARG_TGT_ARCH & exit /b 1)'
+			'set "CCACHE_COMPILERCHECK=string:MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%"'
+			'echo windows: ccache knows the compiler as MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%')
 	fi
 	QT_RCC_SOURCE_DATE_OVERRIDE=$(git -C "$dir" log -1 --format=%ct)
 	export QT_RCC_SOURCE_DATE_OVERRIDE
 	start=$(date +%s)
-	in_vcvars "cd /d \"$windir\\Telegram\"" \
+	in_vcvars ${check[@]+"${check[@]}"} "cd /d \"$windir\\Telegram\"" \
 		"call configure.bat -G \"Ninja Multi-Config\" qt6 -D TDESKTOP_API_ID=$PLUMA_API_ID -D TDESKTOP_API_HASH=$PLUMA_API_HASH -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON $cache" \
 		"cmake --build ..\\out --config Release --parallel"
 	echo "windows: the client took $((($(date +%s) - start) / 60)) min"
