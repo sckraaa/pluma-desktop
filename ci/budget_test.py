@@ -57,9 +57,15 @@ class BudgetTest(unittest.TestCase):
 
 
 class AdmitTest(unittest.TestCase):
-    """cache-budget.sh admit against a fake gh."""
+    """cache-budget.sh admit against a fake gh. Sizes are in MB, relative to
+    the caps and the reserve of the script."""
 
     MAIN = "refs/heads/main"
+
+    def setUp(self):
+        self.cap = caps()["macos-libs"]
+        self.windows_cap = caps()["windows-libs"]
+        self.reserve = reserve()
 
     def admit(self, kind, mb, entries):
         """Runs admit with the cache holding entries, [(id, key, ref, MB)].
@@ -83,16 +89,18 @@ class AdmitTest(unittest.TestCase):
             save = re.fullmatch(r"save=(true|false)\n", output).group(1) == "true"
             return save, (d / "deleted").read_text().split(), run.stdout
 
-    def entries(self, macos_libs=4816, windows_libs=1198):
-        """The cache as it is before the first run of the caps."""
+    def entries(self, macos_libs=None, windows_libs=None):
+        """A cache with an entry of macos-libs to supersede, by default
+        4816 MB, as it was with the debug builds of Qt and tg_owt, and the
+        other kinds within their caps."""
         return [
-            (1, "macos-libs-151cea36f83f14c8-1446d4164b2bfce8", self.MAIN, macos_libs),
-            (2, "windows-libs-151cea36f83f14c8-3513a4cfab44c63f", self.MAIN, windows_libs),
-            (3, "linux-ccache-765a3d46-40551444062-1", self.MAIN, 888),
+            (1, "macos-libs-151cea36f83f14c8-1446d4164b2bfce8", self.MAIN, macos_libs or 4816),
+            (2, "windows-libs-151cea36f83f14c8-3513a4cfab44c63f", self.MAIN, windows_libs or self.windows_cap - 300),
+            (3, "linux-ccache-765a3d46-40551444062-1", self.MAIN, caps()["linux-ccache"] - 600),
         ]
 
     def test_within_cap(self):
-        save, deleted, out = self.admit("macos-libs", 1300, self.entries())
+        save, deleted, out = self.admit("macos-libs", self.cap - 300, self.entries())
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
         self.assertNotIn("::error::", out)
@@ -100,40 +108,46 @@ class AdmitTest(unittest.TestCase):
     def test_over_cap_in_place_of_a_larger_entry(self):
         # The old entry is over the cap itself: keeping it would let the
         # cache pass 10 GB once the compiler caches are saved.
-        save, deleted, out = self.admit("macos-libs", 3500, self.entries())
+        mb = self.cap + self.reserve + 500
+        self.assertLess(mb, 4816)
+        save, deleted, out = self.admit("macos-libs", mb, self.entries())
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
         self.assertIn("::error::", out)
 
     def test_over_cap_within_the_reserve(self):
-        save, deleted, out = self.admit("macos-libs", 2900, self.entries(macos_libs=1900))
+        save, deleted, out = self.admit("macos-libs", self.cap + self.reserve - 100,
+                                        self.entries(macos_libs=self.cap - 100))
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
         self.assertIn("::error::", out)
 
     def test_over_cap_past_the_reserve(self):
-        save, deleted, out = self.admit("macos-libs", 3100, self.entries(macos_libs=1900))
+        save, deleted, out = self.admit("macos-libs", self.cap + self.reserve + 100,
+                                        self.entries(macos_libs=self.cap - 100))
         self.assertFalse(save)
         self.assertEqual(deleted, [])
         self.assertIn("::error::", out)
 
     def test_overruns_of_other_kinds(self):
-        # windows-libs is 750 MB over its cap: 300 MB more do not fit.
-        save, deleted, _ = self.admit("macos-libs", 2300, self.entries(macos_libs=1900, windows_libs=2500))
+        # windows-libs is 750 MB over its cap: then an overrun of 300 MB does
+        # not fit in the reserve, and one of 200 MB does.
+        entries = self.entries(macos_libs=self.cap - 100, windows_libs=self.windows_cap + 750)
+        save, deleted, _ = self.admit("macos-libs", self.cap + self.reserve - 750 + 50, entries)
         self.assertFalse(save)
         self.assertEqual(deleted, [])
-        save, deleted, _ = self.admit("macos-libs", 2200, self.entries(macos_libs=1900, windows_libs=2500))
+        save, deleted, _ = self.admit("macos-libs", self.cap + self.reserve - 750 - 50, entries)
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
 
     def test_other_branches_count_whole(self):
-        entries = self.entries(macos_libs=1900) + [
-            (4, "macos-libs-151cea36f83f14c8-0000000000000000", "refs/pull/7/merge", 800),
+        entries = self.entries(macos_libs=self.cap - 100) + [
+            (4, "macos-libs-151cea36f83f14c8-0000000000000000", "refs/pull/7/merge", self.reserve - 200),
             (5, "windows-ccache-765a3d46-1-1", "refs/heads/topic", 100)]
-        save, deleted, _ = self.admit("macos-libs", 2100, entries)
+        save, deleted, _ = self.admit("macos-libs", self.cap + 100, entries)
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
-        save, deleted, _ = self.admit("macos-libs", 2200, entries)
+        save, deleted, _ = self.admit("macos-libs", self.cap + 200, entries)
         self.assertFalse(save)
         self.assertEqual(deleted, [])
 
