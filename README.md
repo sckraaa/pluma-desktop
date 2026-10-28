@@ -56,7 +56,6 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_SERVER_IPV6` | Optional. The server's IPv6 address. |
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Builds for a server](#builds-for-a-server). |
-| `PLUMA_CCACHE_SIZE` | Optional. The size of the Linux ccache, `3G` by default ([Caches](#caches)). |
 
 None of these values is a secret: every build carries them. They have the same names as in `pluma-android` and `pluma-ios`.
 
@@ -142,7 +141,7 @@ Every build is in the Release configuration. The upstream's CI builds Debug, whi
 
 The Linux build runs in the upstream's own build environment, `Telegram/build/docker/centos_env`: Rocky Linux 8 and every library, Qt included, built from source. `linux-env` builds that image and pushes it to `ghcr.io/sckraaa/pluma-desktop-linux-env`, tagged with the Git tree hash of the directory. The layers of every stage go to the `buildcache` tag, so an image for a changed `centos_env` rebuilds only the changed stages.
 
-A job runs for at most six hours. The libraries step stops earlier (Windows 250 min, macOS 210 min) so that what it built is saved; a first build that needs longer finishes in a second run. A failed job continues where it stopped after *Re-run failed jobs*:
+A job runs for at most six hours. The libraries step stops earlier (Windows 250 min, macOS 210 min) so that what it built is saved; a first build that needs longer finishes in a second run. A failed job on `main` continues where it stopped after *Re-run failed jobs*:
 - the image's stages come from `buildcache`;
 - the libraries of Windows and macOS are saved even when a stage fails, and `prepare.py` skips the stages built already;
 - the Linux ccache is saved even when the compilation fails.
@@ -151,17 +150,21 @@ Since the repository is public, set *Settings → Actions → General → Fork p
 
 ## Caches
 
-The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. The `prune-caches` job keeps the newest entry of each kind and prints the usage, with a warning above 9 GB.
+The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above 10 GB GitHub evicts the entries read least recently, whichever system's they are, so the entries keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)) at every moment:
+- each kind of entry has a cap, and the caps add up to 9 GB;
+- before a job saves an entry, it measures it and deletes the entries of the kind that the new one supersedes, so a kind never has two entries, not even while one is saved. This takes `actions: write` in the build jobs; only that step gets the token;
+- a ccache never grows past its cap (`CCACHE_MAXSIZE`); libraries over theirs are not saved, and the run shows an error;
+- only runs on `main` save entries. Pull requests and runs on other branches restore those of `main`.
 
-| Entry | Expected size |
-|---|---|
-| `linux-ccache-…` | up to 2.5 GB (`PLUMA_CCACHE_SIZE`, 3G by default, compressed) |
-| `windows-libs-…` | about 2 GB: the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
-| `macos-libs-…` | about 2 GB: the same, universal |
+| Entry | Cap | Size | |
+|---|---|---|---|
+| `linux-ccache-…` | 1500 MB | 0.9 GB | a full Release build |
+| `windows-libs-…` | 1750 MB | 1.2 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
+| `macos-libs-…` | 2000 MB | about 1–1.5 GB, estimated; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
 
-Together they take about 6.5 GB, and briefly more while a new entry of a kind exists next to the old one. The image lives in the container registry, outside the cache. The upstream's own entries are smaller: its CI builds the Debug variants only.
+The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 9 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
 
-If `prune-caches` warns all the same, lower `PLUMA_CCACHE_SIZE`, or raise the repository's cache limit in *Settings → Actions → Caches* (paid above 10 GB, ADR 0010 of the server repository).
+To give a kind more room, raise its cap and lower another's by as much, here and in `ci/cache-budget.sh` (a test compares the two). A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. Raising the repository's cache limit in *Settings → Actions → Caches* is paid above 10 GB (ADR 0010 of the server repository).
 
 ## Local build
 

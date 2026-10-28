@@ -138,13 +138,15 @@ jobs:
     concurrency:
       group: desktop-linux-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # actions: write deletes the cache entry a new one supersedes
+    # (ci/cache-budget.sh); only that step gets the token.
     permissions:
+      actions: write
       contents: read
       packages: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: ${{ vars.PLUMA_CCACHE_SIZE || '3G' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +170,7 @@ jobs:
         run: |
           ci/setup.sh ccache
           ci/setup.sh age
+          echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap linux-ccache)MB" >>"$GITHUB_ENV"
       - name: Restore ccache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -196,12 +199,20 @@ jobs:
           misses=$(ccache --print-stats 2>/dev/null | sed -n 's/^cache_miss\t//p' | head -n 1)
           echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
       # Saved even when the build fails, so a re-run picks up where it
-      # stopped; not saved again when nothing was compiled.
+      # stopped; not saved again when nothing was compiled. Only main saves
+      # caches, in place of the entry the new one supersedes (README, Caches).
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.event_name != 'pull_request'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
         run: ccache --evict-older-than 1d || true
+      - name: Room for ccache
+        id: ccache-room
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/cache-budget.sh room linux-ccache .ccache
       - name: Save ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.event_name != 'pull_request'
+        if: always() && steps.ccache-room.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
@@ -230,6 +241,11 @@ jobs:
     concurrency:
       group: desktop-windows-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # actions: write deletes the cache entry a new one supersedes
+    # (ci/cache-budget.sh); only that step gets the token.
+    permissions:
+      actions: write
+      contents: read
     defaults:
       run:
         shell: bash
@@ -286,7 +302,8 @@ jobs:
         timeout-minutes: 250
         run: ci/windows.sh libraries
       # Saved even when a stage fails, so a re-run picks up at that stage;
-      # not saved again when nothing changed.
+      # not saved again when nothing changed. Only main saves caches, in
+      # place of the entry the new one supersedes (README, Caches).
       - name: Trim the libraries
         id: state
         if: always() && steps.libraries.outcome != 'skipped'
@@ -294,8 +311,17 @@ jobs:
           ci/windows.sh trim
           tbuild=$(dirname "$UPSTREAM_DIR")
           echo "key=windows-libs-${{ steps.keys.outputs.prepare }}-$(ci/cache-key.sh state "$tbuild/Libraries/win64" "$tbuild/ThirdParty")" >>"$GITHUB_OUTPUT"
+      - name: Room for the libraries
+        id: room
+        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tbuild=$(dirname "$UPSTREAM_DIR")
+          ci/cache-budget.sh room windows-libs "$tbuild/Libraries" "$tbuild/ThirdParty"
       - name: Save the libraries
-        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.event_name != 'pull_request'
+        if: always() && steps.room.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -328,6 +354,11 @@ jobs:
     concurrency:
       group: desktop-macos-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # actions: write deletes the cache entry a new one supersedes
+    # (ci/cache-budget.sh); only that step gets the token.
+    permissions:
+      actions: write
+      contents: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
       # The paths of the libraries are part of their cache keys
@@ -369,15 +400,23 @@ jobs:
         timeout-minutes: 210
         run: ci/macos.sh libraries
       # Saved even when a stage fails, so a re-run picks up at that stage;
-      # not saved again when nothing changed.
+      # not saved again when nothing changed. Only main saves caches, in
+      # place of the entry the new one supersedes (README, Caches).
       - name: Trim the libraries
         id: state
         if: always() && steps.libraries.outcome != 'skipped'
         run: |
           ci/macos.sh trim
           echo "key=macos-libs-${{ steps.keys.outputs.prepare }}-$(ci/cache-key.sh state /Users/runner/TBuild/Libraries /Users/runner/TBuild/ThirdParty)" >>"$GITHUB_OUTPUT"
+      - name: Room for the libraries
+        id: room
+        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/cache-budget.sh room macos-libs /Users/runner/TBuild/Libraries /Users/runner/TBuild/ThirdParty
       - name: Save the libraries
-        if: always() && steps.state.outputs.key != '' && steps.state.outputs.key != steps.restore.outputs.cache-matched-key && github.event_name != 'pull_request'
+        if: always() && steps.room.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
