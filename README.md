@@ -155,7 +155,7 @@ Since the repository is public, set *Settings → Actions → General → Fork p
 The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above 10 GB GitHub evicts the entries read least recently, whichever system's they are, so the entries keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)) at every moment:
 - each kind of entry has a cap, and the caps add up to 9 GB;
 - before a job saves an entry, it measures it and deletes the entries of the kind that the new one supersedes, so a kind never has two entries, not even while one is saved. This takes `actions: write` in the build jobs; only that step gets the token;
-- a ccache never grows past its cap (`CCACHE_MAXSIZE`); libraries over theirs are not saved, and the run shows an error;
+- a ccache never grows past its cap (`CCACHE_MAXSIZE`). An entry over its cap is an error of the run, and is saved only where the cache cannot pass 10 GB by it: in place of entries that take as much or more, or when its overrun and those of the other entries fit in the 1 GB the caps leave free (entries of other branches count whole);
 - only runs on `main` save entries. Pull requests and runs on other branches restore those of `main`.
 
 | Entry | Cap | Size | |
@@ -175,7 +175,7 @@ The compiler caches are ccache of `upstream.env`, the version of the upstream's 
 
 The paths are the same in every run (`D:\TBuild`, `/Users/runner/TBuild`, the workspace on Linux), so ccache needs no base directory, and no compile line holds a date or the ID of a run.
 
-To give a kind more room, raise its cap and lower another's by as much, here and in `ci/cache-budget.sh` (a test compares the two). A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. Raising the repository's cache limit in *Settings → Actions → Caches* is paid above 10 GB (ADR 0010 of the server repository).
+To give a kind more room, raise its cap and lower another's by as much, here and in `ci/cache-budget.sh` (a test compares the two). A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap that are not saved are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. Raising the repository's cache limit in *Settings → Actions → Caches* is paid above 10 GB (ADR 0010 of the server repository).
 
 ## Local build
 
