@@ -39,6 +39,15 @@ for attempt in 1 2 3; do
 	sleep $((attempt * 15))
 done
 
+# The stats log of the build (CCACHE_STATSLOG, ci/ccache-stats.sh) is
+# written in the image to its folder on the runner, which holds nothing else.
+stats=()
+if [ -n "${CCACHE_STATSLOG:-}" ]; then
+	stats_dir=$(dirname "$CCACHE_STATSLOG")
+	mkdir -p "$stats_dir"
+	stats=(-v "$stats_dir:/var/log/ccache" -e "CCACHE_STATSLOG=/var/log/ccache/$(basename "$CCACHE_STATSLOG")")
+fi
+
 # The flags of the Release configuration, with the one ccache needs to reuse
 # precompiled headers (as the upstream CI does for Debug).
 release_flags="-O3 -DNDEBUG -fpch-preprocess"
@@ -47,6 +56,7 @@ docker run --rm \
 	-v "$dir:/usr/src/tdesktop" \
 	-v "$ccache_dir:/var/cache/ccache" \
 	-v "$ccache:/usr/bin/ccache:ro" \
+	${stats[@]+"${stats[@]}"} \
 	-e CONFIG=Release \
 	-e CCACHE_SLOPPINESS=pch_defines,time_macros \
 	-e CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-3G}" \

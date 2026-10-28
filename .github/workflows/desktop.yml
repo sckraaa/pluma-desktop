@@ -170,7 +170,10 @@ jobs:
         run: |
           ci/setup.sh ccache
           ci/setup.sh age
-          echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap linux-ccache)MB" >>"$GITHUB_ENV"
+          {
+            echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap linux-ccache)MB"
+            echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-log/stats.log"
+          } >>"$GITHUB_ENV"
       - name: Restore ccache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -194,10 +197,7 @@ jobs:
       - name: ccache statistics
         id: ccache
         if: always() && steps.build.outcome != 'skipped'
-        run: |
-          ccache --show-stats || true
-          misses=$(ccache --print-stats 2>/dev/null | sed -n 's/^cache_miss\t//p' | head -n 1)
-          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+        run: ci/ccache-stats.sh
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled. Only main saves
       # caches, in place of the entry the new one supersedes (README, Caches).
@@ -332,9 +332,13 @@ jobs:
       - name: ccache
         run: |
           ci/setup.sh ccache
+          # ccache writes the stats log of the build (ci/ccache-stats.sh)
+          # into an existing folder only.
+          mkdir -p "$(cygpath -u "$RUNNER_TEMP")/ccache-log"
           {
             echo "CCACHE_DIR=$TBUILD\\ccache"
             echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap windows-ccache)MB"
+            echo "CCACHE_STATSLOG=$RUNNER_TEMP\\ccache-log\\stats.log"
             # Precompiled headers need these (README, Caches).
             echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
           } >>"$GITHUB_ENV"
@@ -354,10 +358,7 @@ jobs:
       - name: ccache statistics
         id: ccache
         if: always() && steps.build.outcome != 'skipped'
-        run: |
-          ccache --show-stats --verbose || true
-          misses=$(ccache --print-stats 2>/dev/null | tr -d '\r' | awk -F '\t' '$1 == "cache_miss" {print $2; exit}')
-          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+        run: ci/ccache-stats.sh
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
@@ -473,9 +474,13 @@ jobs:
       - name: ccache
         run: |
           ci/setup.sh ccache
+          # ccache writes the stats log of the build (ci/ccache-stats.sh)
+          # into an existing folder only.
+          mkdir -p "$RUNNER_TEMP/ccache-log"
           {
             echo "CCACHE_DIR=/Users/runner/TBuild/ccache"
             echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap macos-ccache)MB"
+            echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-log/stats.log"
             # Precompiled headers need these (README, Caches).
             echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
           } >>"$GITHUB_ENV"
@@ -495,10 +500,7 @@ jobs:
       - name: ccache statistics
         id: ccache
         if: always() && steps.build.outcome != 'skipped'
-        run: |
-          ccache --show-stats --verbose || true
-          misses=$(ccache --print-stats 2>/dev/null | tr -d '\r' | awk -F '\t' '$1 == "cache_miss" {print $2; exit}')
-          echo "misses=${misses:-0}" >>"$GITHUB_OUTPUT"
+        run: ci/ccache-stats.sh
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
