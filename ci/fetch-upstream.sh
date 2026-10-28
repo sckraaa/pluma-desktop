@@ -103,7 +103,16 @@ sparse)
 	;;
 full)
 	fetch_commit "$dir" "$UPSTREAM_REPO" "$UPSTREAM_REF" </dev/null
-	retry with_timeout 30m git -C "$dir" submodule update -q --init --recursive --depth 1 --jobs 4
+	# Git clones every submodule first and checks them out after; a clone
+	# that fails stops it before the checkouts. A plain retry then skips a
+	# submodule whose fresh clone already has the recorded commit as HEAD,
+	# and leaves its work tree empty: --force checks out each one anyway.
+	retry with_timeout 30m git -C "$dir" submodule update -q --init --recursive --force --depth 1 --jobs 4
+	# Every submodule is checked out: its index is its commit. The command
+	# runs in each submodule, where git sets $displaypath.
+	# shellcheck disable=SC2016
+	git -C "$dir" submodule foreach --recursive --quiet \
+		'git diff --cached --quiet --ignore-submodules=all || { echo "fetch-upstream: $displaypath is not checked out" >&2; exit 1; }'
 	;;
 esac
 echo "fetch-upstream: $UPSTREAM_TAG ($UPSTREAM_REF), $mode, in $dir"
