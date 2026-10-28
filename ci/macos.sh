@@ -121,7 +121,10 @@ client)
 	# architectures. The precompiled headers leave out the mtimes of their
 	# headers (-fno-pch-timestamp): after a fresh checkout Clang would refuse
 	# one from the cache, and one compiled anew is the same byte for byte,
-	# so the objects compiled with it are found as well.
+	# so the objects compiled with it are found as well. Xcode's stat cache
+	# of the SDK stays off: its path, in a folder of the runner's user,
+	# would be in every compile line and in the names of the precompiled
+	# headers' folders.
 	cache=()
 	if [ -n "${CCACHE_DIR:-}" ]; then
 		if ! ccache=$(command -v ccache); then
@@ -129,7 +132,8 @@ client)
 			exit 1
 		fi
 		cache=(-D "CMAKE_XCODE_ATTRIBUTE_C_COMPILER_LAUNCHER=$ccache"
-			-D "CMAKE_XCODE_ATTRIBUTE_OTHER_PRECOMP_CFLAGS=-Xclang -fno-pch-timestamp")
+			-D "CMAKE_XCODE_ATTRIBUTE_OTHER_PRECOMP_CFLAGS=-Xclang -fno-pch-timestamp"
+			-D CMAKE_XCODE_ATTRIBUTE_SDK_STAT_CACHE_ENABLE=NO)
 	fi
 	start=$(date +%s)
 	(

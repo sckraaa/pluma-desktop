@@ -476,10 +476,8 @@ jobs:
           {
             echo "CCACHE_DIR=/Users/runner/TBuild/ccache"
             echo "CCACHE_MAXSIZE=$(ci/cache-budget.sh cap macos-ccache)MB"
-            # Precompiled headers need these; Xcode's stat cache of the SDK,
-            # in a folder of the runner's user, changes nothing compiled.
+            # Precompiled headers need these (README, Caches).
             echo "CCACHE_SLOPPINESS=pch_defines,time_macros"
-            echo "CCACHE_IGNOREOPTIONS=-ivfsstatcache"
           } >>"$GITHUB_ENV"
       - name: Restore ccache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
