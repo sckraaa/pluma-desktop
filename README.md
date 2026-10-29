@@ -22,7 +22,8 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - macOS: the bundle ID `chat.pluma.desktop`;
   - Linux: the application ID `chat.pluma.desktop` (Wayland `app_id`, D-Bus name, the `.desktop` file), and no look into `~/.TelegramDesktop`, where an old Telegram Desktop kept its data;
   - Windows: the AppUserModelID `Pluma.PlumaDesktop` (taskbar, notifications), Pluma's own GUIDs for the single-instance lock, the COM class that notifications activate and the application, shortcuts named `Pluma.lnk` (Start menu, autostart, Send To), and "Pluma" in the file's version information.
-- **Links.** `tg://` and `tonsite://` stay with Telegram Desktop installed on the same computer. Pluma does not register them at its first start, and its macOS bundle and Linux `.desktop` file do not declare them. Telegram's web links open Telegram, whose accounts they belong to. Typing `registertg` in Settings still takes the schemes over, under Pluma's own names.
+- **Links.** Pluma's links are `plm://`: the app registers the scheme at its first start (the Windows registry; its macOS bundle and Linux `.desktop` file declare it), opens it, recognises it in texts, and creates it wherever Telegram Desktop creates `tg://`, the QR code of a sign-in (`plm://login?token=…`) and copied links included. `tg://` and `tonsite://` stay with Telegram Desktop installed on the same computer: Pluma neither registers nor declares them, and a `tg://` link in a message opens Telegram Desktop, if there is one. `t.me` links in messages still open inside Pluma, as Telegram Desktop opens them. Typing `registertg` in Settings registers `plm://` again. The QR sign-in between clients works when all of them use `plm://`.
+- **Brand:** the name, the icons and the colours of Pluma ([Branding](#branding)).
 
 - **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
   - tdesktop `b244f1b3`: `prepare.py` takes the UCRT packages of MSYS2 (`mingw-w64-ucrt-x86_64-*`) and a newer MSYS2 installer. MSYS2 removed the msvcrt-based `mingw-w64-x86_64-*` packages that 7.0.9 asks for, and the Windows libraries could not be built.
@@ -35,15 +36,40 @@ After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - the server key and nothing else (three copies);
 - no code that constructs the classes asking Google, Mozilla or Firebase;
 - the updater and the crash reports compiled out;
-- the identity of every platform.
+- the identity of every platform;
+- the brand: no text that names Telegram but what `LANG_KEEP` and `CODE_TELEGRAM` keep, no `tg://` link, Pluma's icons, no Telegram blue in the default themes but what `KEPT_BLUE` keeps.
 
 The check also covers the layer (`api.tl` says `LAYER 228`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
 
 What the patch leaves, and why:
-- **Links** to `t.me`, `telegram.org`, `desktop.telegram.org` and the like in the interface (the FAQ, the terms, "Telegram Desktop" in the About box). Each opens only when clicked. They change together with the rest of the rebranding (the icon, the strings that say "Telegram").
+- **Links** to `t.me`, `telegram.org`, `fragment.com` and the like in the interface: the terms and the privacy policy, the Premium, Stars, ads and mini app pages, the source code and the changelog in the About box. Each opens only when clicked.
 - **Requests the user starts:** translation through a web provider, the address of a location being sent (Mapbox), payment forms (Stripe, Smartglocal), bot web apps and Instant View pages, files linked from messages. They reach the services the content names, as in any client.
 - **Telegram's 1024-bit update keys** in `config.h`. They only verify update packages, and the updater is compiled out.
 - **Connections made through MTProto** (emoji sets, spellchecker dictionaries, the language pack, calls) go to the Pluma server, which answers for them.
+
+## Branding
+
+The brand of Pluma (task 017 of the server repository) comes from [`brand/`](brand), and the patch applies it as exact edits like the rest: a string, an icon or a colour of the upstream that differs from what the tables expect stops it.
+
+- **Name.** What the user reads says Pluma, not Telegram:
+  - the built-in English (`Telegram/Resources/langs/lang.strings`): the 321 strings that name Telegram, "Telegram Desktop", "Telegram Premium", "Telegram Stars" and the like included, pinned with their counts in [`brand/strings.txt`](brand/strings.txt);
+  - the texts in the code (`CODE_NAMES` in `ci/patch.py`): the first screen, the window title, the About box, the main menu, notifications, the macOS app menu and title, the Linux menus, the Windows shortcuts, the ring around a round video being recorded, the title of a bot web app on Linux, the export's HTML, the shortcut files.
+
+  What stays: the text of links (`telegram.org`, `t.me`: they open Telegram's pages), "Telegram API" credited in the About box, names in code, files and protocols nobody reads (`CODE_TELEGRAM`), the copyright notices. Other languages come from the server's language pack.
+- **Icons**, rendered from the brand kit's SVG by [`brand/render.sh`](brand/render.sh) into `brand/tree`, at the paths of the upstream files they replace (`ASSETS`: each checked against the upstream's SHA-256):
+  - Windows: the executable's icon (`icon256.ico`) and the window, taskbar and tray icon (`logo_256.png`, also Linux's);
+  - macOS: the app icon (the Xcode asset catalog and the iconset), its round variant, the menu bar icon;
+  - Linux: the sizes `install()` puts in hicolor;
+  - the monochrome tray icons, the mark in the centre of QR codes, and the mark on the intro screen in four layers (the ring and three feathers), which the palette colours.
+- **Colours**, palette "graphite and sage": graphite for text and icons, sage as the one accent, no Telegram blue.
+  - The default light theme, Classic: `colors.palette` of lib_ui, [`brand/palette-day.txt`](brand/palette-day.txt).
+  - The default dark theme, which a fresh install opens on a dark system (Tinted): `night.tdesktop-theme`, [`brand/palette-night.txt`](brand/palette-night.txt). The patch writes the theme's zip again.
+  - The theme tiles of Settings, the base colour of the accent picker, the circle in the centre of QR codes.
+
+  Outgoing bubbles are one colour: Desktop draws gradient bubbles for cloud chat themes only. Blue stays where it means something else (`KEPT_BLUE`): user colours, file type colours, the Premium, statistics and group call palettes. The Day and Night themes and the accent presets of the picker are Telegram's, for the user to pick.
+- **Ways into Telegram's services**, gone: the FAQ, Telegram Features and Ask a Question in Settings (the server does not serve `help.getSupport`), the FAQ in the login screen's settings and in the About box, the link of the main menu's footer to desktop.telegram.org, the Help of a banned phone number (an e-mail to Telegram's support).
+
+To change an icon, edit its SVG in `brand/svg` and run `brand/render.sh` (librsvg's `rsvg-convert` and ImageMagick 7); commit the SVG and the rendered files together. The palettes are tables of `key: upstream value -> Pluma value`.
 
 ## Configuration
 
@@ -186,6 +212,7 @@ ci/fetch-upstream.sh sparse          # ./upstream, only the files the patch read
 python3 -m unittest discover -s ci -p '*_test.py'
 ci/configure.sh dev
 ci/lint.sh                           # shellcheck and actionlint
+brand/render.sh                      # the icons, after a change of brand/svg
 ```
 
 A build follows the upstream's instructions (`docs/building-*.md` of the tag) with these scripts:
@@ -205,7 +232,8 @@ ci/package.sh linux|windows|macos dev  # out/pluma-desktop-<version>-<system>-de
 1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks. A new ccache also needs the SHA-256 of its archives in `ci/setup.sh`: the static Linux build, macOS and Windows.
 2. Run `ci/fetch-upstream.sh sparse` and the tests.
 3. Remove the backports the new release already has: their edits no longer match.
-4. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.
+4. The brand: look at what the release changed in the strings, icons and default themes the patch names. `python3 ci/patch.py --strings upstream/Telegram/Resources/langs/lang.strings` prints the table of `brand/strings.txt`; `ASSETS` in `ci/patch.py` holds the SHA-256 of the icons it replaces; the palettes, the upstream value of each colour.
+5. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.
 
 ## Setting up the repository
 
