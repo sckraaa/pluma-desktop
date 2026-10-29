@@ -303,7 +303,7 @@ DAMAGE = (
     (patch.CMAKE_OPTIONS, "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)\n",
      "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE=1)\n"),
     (patch.APPLICATION, "\t\tInvokeQueued(this, [] { RegisterUrlScheme(); });\n", "\t\tInvokeQueued(this, [] { RegisterUrlSchemes(); });\n"),
-    (patch.APPLICATION, '\t\t.shortAppName = u"tdesktop"_q,\n\t\t.longAppName', '\t\t.shortAppName = u"telegram"_q,\n\t\t.longAppName'),
+    (patch.APPLICATION, '\t\t.protocol = u"tg"_q,\n', '\t\t.protocol = u"telegram"_q,\n'),
     (patch.PLIST, "\t\t\t\t<string>tonsite</string>\n", ""),
     (patch.VERSION_H, '"Telegram Desktop"_cs', '"Telegram"_cs'),
     (patch.CONFIG_H, "87A94AB0-E370-4cde-98D3-ACC110C5967D", "87A94AB0-E370-4CDE-98D3-ACC110C5967D"),
@@ -325,6 +325,11 @@ DAMAGE = (
     (S + "/intro/intro_start.cpp", 'u"Telegram Desktop"_q', 'u"Telegram"_q'),
     (patch.EXPORT_HTML, '" joined Telegram";', '" has joined Telegram";'),
     (S + "/window/main_window.cpp", "namespace {\n", 'namespace {\nconst auto kTitle = "Telegram";\n'),
+    # plm:// links.
+    (patch.INTRO_QR, '"tg://login?token="', '"https://t.me/login?token="'),
+    (S + "/core/sandbox.cpp", "namespace {\n", 'namespace {\nconst auto kLink = "tg://resolve";\n'),
+    (patch.TEXT_ENTITY, 'addOne(QString::fromLatin1("tg")); // local urls', 'addOne(QString::fromLatin1("tg")); // local'),
+    (patch.QTHELP_URL, '|| equals(qstr("tg"))', '|| equals(qstr("tg")) || equals(qstr("tg2"))'),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -465,11 +470,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn(f'DECLSPEC_UUID("{c.toast_clsid}")', tree.read(patch.WIN_TOAST))
         self.assertIn('set(bundle_identifier "chat.pluma.desktop")', tree.read(patch.CMAKE_APP))
         plist = tree.read(patch.PLIST)
-        self.assertNotIn("CFBundleURLTypes", plist)
+        self.assertIn("<key>CFBundleURLSchemes</key>\n\t\t\t<array>\n\t\t\t\t<string>plm</string>\n\t\t\t</array>", plist)
         self.assertIn("\t<key>CFBundleName</key>\n\t<string>Pluma</string>\n", plist)
         desktop = tree.read(patch.DESKTOP_FILE)
         self.assertIn("\nExec=Pluma -- %U\n", desktop)
-        self.assertNotIn("MimeType", desktop)
+        self.assertIn("\nMimeType=x-scheme-handler/plm;\n", desktop)
         self.assertIn("server key 0x", tree.read(patch.MARKER))
         prepare = tree.read(patch.PREPARE)
         self.assertIn("    'ThirdParty\\\\msys64\\\\ucrt64\\\\bin',\n", prepare)
@@ -499,6 +504,13 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(patch.lang_counts(lang), {})
         self.assertIn('box->setTitle(u"Pluma"_q);', tree.read(patch.ABOUT_BOX))
         self.assertIn('setTitleText(rpl::single(u"Pluma"_q));', tree.read(S + "/intro/intro_start.cpp"))
+        # plm:// links.
+        self.assertIn('_qrCodes.fire_copy("plm://login?token=" + encoded);', tree.read(patch.INTRO_QR))
+        self.assertIn('return openCustomUrl("plm://", LocalUrlHandlers(), url, context);', tree.read(patch.APPLICATION))
+        application = tree.read(patch.APPLICATION)
+        self.assertIn('\t\t.protocol = u"plm"_q,\n\t\t.protocolName = u"Pluma Link"_q,\n', application)
+        self.assertNotIn('u"tonsite"_q,\n\t\t.protocolName', application)
+        self.assertIn('addOne(QString::fromLatin1("plm"));', tree.read(patch.TEXT_ENTITY))
 
     def test_build_edits_stay_in_their_platform(self):
         """Each edit of prepare.py changes the commands of one platform only

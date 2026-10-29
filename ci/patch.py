@@ -95,7 +95,11 @@ LANG = "Telegram/Resources/langs/lang.strings"
 SHELL_PAGE = "Telegram/Resources/bot_webview_shell_html/page.js"
 CUSTOM_SHORTCUTS = "Telegram/Resources/default_shortcuts-custom.json"
 EXPORT_HTML = SOURCES + "/export/output/export_output_html.cpp"
+INTRO_QR = SOURCES + "/intro/intro_qr.cpp"
 ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
+# In the lib_ui and lib_base submodules.
+TEXT_ENTITY = "Telegram/lib_ui/ui/text/text_entity.cpp"
+QTHELP_URL = "Telegram/lib_base/base/qthelp_url.cpp"
 
 # The classes whose network requests go to Google, Mozilla and Firebase for
 # Telegram's backup addresses and time: they may be constructed nowhere.
@@ -113,7 +117,8 @@ UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, WIN_R
                   QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
                   LANG, SHELL_PAGE, CUSTOM_SHORTCUTS)
 # The same for files of submodules: (submodule, path inside it).
-SUBMODULE_PATHS = (("cmake", "variables.cmake"),)
+SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/text/text_entity.cpp"),
+                   ("Telegram/lib_base", "base/qthelp_url.cpp"))
 
 SOURCE_SUFFIXES = (".cpp", ".h", ".mm", ".m", ".c", ".cc", ".hpp")
 
@@ -588,8 +593,6 @@ CODE_TELEGRAM = {
     "core/file_utilities.cpp": 1,
     "platform/win/specific_win.cpp": 1,
     "platform/win/windows_app_user_model_id.cpp": 1,
-    # The name of the link scheme in the system's settings.
-    "core/application.cpp": 1,
     # Telegram Desktop's own api_id in the list of sessions.
     "api/api_authorizations.cpp": 1,
     # Names in files and protocols nobody reads: the calendar file's PRODID,
@@ -611,6 +614,54 @@ LANG_ENTRY = re.compile(r'^"(?P<key>[A-Za-z0-9_#]+)" = +"(?P<value>(?:[^"\\\n]|\
 LANG_LINK = re.compile(r"(?:https?://)?(?:[\w-]+\.)*(?:telegram\.org|telegram\.me|t\.me|fragment\.com)"
                        r"(?:/[^\s\"<>)\]]*)?", re.I)
 LANG_KEEP = {"lng_about_text1_api": "Telegram API"}
+
+# plm:// links in place of tg://, with how many "tg://" each file of the
+# sources holds: the app opens, recognises in texts and creates plm:// links
+# (the QR code of a sign-in among them), and registers plm:// with the
+# system. tg:// and tonsite:// stay with Telegram Desktop on the same computer.
+SCHEME_FILES = {
+    "api/api_single_message_search.cpp": 3,
+    "boxes/connection_box.cpp": 3,
+    "core/application.cpp": 3,
+    "core/click_handler_types.cpp": 2,
+    "core/deep_links/deep_links_settings.cpp": 2,
+    "core/local_url_handlers.cpp": 30,
+    "core/ui_integration.cpp": 1,
+    "data/data_cloud_themes.cpp": 1,
+    "data/data_story.cpp": 1,
+    "history/history_drag_area.cpp": 2,
+    "history/view/media/history_view_theme_document.cpp": 1,
+    "history/view/media/history_view_userpic_suggestion.cpp": 1,
+    "inline_bots/bot_attach_web_view.cpp": 2,
+    "intro/intro_qr.cpp": 1,
+    "iv/editor/iv_editor_clipboard_import.cpp": 1,
+    "iv/iv_rich_message_html_export.cpp": 4,
+    "media/stories/media_stories_controller.cpp": 1,
+    "menu/menu_ttl_validator.cpp": 1,
+    "settings/sections/settings_main.cpp": 1,
+    "settings/sections/settings_privacy_security.cpp": 1,
+    "settings/settings_experimental.cpp": 1,
+    "ui/boxes/about_cocoon_box.cpp": 1,
+    "window/window_filters_favorite.cpp": 3,
+}
+
+REGISTER_URL_SCHEME = """\
+	const auto arguments = Launcher::Instance().customWorkingDir()
+		? u"-workdir \\"%1\\""_q.arg(cWorkingDir())
+		: QString();
+
+	// pluma: plm:// links. The tg and tonsite schemes stay with Telegram
+	// Desktop on the same computer.
+	base::Platform::RegisterUrlScheme(base::Platform::UrlSchemeDescriptor{
+		.executable = Platform::ExecutablePathForShortcuts(),
+		.arguments = arguments,
+		.protocol = u"plm"_q,
+		.protocolName = u"{name} Link"_q,
+		.shortAppName = u"pluma"_q,
+		.longAppName = QCoreApplication::applicationName(),
+		.displayAppName = AppName.utf16(),
+		.displayAppDescription = AppName.utf16(),
+	});"""
 
 
 def lang_entries(text):
@@ -688,6 +739,16 @@ def rebrand(tree, c):
     for rel, old, new, count in CODE_NAMES:
         tree.replace(rel, old, new.replace("{name}", name), count=count)
 
+    # plm:// in place of tg://.
+    for rel, count in SCHEME_FILES.items():
+        tree.replace(f"{SOURCES}/{rel}", "tg://", "plm://", count=count)
+    tree.replace_body(APPLICATION, "void Application::RegisterUrlScheme() {\n", "\n}\n",
+                      REGISTER_URL_SCHEME.replace("{name}", name),
+                      must_contain=('.protocol = u"tg"_q', '.protocol = u"tonsite"_q', 'u"Telegram Link"_q'))
+    tree.replace(TEXT_ENTITY, '\taddOne(QString::fromLatin1("tg")); // local urls\n',
+                 '\taddOne(QString::fromLatin1("plm")); // local urls (pluma)\n')
+    tree.replace(QTHELP_URL, '\t\t|| equals(qstr("tg"))\n', '\t\t|| equals(qstr("plm")) // pluma\n')
+
 
 def verify_brand(tree):
     """Checks the brand independently of how the edits were made."""
@@ -705,6 +766,23 @@ def verify_brand(tree):
         diff = sorted(k for k in set(left) | set(CODE_TELEGRAM) if left.get(k) != CODE_TELEGRAM.get(k))
         raise PatchError(f"{SOURCES}: Telegram in the texts of {', '.join(diff[:5])} "
                          "is not what CODE_TELEGRAM keeps")
+
+    # plm:// alone.
+    for rel in tree.sources():
+        if "tg://" in tree.scan(rel):
+            raise PatchError(f"{rel}: still has tg:// links")
+    application = tree.read(APPLICATION)
+    if (application.count("base::Platform::RegisterUrlScheme(") != 1 or '.protocol = u"plm"_q' not in application
+            or "if (!OptionSkipUrlSchemeRegister.value()) {\n\t\tInvokeQueued(this, [] { RegisterUrlScheme(); });"
+            not in application):
+        raise PatchError(f"{APPLICATION}: does not register plm:// alone at the first start")
+    if ("\t\t\t\t<string>plm</string>\n\t\t\t</array>" not in tree.read(PLIST)
+            or "MimeType=x-scheme-handler/plm;\n" not in tree.read(DESKTOP_FILE)):
+        raise PatchError(f"{PLIST}, {DESKTOP_FILE}: the app does not declare plm:// alone")
+    if ('fromLatin1("plm")); // local urls' not in tree.read(TEXT_ENTITY)
+            or 'fromLatin1("tg")); // local urls' in tree.read(TEXT_ENTITY)
+            or 'qstr("tg")' in tree.read(QTHELP_URL)):
+        raise PatchError(f"{TEXT_ENTITY}, {QTHELP_URL}: texts still link tg:// and not plm://")
 
 
 CODE_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|R"([^(\s]*)\((.*?)\)\1"|"(?:[^"\\\n]|\\.)*"'
@@ -725,8 +803,9 @@ def code_telegram(text):
 
 def brand_edited():
     """The text files rebrand() edits."""
-    return tuple(dict.fromkeys((LANG, ABOUT_BOX)
-                               + tuple(rel for rel, _, _, _ in CODE_NAMES)))
+    return tuple(dict.fromkeys((LANG, TEXT_ENTITY, QTHELP_URL, ABOUT_BOX)
+                               + tuple(rel for rel, _, _, _ in CODE_NAMES)
+                               + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)))
 
 
 def check_upstream(tree, c):
@@ -830,16 +909,12 @@ def patch(tree, c):
     # No updates from Telegram and no crash reports to it: compiled out.
     tree.replace(CMAKE_OPTIONS, CMAKE_OPTIONS_OLD, CMAKE_OPTIONS_NEW)
 
-    # tg:// and tonsite:// stay with Telegram Desktop on the same computer:
-    # no registration at the first start; "registertg" typed in Settings
-    # still takes them over on request, under Pluma's own names.
-    tree.replace_body(APPLICATION, "void Application::autoRegisterUrlScheme() {\n", "\n}\n",
-                      "\t// pluma: tg:// and tonsite:// links stay with Telegram Desktop on the\n"
-                      "\t// same computer; \"registertg\" typed in Settings takes them over.",
-                      must_contain=("RegisterUrlScheme();", "OptionSkipUrlSchemeRegister"))
-    tree.replace(APPLICATION, '\t\t.shortAppName = u"tdesktop"_q,\n', '\t\t.shortAppName = u"pluma"_q,\n', count=2)
-    tree.replace_block(PLIST, "\t<key>CFBundleURLTypes</key>\n", "\n\t</array>\n", "",
-                       must_contain=("<string>tg</string>", "<string>tonsite</string>"))
+    # plm:// links in place of tg:// and tonsite://, which stay with Telegram
+    # Desktop on the same computer: the app registers plm:// at its first
+    # start (rebrand(), RegisterUrlScheme), and its macOS bundle and Linux
+    # .desktop file declare plm:// alone.
+    tree.replace(PLIST, "\t\t\t\t<string>tg</string>\n\t\t\t\t<string>tonsite</string>\n",
+                 "\t\t\t\t<string>plm</string>\n")
 
     # Identity: the name, and with it the data folder (%APPDATA%\Pluma, a
     # portable folder next to Pluma.exe, ~/Library/Application Support/Pluma,
@@ -870,8 +945,8 @@ def patch(tree, c):
                ("Exec=Telegram -- %U\n", f"Exec={name} -- %U\n"),
                ("Icon=org.telegram.desktop\n", f"Icon={c.app_id}\n"),
                ("StartupWMClass=TelegramDesktop\n", f"StartupWMClass={name}\n"),
-               # The links stay with Telegram Desktop.
-               ("MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;\n", ""),
+               # plm:// links; tg:// and tonsite:// stay with Telegram Desktop.
+               ("MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;\n", "MimeType=x-scheme-handler/plm;\n"),
                ("Keywords=tg;chat;im;messaging;messenger;sms;tdesktop;\n", "Keywords=chat;im;messaging;messenger;\n"),
                # No D-Bus service file comes with the app.
                ("DBusActivatable=true\n", ""),
@@ -999,20 +1074,18 @@ def verify(tree, c):
     options = tree.read(CMAKE_OPTIONS)
     if CMAKE_DEFINITIONS not in options or "if (DESKTOP_APP_DISABLE_AUTOUPDATE)" in options:
         raise PatchError(f"{CMAKE_OPTIONS}: the updater or the crash reports are not compiled out")
-    if re.search(r"void Application::autoRegisterUrlScheme\(\) \{\n[^}]*RegisterUrlScheme\(", tree.read(APPLICATION)):
-        raise PatchError(f"{APPLICATION}: still registers tg:// at the first start")
 
     for rel, traces in ((VERSION_H, ('"Telegram Desktop"', '"Telegram"_cs', "Unofficial")),
                         (CONFIG_H, ("87A94AB0-E370-4cde-98D3-ACC110C5967D",)),
                         (LAUNCHER, ('u"TelegramDesktop"_q',)),
                         (LINUX, ('return u"org.telegram.desktop', "/.TelegramDesktop/")),
-                        (DESKTOP_FILE, ("Telegram", "x-scheme-handler/tg")),
+                        (DESKTOP_FILE, ("Telegram", "x-scheme-handler/tg", "tonsite")),
                         (WIN_APP_ID, ('L"Telegram.TelegramDesktop";', "Telegram.lnk")),
                         (WIN_TOAST, ("F11932D3-6110-4BBC-9B02-B2EC07A1BD19",)),
                         (WIN_SPECIFIC, ("Telegram.lnk",)),
                         (WIN_RC, ("Telegram FZ-LLC", "Telegram Desktop")),
                         (CMAKE_APP, ("com.tdesktop.Telegram",)),
-                        (PLIST, ("<string>tg</string>", "Telegram Desktop"))):
+                        (PLIST, ("<string>tg</string>", "<string>tonsite</string>", "Telegram Desktop"))):
         text = tree.read(rel)
         for s in traces:
             if s in text:
