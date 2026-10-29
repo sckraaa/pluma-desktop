@@ -36,11 +36,13 @@ render() {
 }
 
 # Windows and Linux: the window, taskbar and tray icon (logo_256, its body
-# 228 of 256 as upstream's), the full-bleed variant for small tray icons and
-# notifications, the sizes Linux installs, and the executable's icon: BMP
-# entries up to 48, a PNG entry at 256, as upstream's.
+# 228 of 256 as upstream's), the sizes Linux installs, and the executable's
+# icon: BMP entries up to 48, a PNG entry at 256, as upstream's. The round
+# full-bleed logo, as upstream's, serves small tray icons, notifications and
+# the avatar of the service notifications account, which is clipped to a
+# circle.
 render app-icon-margin.svg 256 256 "$art/logo_256.png"
-render app-icon.svg 256 256 "$art/logo_256_no_margin.png"
+render logo-round.svg 256 256 "$art/logo_256_no_margin.png"
 for size in 16 32 48 64 128 256 512; do
 	render app-icon-margin.svg "$size" "$size" "$art/icon$size.png"
 	render app-icon-margin.svg $((size * 2)) $((size * 2)) "$art/icon$size@2x.png"
