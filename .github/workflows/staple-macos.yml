@@ -1,0 +1,83 @@
+# Finishes the macOS app of a desktop run whose notarization outlasted the
+# job sign-macos: takes its artifact pluma-desktop-macos-notarizing (the
+# signed app and the id of Apple's submission), waits for Apple's answer and
+# staples the ticket to the app (ci/sign-macos.sh staple). The result is the
+# artifact pluma-desktop-macos-signed of this run. While Apple is still
+# checking, the job fails and says so: re-run it later. Like sign-macos, it
+# runs in the environment release, which holds the keys and waits for the
+# owner's approval.
+#
+#   gh workflow run staple-macos.yml -R sckraaa/pluma-desktop -f run=<run id of desktop>
+name: staple-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "The id of the desktop run whose pluma-desktop-macos-notarizing to finish"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  staple-macos:
+    runs-on: macos-26
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: age
+        run: ci/setup.sh age
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pluma-desktop-macos-notarizing
+          path: build
+          run-id: ${{ inputs.run }}
+          github-token: ${{ github.token }}
+      - name: Staple
+        env:
+          NOTARY_KEY_B64: ${{ secrets.PLUMA_NOTARY_KEY }}
+          PLUMA_NOTARY_KEY_ID: ${{ secrets.PLUMA_NOTARY_KEY_ID }}
+          PLUMA_NOTARY_ISSUER_ID: ${{ secrets.PLUMA_NOTARY_ISSUER_ID }}
+          PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: |
+          if [ -z "$NOTARY_KEY_B64" ] || [ -z "$PLUMA_AGE_IDENTITY" ]; then
+            echo "::error::The release environment has no PLUMA_NOTARY_KEY or PLUMA_AGE_IDENTITY (README, Signing)."
+            exit 1
+          fi
+          umask 077
+          keys=$RUNNER_TEMP/keys
+          mkdir -p "$keys"
+          trap 'rm -rf "$keys"' EXIT
+          printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
+          printf '%s' "$NOTARY_KEY_B64" | base64 -d >"$keys/notary.p8"
+          export PLUMA_NOTARY_KEY=$keys/notary.p8
+          for f in build/*.zip.age; do
+            name=$(basename "$f" .age)
+            age --decrypt --identity "$keys/age.key" --output "$keys/$name" "$f"
+            (cd "$keys" && shasum -a 256 -c "$GITHUB_WORKSPACE/build/$name.sha256")
+            rc=0
+            ci/sign-macos.sh staple "$keys/$name" "$(cat "build/$name.notary-id")" signed || rc=$?
+            if [ "$rc" = 75 ]; then
+              echo "::error::Apple is still checking the app; re-run this job later."
+            fi
+            if [ "$rc" != 0 ]; then
+              exit "$rc"
+            fi
+          done
+          ci/encrypt.sh signed
+      - name: Upload the notarized app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pluma-desktop-macos-signed
+          path: signed/
+          retention-days: 30
+          if-no-files-found: error

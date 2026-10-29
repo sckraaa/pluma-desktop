@@ -13,6 +13,9 @@
 #   windows       the libraries of Telegram/build/prepare/prepare.py, cached
 #                 by their state, then the client through ccache;
 #   macos         the same on macOS; the app is signed ad hoc;
+#   sign-macos    the macOS app of a build for the server, signed with the
+#                 Developer ID and notarized; when Apple takes longer than
+#                 the job waits, the workflow staple-macos finishes it;
 #   prune-caches  keeps the newest cache of each kind.
 #
 # A build targets the server of the repository variables when they are set,
@@ -537,12 +540,14 @@ jobs:
 
   # The macOS app of a build for the server, signed with Pluma's Developer ID
   # and notarized (ci/sign-macos.sh). The release environment holds the keys
-  # and waits for the owner's approval.
+  # and waits for the owner's approval. Apple may take longer than the half
+  # hour the job waits; the signed app is then kept as
+  # pluma-desktop-macos-notarizing, and the workflow staple-macos finishes it.
   sign-macos:
     needs: [check, macos]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.check.outputs.target == 'server'
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 60
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -584,15 +589,31 @@ jobs:
           for f in build/*.zip.age; do
             zip=$keys/$(basename "$f" .age)
             age --decrypt --identity "$keys/age.key" --output "$zip" "$f"
-            ci/sign-macos.sh "$zip" signed
+            ci/sign-macos.sh sign "$zip" signed
           done
           ci/encrypt.sh signed
           echo "signed=true" >>"$GITHUB_OUTPUT"
+          ids=(signed/*.notary-id)
+          if [ ! -e "${ids[0]}" ]; then
+            echo "notarized=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "notarized=false" >>"$GITHUB_OUTPUT"
+          echo "::warning::Apple is still checking the signed app; the workflow staple-macos finishes it (README, Signing)."
+          {
+            echo "### Apple is still checking the macOS app"
+            echo
+            echo "The app is signed and kept as \`pluma-desktop-macos-notarizing\`. Once Apple is done, staple the ticket to it:"
+            echo
+            echo '```sh'
+            echo "gh workflow run staple-macos.yml -R $GITHUB_REPOSITORY -f run=$GITHUB_RUN_ID"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Upload the signed app
         if: steps.sign.outputs.signed == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: pluma-desktop-macos-signed
+          name: ${{ steps.sign.outputs.notarized == 'true' && 'pluma-desktop-macos-signed' || 'pluma-desktop-macos-notarizing' }}
           path: signed/
           retention-days: 30
           if-no-files-found: error

@@ -151,12 +151,19 @@ The job `sign-macos` takes the macOS app of a build for the server and signs it 
 gh run download <run id> -R sckraaa/pluma-desktop -n pluma-desktop-macos-signed
 ```
 
+Apple answers most submissions within minutes but may take longer, and keeps checking after `notarytool` stops waiting ([Apple](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)). The job waits half an hour. When Apple is not done by then, the job still succeeds: its artifact is `pluma-desktop-macos-notarizing`, the signed app without the ticket and the id of the submission (`<name>.notary-id`), and the run's summary says so. Later, the workflow `staple-macos` waits for Apple's answer, staples the ticket and leaves `pluma-desktop-macos-signed` in its own run; while Apple is still checking, it fails with a message, and re-running its job later is enough. It runs in `release` as well.
+
+```sh
+gh workflow run staple-macos.yml -R sckraaa/pluma-desktop -f run=<run id of desktop>
+gh run download <run id of staple-macos> -R sckraaa/pluma-desktop -n pluma-desktop-macos-signed
+```
+
 The secrets of the environment `release`:
 - `PLUMA_DEVELOPER_ID_P12`, `PLUMA_DEVELOPER_ID_PASSWORD`: the certificate with its key, a PKCS#12 file in base64, and its password. The key and the certificate request are made on a Mac, the certificate in the Apple Developer account (*Certificates*, *Developer ID Application*, by the Account Holder); `security import` takes a PKCS#12 written with LibreSSL (`/usr/bin/openssl pkcs12 -export`), not with OpenSSL 3's defaults.
 - `PLUMA_NOTARY_KEY`, `PLUMA_NOTARY_KEY_ID`, `PLUMA_NOTARY_ISSUER_ID`: an App Store Connect API team key with the access *Developer* (the `.p8` file in base64), its key id and the issuer id.
 - `PLUMA_AGE_IDENTITY`: the age key that decrypts the build.
 
-Without `PLUMA_DEVELOPER_ID_P12` the job signs nothing and says so. `ci/sign-macos.sh` runs on a GitHub runner only: it puts a keychain of its own on the user's search list.
+Without `PLUMA_DEVELOPER_ID_P12` the job signs nothing and says so. The step `sign` of `ci/sign-macos.sh` runs on a GitHub runner only: it puts a keychain of its own on the user's search list. The step `staple` needs only the API key, so it works on any Mac too. `ci/sign_test.py` runs both steps against fakes of the macOS tools.
 
 ## When it builds
 
