@@ -111,6 +111,7 @@ ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
 BANNED_BOX = SOURCES + "/boxes/phone_banned_box.cpp"
 MAIN_MENU = SOURCES + "/window/window_main_menu.cpp"
 SETTINGS_MAIN = SOURCES + "/settings/sections/settings_main.cpp"
+DATA_PEER = SOURCES + "/data/data_peer.cpp"
 SETTINGS_INTRO = SOURCES + "/settings/settings_intro.cpp"
 # In the lib_ui and lib_base submodules.
 PALETTE = "Telegram/lib_ui/ui/colors.palette"
@@ -1023,6 +1024,17 @@ def rebrand(tree, c):
     for rel, old, new in QR_COLORS:
         tree.replace(rel, old, new)
 
+    # The service notifications account is drawn as any other: by its photo,
+    # which the server gives it (pluma-admin service-photo), and by its
+    # letter until the photo loads. Upstream draws the app logo meanwhile,
+    # and the list of chats keeps that logo cached over the photo once it
+    # loads (its cache is redrawn only after a letter).
+    tree.replace(DATA_PEER, "\t} else if (isNotificationsUser()) {\n"
+                            "\t\tstatic auto result = Window::LogoNoMargin().scaledToWidth(\n"
+                            "\t\t\tkUserpicSize,\n\t\t\tQt::SmoothTransformation);\n\t\treturn &result;\n\t}\n",
+                 "\t}\n\t// pluma: no logo in place of the service account's photo, which\n"
+                 "\t// the server gives it; the list kept the logo over the photo.\n")
+
     # Ways into Telegram's own services, which Pluma users do not have: the
     # FAQ, Telegram Features and Ask a Question in Settings (the support
     # account is Telegram's: help.getSupport), the FAQ in the login screen's
@@ -1146,7 +1158,7 @@ def code_telegram(text):
 def brand_edited():
     """The text files rebrand() edits."""
     return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN,
-                                SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX)
+                                SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX, DATA_PEER)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
                                + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
                                + tuple(rel for rel, _, _ in QR_COLORS)))

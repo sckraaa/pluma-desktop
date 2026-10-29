@@ -67,6 +67,7 @@ The brand of Pluma (task 017 of the server repository) comes from [`brand/`](bra
   - The theme tiles of Settings, the base colour of the accent picker, the circle in the centre of QR codes.
 
   Outgoing bubbles are one colour: Desktop draws gradient bubbles for cloud chat themes only. Blue stays where it means something else (`KEPT_BLUE`): user colours, file type colours, the Premium, statistics and group call palettes. The Day and Night themes and the accent presets of the picker are Telegram's, for the user to pick.
+- **The service notifications account** is drawn as any user: by the photo the server gives it (`pluma-admin service-photo`), by its letter until that loads. Upstream draws its logo meanwhile, and the list of chats kept the logo over the photo.
 - **Ways into Telegram's services**, gone: the FAQ, Telegram Features and Ask a Question in Settings (the server does not serve `help.getSupport`), the FAQ in the login screen's settings and in the About box, the link of the main menu's footer to desktop.telegram.org, the Help of a banned phone number (an e-mail to Telegram's support).
 
 To change an icon, edit its SVG in `brand/svg` and run `brand/render.sh` (librsvg's `rsvg-convert` and ImageMagick 7); commit the SVG and the rendered files together. The palettes are tables of `key: upstream value -> Pluma value`.

@@ -390,6 +390,7 @@ DAMAGE = (
     (patch.ABOUT_BOX, "\taddText(Text3());\n", "\taddText(Text3(), true);\n"),
     (patch.MAIN_MENU, 'u"https://desktop.telegram.org"_q));', 'u"https://telegram.org/apps"_q));'),
     (patch.BANNED_BOX, '"login@stel.com"', '"recover@telegram.org"'),
+    (patch.DATA_PEER, "static auto result = Window::LogoNoMargin().scaledToWidth(", "static auto result = Window::Logo().scaledToWidth("),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -584,6 +585,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("Text3", tree.read(patch.ABOUT_BOX))
         self.assertNotIn("login@stel.com", tree.read(patch.BANNED_BOX))
         self.assertNotIn("desktop.telegram.org", tree.read(patch.MAIN_MENU))
+        self.assertNotIn("isNotificationsUser()", tree.read(patch.DATA_PEER))
         self.assertNotIn("OpenFaq", tree.read(patch.SETTINGS_INTRO))
         self.assertIn("void BuildHelpSection(SectionBuilder &builder) {\n\t// pluma:", tree.read(patch.SETTINGS_MAIN))
 
