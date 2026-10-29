@@ -108,6 +108,10 @@ EXPORT_HTML = SOURCES + "/export/output/export_output_html.cpp"
 INTRO_QR = SOURCES + "/intro/intro_qr.cpp"
 CONNECTION_BOX = SOURCES + "/boxes/connection_box.cpp"
 ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
+BANNED_BOX = SOURCES + "/boxes/phone_banned_box.cpp"
+MAIN_MENU = SOURCES + "/window/window_main_menu.cpp"
+SETTINGS_MAIN = SOURCES + "/settings/sections/settings_main.cpp"
+SETTINGS_INTRO = SOURCES + "/settings/settings_intro.cpp"
 # In the lib_ui and lib_base submodules.
 PALETTE = "Telegram/lib_ui/ui/colors.palette"
 TEXT_ENTITY = "Telegram/lib_ui/ui/text/text_entity.cpp"
@@ -670,9 +674,6 @@ CODE_TELEGRAM = {
     "core/sandbox.cpp": 1,
     # The windows of a crash report, compiled out (TDESKTOP_DISABLE_CRASH_REPORTS).
     "core/crash_report_window.cpp": 7,
-    # The ways into Telegram's support and site.
-    "boxes/phone_banned_box.cpp": 1,
-    "window/window_main_menu.cpp": 1,
     # Builds Pluma does not make: alpha versions, the Mac App Store, Windows Store.
     "boxes/about_box.cpp": 1,
     "core/file_utilities.cpp": 1,
@@ -1022,6 +1023,40 @@ def rebrand(tree, c):
     for rel, old, new in QR_COLORS:
         tree.replace(rel, old, new)
 
+    # Ways into Telegram's own services, which Pluma users do not have: the
+    # FAQ, Telegram Features and Ask a Question in Settings (the support
+    # account is Telegram's: help.getSupport), the FAQ in the login screen's
+    # settings and in the about box, the link of the main menu's footer to
+    # desktop.telegram.org, and the "Help" of a banned phone number, which
+    # wrote to Telegram's login@stel.com.
+    tree.replace_body(SETTINGS_MAIN, "void BuildHelpSection(SectionBuilder &builder) {\n", "\n}\n",
+                      "\t// pluma: no FAQ, Telegram Features or Ask a Question: they lead to\n"
+                      "\t// Telegram's pages and support.\n"
+                      "\tQ_UNUSED(builder);",
+                      must_contain=("OpenFaq(controller);", "lng_telegram_features_url",
+                                    "OpenAskQuestionConfirm(controller);"))
+    tree.replace(SETTINGS_INTRO, "\tUi::AddDivider(result);\n\tUi::AddSkip(result);\n\n"
+                                 "\tAddButtonWithIcon(\n\t\tresult,\n\t\ttr::lng_settings_faq(),\n"
+                                 "\t\tst::settingsButtonNoIcon\n\t)->addClickHandler([] {\n"
+                                 "\t\tOpenFaq(nullptr);\n\t});\n",
+                 "\t// pluma: no FAQ, which is Telegram's.\n")
+    tree.replace_block(ABOUT_BOX, "rpl::producer<TextWithEntities> Text3() {\n", "}\n\n", "",
+                       must_contain=("telegramFaqLink()",))
+    tree.replace(ABOUT_BOX, "\taddText(Text2());\n\taddText(Text3());\n",
+                 "\taddText(Text2());\n\t// pluma: no FAQ, which is Telegram's.\n")
+    tree.replace(MAIN_MENU, '\t_telegram->setMarkedText(tr::link(\n\t\tu"Telegram Desktop"_q,\n'
+                            '\t\tu"https://desktop.telegram.org"_q));\n',
+                 f'\t_telegram->setMarkedText(TextWithEntities{{ u"{name}"_q }}); // pluma: no link to Telegram\'s site\n')
+    tree.replace_block(BANNED_BOX, "namespace {\n\nvoid SendToBannedHelp(", "} // namespace\n\n", "",
+                       must_contain=('"login@stel.com"',))
+    tree.replace_body(BANNED_BOX, "\t\tconst QString &phone) {\n", "\n}\n",
+                      "\t// pluma: no \"Help\", which wrote to Telegram's support.\n"
+                      "\tQ_UNUSED(phone);\n"
+                      "\tcontroller->show(\n"
+                      "\t\tUi::MakeInformBox(tr::lng_signin_banned_text()),\n"
+                      "\t\tUi::LayerOption::CloseOther);",
+                      must_contain=("SendToBannedHelp(phone);",))
+
 
 def is_blue(value):
     """A colour of Telegram's blues: hue 185-240, not grey."""
@@ -1110,7 +1145,8 @@ def code_telegram(text):
 
 def brand_edited():
     """The text files rebrand() edits."""
-    return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, ABOUT_BOX)
+    return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN,
+                                SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
                                + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
                                + tuple(rel for rel, _, _ in QR_COLORS)))

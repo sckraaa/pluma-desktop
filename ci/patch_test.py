@@ -384,6 +384,12 @@ DAMAGE = (
     (patch.PALETTE, "// basic\n", "// basic\nnewAccentFg: #3390ec;\n"),
     (patch.EMBEDDED_THEMES, '\t\t\tqColor("5288c1")\n\t\t},', '\t\t\tqColor("5288c2")\n\t\t},'),
     (patch.INTRO_QR, "QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.", "QColor(0x40, 0xA7, 0xE3);"),
+    # The ways into Telegram's services.
+    (patch.SETTINGS_MAIN, "OpenAskQuestionConfirm(controller); },", "OpenAskQuestion(controller); },"),
+    (patch.SETTINGS_INTRO, "\t\tOpenFaq(nullptr);\n", "\t\tOpenFaq({});\n"),
+    (patch.ABOUT_BOX, "\taddText(Text3());\n", "\taddText(Text3(), true);\n"),
+    (patch.MAIN_MENU, 'u"https://desktop.telegram.org"_q));', 'u"https://telegram.org/apps"_q));'),
+    (patch.BANNED_BOX, '"login@stel.com"', '"recover@telegram.org"'),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -574,6 +580,12 @@ class UpstreamTest(unittest.TestCase):
                          ("#131513", "#2c3a2d", "#7fa082"))
         self.assertIn('qColor("9dbb9f") // pluma', tree.read(patch.EMBEDDED_THEMES))
         self.assertIn("QColor(0x5B, 0x7A, 0x5E)", tree.read(patch.CONNECTION_BOX))
+        # What leads to Telegram's services.
+        self.assertNotIn("Text3", tree.read(patch.ABOUT_BOX))
+        self.assertNotIn("login@stel.com", tree.read(patch.BANNED_BOX))
+        self.assertNotIn("desktop.telegram.org", tree.read(patch.MAIN_MENU))
+        self.assertNotIn("OpenFaq", tree.read(patch.SETTINGS_INTRO))
+        self.assertIn("void BuildHelpSection(SectionBuilder &builder) {\n\t// pluma:", tree.read(patch.SETTINGS_MAIN))
 
     def test_changed_binary_files(self):
         """An icon or the night theme of another release stops the patch."""
