@@ -5,7 +5,8 @@
 #   package.sh windows dev|server  pluma-desktop-<version>-windows[-dev].zip:
 #                                  Pluma/Pluma.exe;
 #   package.sh macos dev|server    pluma-desktop-<version>-macos[-dev].zip:
-#                                  Pluma.app, signed ad hoc.
+#                                  Pluma.app with the Icon Composer icon of
+#                                  brand/Icon.icon, signed ad hoc.
 # The executables keep the upstream's names inside the build and get Pluma's
 # here. Each file comes with its SHA-256.
 set -euo pipefail
@@ -66,6 +67,29 @@ macos)
 		echo "package: the app is version $(plist CFBundleShortVersionString), upstream.env says $UPSTREAM_VERSION" >&2
 		exit 1
 	fi
+	# macOS 26 draws an icon of the old format on a grey plate, so the app
+	# takes the Icon Composer icon: actool compiles it into an asset catalog
+	# (with renderings for older systems) and an .icns, which replace the
+	# upstream's. Its catalog holds the icon alone; anything else in it would
+	# be lost, so it stops the build.
+	resources="$bundle/Contents/Resources"
+	if [ "$(plist CFBundleIconName)" != Icon ] || [ "$(plist CFBundleIconFile)" != Icon ]; then
+		echo "package: the app's icon is not named Icon (Info.plist)" >&2
+		exit 1
+	fi
+	xcrun assetutil --info "$resources/Assets.car" | $python -I -c '
+import json, sys
+names = {a["Name"] for a in json.load(sys.stdin) if "Name" in a}
+other = sorted(n for n in names if n != "Icon" and not n.startswith("ZZZZPackedAsset-"))
+if other:
+    sys.exit("package: the upstream asset catalog holds more than the icon: " + ", ".join(other))
+'
+	mkdir "$work/icon"
+	xcrun actool --compile "$work/icon" --platform macosx \
+		--minimum-deployment-target "$(plist LSMinimumSystemVersion)" \
+		--app-icon Icon --output-partial-info-plist "$work/icon/Info.plist" \
+		brand/Icon.icon >/dev/null
+	cp "$work/icon/Assets.car" "$work/icon/Icon.icns" "$resources/"
 	# No Developer ID: an ad hoc signature, which Apple Silicon requires to
 	# run the app at all. Gatekeeper asks the user once (README).
 	codesign --force --deep --sign - "$bundle"

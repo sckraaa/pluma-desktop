@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Renders the icons of the Pluma desktop client from the SVGs of brand/svg
 # into brand/tree, at the paths of the upstream files they replace
-# (ASSETS in ci/patch.py). The rendered files are committed, so a build takes
+# (ASSETS in ci/patch.py), and the layer of the macOS 26 icon into
+# brand/Icon.icon. The rendered files are committed, so a build takes
 # them as they are and needs neither tool: run this after changing an SVG and
 # commit the result. Needs rsvg-convert (librsvg) and ImageMagick 7 (magick).
 set -euo pipefail
@@ -74,6 +75,13 @@ for size in 16 32 128 256 512; do
 	cp "$assets/Icon.appiconset/icon$size@2x.png" "$assets/Icon.iconset/icon_${size}x$size@2x.png"
 done
 render round-icon.svg 1024 1024 "$art/icon_round512@2x.png"
+# macOS 26 draws an icon of the old format on a grey plate: its icon is an
+# Icon Composer file, the mark on white, which ci/package.sh compiles into the
+# bundle (the icons above stay for the patch and older systems get actool's
+# rendering).
+mkdir -p Icon.icon/Assets
+rsvg-convert -w 1024 -h 1024 svg/macos-mark.svg |
+	magick - -strip -define png:exclude-chunks=date,time PNG32:Icon.icon/Assets/mark.png
 
 # The one-colour tray icons and the mark cut out of QR codes stay SVG.
 cp svg/tray.svg "$icons/tray_monochrome.svg"

@@ -58,7 +58,7 @@ The brand of Pluma (task 017 of the server repository) comes from [`brand/`](bra
   What stays: the text of links (`telegram.org`, `t.me`: they open Telegram's pages), "Telegram API" credited in the About box, names in code, files and protocols nobody reads (`CODE_TELEGRAM`), the copyright notices. Other languages come from the server's language pack.
 - **Icons**, rendered from the brand kit's SVG by [`brand/render.sh`](brand/render.sh) into `brand/tree`, at the paths of the upstream files they replace (`ASSETS`: each checked against the upstream's SHA-256):
   - Windows: the executable's icon (`icon256.ico`) and the window, taskbar and tray icon (`logo_256.png`, also Linux's);
-  - macOS: the app icon (the Xcode asset catalog and the iconset), its round variant, the menu bar icon;
+  - macOS: the app icon (the Xcode asset catalog and the iconset), its round variant, the menu bar icon. macOS 26 draws an icon of that format on a grey plate, so `ci/package.sh` puts the Icon Composer icon [`brand/Icon.icon`](brand/Icon.icon) in its place (the mark on white, flat; actool also renders it for older systems);
   - Linux: the sizes `install()` puts in hicolor;
   - the monochrome tray icons, the mark in the centre of QR codes, and the mark on the intro screen in four layers (the ring and three feathers), which the palette colours.
 - **Colours**, palette "graphite and sage": graphite for text and icons, sage as the one accent, no Telegram blue.
