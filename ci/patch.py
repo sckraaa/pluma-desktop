@@ -87,6 +87,7 @@ WIN_RC = "Telegram/Resources/winrc/Telegram.rc"
 CMAKE_APP = "Telegram/CMakeLists.txt"
 CMAKE_OPTIONS = "Telegram/cmake/telegram_options.cmake"
 PLIST = "Telegram/Telegram.plist"
+ENTITLEMENTS = "Telegram/Telegram/Telegram.entitlements"
 DESKTOP_FILE = "lib/xdg/org.telegram.desktop.desktop"
 QT_VERSION_PY = "Telegram/build/qt_version.py"
 PREPARE = "Telegram/build/prepare/prepare.py"
@@ -197,7 +198,7 @@ MARKER = "pluma-patch.txt"
 
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse). verify() scans all the sources.
-UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, WIN_RC, DESKTOP_FILE,
+UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTITLEMENTS, WIN_RC, DESKTOP_FILE,
                   QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
                   LANG, NIGHT_THEME, SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
@@ -1188,6 +1189,9 @@ def check_upstream(tree, c):
     # The options the build passes are still the upstream's.
     tree.expect(CMAKE_VARIABLES, 'option(DESKTOP_APP_DISABLE_AUTOUPDATE "Disable autoupdate."')
     tree.expect(CMAKE_VARIABLES, 'option(DESKTOP_APP_DISABLE_CRASH_REPORTS "Disable crash report generation."')
+    # ci/sign-macos.sh signs with upstream's entitlements, which it copies.
+    if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
+        raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in EDITED + brand_edited():
         tree.lf_only(rel)
 

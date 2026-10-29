@@ -122,7 +122,7 @@ A second Pluma, say a second account, starts with its own data folder: `Pluma -w
 
 ## Builds for a server
 
-Desktop builds are not code signed: there is no Windows code signing certificate and no Apple Developer ID. A build for a real server is the same build as the development one, for another address and key.
+A build for a real server is the same build as the development one, for another address and key. The macOS app of it is also signed with Pluma's Developer ID and notarized ([Signing](#signing-macos)); the Windows one is not code signed (there is no certificate), and the development builds stay signed ad hoc.
 
 Anyone can read the workflow artifacts of a public repository. So a build for a real server leaves its job only encrypted with the owner's age key; the check job fails within seconds when `PLUMA_AGE_RECIPIENT` is not an age public key.
 
@@ -142,6 +142,21 @@ shasum -a 256 -c pluma-desktop-*.sha256
 ```
 
 Publishing to the server for download is a later step.
+
+### Signing (macOS)
+
+The job `sign-macos` takes the macOS app of a build for the server and signs it with the Developer ID Application certificate, with the hardened runtime, a secure timestamp and upstream's entitlements (`ci/macos.entitlements`, a copy of `Telegram.entitlements` that the patch checks). Apple notarizes it, and the ticket is stapled into the app, so Gatekeeper opens it without a warning, offline too. The job runs in the environment `release`, which holds the keys and waits for the owner's approval (*Review deployments* in the run). Its artifact is `pluma-desktop-macos-signed`, encrypted like the others:
+
+```sh
+gh run download <run id> -R sckraaa/pluma-desktop -n pluma-desktop-macos-signed
+```
+
+The secrets of the environment `release`:
+- `PLUMA_DEVELOPER_ID_P12`, `PLUMA_DEVELOPER_ID_PASSWORD`: the certificate with its key, a PKCS#12 file in base64, and its password. The key and the certificate request are made on a Mac, the certificate in the Apple Developer account (*Certificates*, *Developer ID Application*, by the Account Holder); `security import` takes a PKCS#12 written with LibreSSL (`/usr/bin/openssl pkcs12 -export`), not with OpenSSL 3's defaults.
+- `PLUMA_NOTARY_KEY`, `PLUMA_NOTARY_KEY_ID`, `PLUMA_NOTARY_ISSUER_ID`: an App Store Connect API team key with the access *Developer* (the `.p8` file in base64), its key id and the issuer id.
+- `PLUMA_AGE_IDENTITY`: the age key that decrypts the build.
+
+Without `PLUMA_DEVELOPER_ID_P12` the job signs nothing and says so. `ci/sign-macos.sh` runs on a GitHub runner only: it puts a keychain of its own on the user's search list.
 
 ## When it builds
 

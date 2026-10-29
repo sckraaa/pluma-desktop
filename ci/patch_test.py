@@ -391,6 +391,7 @@ DAMAGE = (
     (patch.MAIN_MENU, 'u"https://desktop.telegram.org"_q));', 'u"https://telegram.org/apps"_q));'),
     (patch.BANNED_BOX, '"login@stel.com"', '"recover@telegram.org"'),
     (patch.DATA_PEER, "static auto result = Window::LogoNoMargin().scaledToWidth(", "static auto result = Window::Logo().scaledToWidth("),
+    (patch.ENTITLEMENTS, "<key>com.apple.security.device.camera</key>", "<key>com.apple.security.device.usb</key>"),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
