@@ -14,15 +14,32 @@ ID = "2efe2717-52ef-43a5-96dc-0797e4ca1041"
 
 # Fakes of the macOS tools sign-macos.sh calls. Each logs its arguments to
 # $FAKE_LOG; the fakes come first on PATH, so no real keychain is touched.
-# notarytool answers as $FAKE_* say: submit prints $FAKE_SUBMIT and exits
-# $FAKE_SUBMIT_RC, wait exits $FAKE_WAIT_RC, info reports $FAKE_STATUS.
+# notarytool answers as $FAKE_* say: submit uploads as $FAKE_ID unless
+# $FAKE_UPLOAD_FAILS, wait stops early when $FAKE_WAIT_RC is 124, info
+# reports $FAKE_STATUS unless $FAKE_INFO_FAILS.
 FAKES = {
     "xcrun": """#!/usr/bin/env bash
 echo "xcrun $*" >>"$FAKE_LOG"
 case "$1 $2" in
-"notarytool submit") echo "$FAKE_SUBMIT"; exit "${FAKE_SUBMIT_RC:-0}" ;;
-"notarytool wait") exit "${FAKE_WAIT_RC:-0}" ;;
-"notarytool info") printf '{"id":"%s","status":"%s"}\\n' "$3" "$FAKE_STATUS" ;;
+"notarytool submit")
+	if [ -n "${FAKE_UPLOAD_FAILS:-}" ]; then
+		echo "Error: HTTP status code: 401. Unable to authenticate." >&2
+		exit 69
+	fi
+	printf '{"id":"%s","message":"Successfully uploaded file","path":"%s"}\\n' "$FAKE_ID" "$3" ;;
+"notarytool wait")
+	if [ "${FAKE_WAIT_RC:-0}" = 124 ]; then
+		# As notarytool: the answer of a wait cut short goes to stderr.
+		printf '{"id":"%s","message":"Timeout of 600 second(s) was reached before processing completed."}\\n' "$3" >&2
+		exit 124
+	fi
+	printf '{"id":"%s","status":"%s"}\\n' "$3" "$FAKE_STATUS" ;;
+"notarytool info")
+	if [ -n "${FAKE_INFO_FAILS:-}" ]; then
+		echo "Error: The request timed out." >&2
+		exit 1
+	fi
+	printf '{"id":"%s","status":"%s","name":"notarize.zip"}\\n' "$3" "$FAKE_STATUS" ;;
 "notarytool log") echo '{"issues":[]}' ;;
 "stapler "*) ;;
 *) exit 1 ;;
@@ -96,8 +113,7 @@ class SignTest(unittest.TestCase):
             self.assertEqual(z.namelist(), ["Pluma.app/Contents/Info.plist"])
 
     def test_sign_accepted(self):
-        run = self.run_script("sign", str(self.zip), str(self.out),
-                              submit=json.dumps({"id": ID, "status": "Accepted"}))
+        run = self.run_script("sign", str(self.zip), str(self.out), id=ID, status="Accepted")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("notarized", run.stdout)
         self.assert_delivered(self.zip.name, f"{self.zip.name}.sha256")
@@ -106,21 +122,32 @@ class SignTest(unittest.TestCase):
         self.assertIn("xcrun stapler staple", "\n".join(calls))
 
     def test_sign_outlasted(self):
-        # notarytool stops waiting with 124, and Apple keeps checking.
-        run = self.run_script("sign", str(self.zip), str(self.out), submit_rc=124,
-                              submit=json.dumps({"id": ID, "message": "Timeout of 1800 second(s) was reached"}))
+        # notarytool stops waiting with 124, its answer on stderr, and
+        # Apple keeps checking.
+        run = self.run_script("sign", str(self.zip), str(self.out), id=ID, wait_rc=124, status="In Progress")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn(f"still checking submission {ID}", run.stdout)
+        self.assertIn(f"submission {ID}: In Progress", run.stdout)
         self.assert_delivered(self.zip.name, f"{self.zip.name}.sha256", f"{self.zip.name}.notary-id")
         self.assertEqual((self.out / f"{self.zip.name}.notary-id").read_text(), ID + "\n")
         self.assertNotIn("stapler", "\n".join(self.calls()))
 
+    def test_sign_keeps_the_app_when_apple_cannot_be_asked(self):
+        run = self.run_script("sign", str(self.zip), str(self.out), id=ID, wait_rc=124, info_fails=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assert_delivered(self.zip.name, f"{self.zip.name}.sha256", f"{self.zip.name}.notary-id")
+
     def test_sign_rejected(self):
-        run = self.run_script("sign", str(self.zip), str(self.out),
-                              submit=json.dumps({"id": ID, "status": "Invalid"}))
+        run = self.run_script("sign", str(self.zip), str(self.out), id=ID, status="Invalid")
         self.assertEqual(run.returncode, 1)
-        self.assertIn("notarization: Invalid", run.stderr)
+        self.assertIn(f"submission {ID}: Invalid", run.stderr)
         self.assertIn(f"xcrun notarytool log {ID}", "\n".join(self.calls()))
+        self.assertFalse(self.out.exists())
+
+    def test_sign_upload_failed(self):
+        run = self.run_script("sign", str(self.zip), str(self.out), upload_fails=1)
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("upload to Apple failed", run.stderr)
+        self.assertNotIn("notarytool wait", "\n".join(self.calls()))
         self.assertFalse(self.out.exists())
 
     def test_sign_on_a_runner_only(self):
@@ -141,6 +168,7 @@ class SignTest(unittest.TestCase):
     def test_staple_still_checking(self):
         run = self.run_script("staple", str(self.zip), ID, str(self.out), wait_rc=124, status="In Progress")
         self.assertEqual(run.returncode, 75)
+        self.assertIn("In Progress", run.stderr)
         self.assertIn("run it again later", run.stderr)
         self.assertFalse(self.out.exists())
 

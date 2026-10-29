@@ -80,7 +80,7 @@ if [ ! -d "$app" ]; then
 	exit 1
 fi
 name=$(basename "$zip")
-notary=(--key "$PLUMA_NOTARY_KEY" --key-id "$PLUMA_NOTARY_KEY_ID" --issuer "$PLUMA_NOTARY_ISSUER_ID")
+keys=(--key "$PLUMA_NOTARY_KEY" --key-id "$PLUMA_NOTARY_KEY_ID" --issuer "$PLUMA_NOTARY_ISSUER_ID")
 
 # The app zipped into OUT under ZIP's name, with its SHA-256.
 deliver() {
@@ -89,10 +89,43 @@ deliver() {
 	(cd "$out" && shasum -a 256 "$name" >"$name.sha256")
 }
 
-# Apple's answer in $work/notary.json: notarytool's exit code is 124 when it
-# stops waiting first, and the answer then has the id but no status.
+# notary CMD...: runs notarytool CMD; its answer goes to $work/notary.json,
+# its exit code to rc. The answer is JSON on stdout, except that wait prints
+# it on stderr when it stops waiting first (exit code 124), so both streams
+# are kept.
+notary() {
+	rc=0
+	xcrun notarytool "$@" "${keys[@]}" --output-format json >"$work/notary.json" 2>&1 || rc=$?
+}
+
+# field KEY: KEY of the last JSON object in the answer that has it.
 field() {
-	python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$work/notary.json" "$1"
+	python3 -I -c '
+import json, sys
+for line in reversed(open(sys.argv[1]).read().splitlines()):
+    try:
+        answer = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(answer, dict) and sys.argv[2] in answer:
+        print(answer[sys.argv[2]])
+        break
+' "$work/notary.json" "$1"
+}
+
+# wait_for DURATION: waits for Apple's answer on submission $id and sets
+# status ("In Progress", "Accepted", "Invalid", "Rejected"; empty when Apple
+# could not be asked).
+wait_for() {
+	notary wait "$id" --timeout "$1"
+	notary info "$id"
+	status=$(field status)
+}
+
+rejected() {
+	echo "sign-macos: notarization of submission $id: $status; Apple's log:" >&2
+	xcrun notarytool log "$id" "${keys[@]}" >&2 || true
+	exit 1
 }
 
 if [ "$step" = sign ]; then
@@ -115,37 +148,40 @@ if [ "$step" = sign ]; then
 	codesign --verify --deep --strict "$app"
 
 	# Apple checks the app and issues a ticket; stapled into the app, it
-	# lets Gatekeeper accept the app without asking Apple.
+	# lets Gatekeeper accept the app without asking Apple. The id of the
+	# submission comes right after the upload: whatever happens while
+	# waiting, the signed app is kept with it.
 	ditto -c -k --keepParent "$app" "$work/notarize.zip"
-	rc=0
-	xcrun notarytool submit "$work/notarize.zip" "${notary[@]}" --wait --timeout 30m --output-format json >"$work/notary.json" || rc=$?
+	notary submit "$work/notarize.zip"
 	id=$(field id)
-	if [ "$rc" = 124 ] && [ -n "$id" ]; then
+	if [ -z "$id" ]; then
+		echo "sign-macos: the upload to Apple failed (exit code $rc):" >&2
+		cat "$work/notary.json" >&2
+		exit 1
+	fi
+	wait_for 30m
+	case $status in
+	Accepted) ;;
+	Invalid | Rejected) rejected ;;
+	*)
 		deliver
 		echo "$id" >"$out/$name.notary-id"
-		echo "sign-macos: $out/$name, signed; Apple is still checking submission $id (sign-macos.sh staple)"
+		echo "sign-macos: $out/$name, signed; Apple's answer on submission $id: ${status:-none yet} (sign-macos.sh staple)"
 		exit 0
-	fi
+		;;
+	esac
 else
-	# info answers in the fields of submit; wait's own answer is not
-	# documented.
-	rc=0
-	xcrun notarytool wait "$id" "${notary[@]}" --timeout 10m >&2 || rc=$?
-	xcrun notarytool info "$id" "${notary[@]}" --output-format json >"$work/notary.json"
-	if [ "$(field status)" = "In Progress" ]; then
-		echo "sign-macos: Apple is still checking submission $id; run it again later" >&2
+	wait_for 10m
+	case $status in
+	Accepted) ;;
+	Invalid | Rejected) rejected ;;
+	*)
+		echo "sign-macos: Apple's answer on submission $id: ${status:-none}; run it again later" >&2
 		exit 75
-	fi
+		;;
+	esac
 fi
 
-status=$(field status)
-if [ "$status" != Accepted ]; then
-	echo "sign-macos: notarization: ${status:-no answer} (exit code $rc); Apple's log:" >&2
-	if [ -n "$id" ]; then
-		xcrun notarytool log "$id" "${notary[@]}" >&2 || true
-	fi
-	exit 1
-fi
 xcrun stapler staple "$app"
 xcrun stapler validate "$app"
 spctl --assess --type execute --verbose=2 "$app"
