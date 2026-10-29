@@ -1,0 +1,112 @@
+# The default light theme of Pluma, palette "graphite and sage" (task 017 of
+# the server repository): Telegram/lib_ui/ui/colors.palette, the palette
+# compiled into the app ("Classic" in Settings > Chat Settings). Themes that
+# leave a key out take it from here (or from the key after "|").
+#
+# One line per colour: "key: upstream value -> Pluma value". ci/patch.py
+# replaces each one and stops when the upstream value differs. The rest keeps
+# upstream's values: user colours, file type colours, alerts, greys, the
+# calls and Premium palettes, and the default chat background (a green
+# gradient pattern, data/data_wall_paper.cpp).
+#
+# Background #ffffff, text #111111, secondary text #6b6f6b; accent #5b7a5e
+# with white on it (buttons, switches, counters, the current chat); soft
+# accent #6f8f72 and #e3eae2 (avatars, highlights, selection); links
+# #4f6e52; incoming bubbles #f1f2f0; outgoing bubbles #e3eae2 with text
+# #1f2e20 (a solid colour: Desktop draws gradient bubbles only for cloud chat
+# themes); time and checks in outgoing #5b7a5e. The folders side bar and the
+# intro cover are graphite and soft sage, the mark in its own colours.
+windowFg: #000000 -> #111111
+windowSubTextFg: #999999 -> #6b6f6b
+windowSubTextFgOver: #919191 -> #626662
+windowBgActive: #40a7e3 -> #5b7a5e
+windowActiveTextFg: #168acd -> #4f6e52
+activeButtonBgOver: #39a5db -> #557258
+activeButtonBgRipple: #2095d0 -> #4d6850
+activeButtonSecondaryFg: #cceeff -> #dce7dc
+activeLineFg: #37a1de -> #5b7a5e
+lightButtonBgOver: #e3f1fa -> #e3eae2
+lightButtonBgRipple: #c9e4f6 -> #d5e1d4
+menuIconFg: #999999 -> #6b6f6b
+menuIconFgOver: #8a8a8a -> #4a4f4a
+filterInputBorderFg: #54c3f3 -> #6f8f72
+botKbPrimaryBg: #298acfcc -> #5b7a5ecc
+botKbInlinePrimaryBg: #378eaeb3 -> #5b7a5eb3
+sliderBgInactive: #e1eaef -> #e1e6e1
+tooltipBg: #eef2f5 -> #f1f2f0
+tooltipFg: #5d6c80 -> #4a4f4a
+tooltipBorderFg: #c9d1db -> #d3d8d2
+introCoverTopBg: #0f89d0 -> #e3eae2
+introCoverBottomBg: #39b0f0 -> #d5e1d4
+introCoverIconsFg: #5ec6ff -> #c9d7c8
+introCoverPlaneTrace: #5ec6ff69 -> #111111
+introCoverPlaneInner: #c6d8e8 -> #4a4a4a
+introCoverPlaneOuter: #a1bed4 -> #8a8a8a
+introCoverPlaneTop: #ffffff -> #bdbdbd
+dialogsSentIconFg: #5dc452 -> #5b7a5e
+dialogsSentIconFgOver: #58b84d -> #557258
+dialogsBgActive: #419fd9 -> #5b7a5e
+dialogsDraftFgActive: #c6e1f7 -> #dce7dc
+toastBg: #2c3033e5 -> #262926e5
+historyTextOutFg: windowFg -> #1f2e20
+historyOutIconFg: #57b84c -> #5b7a5e
+historyOutIconFgSelected: #45a3aa -> #4f6e52
+historySendingOutIconFg: #98d292 -> #9db59f
+historySendingInIconFg: #a0adb5 -> #a3a8a3
+historyCallArrowInFgSelected: #2592a8 -> #4f6e52
+historyUnreadBarFg: #538bb4 -> #5b7a5e
+historyPeer4NameFg: windowActiveTextFg -> #168acd
+historyPeerSavedMessagesBg: historyPeer4UserpicBg -> #6f8f72
+historyPeerSavedMessagesBg2: historyPeer4UserpicBg2 -> #5b7a5e
+msgInBg: windowBg -> #f1f2f0
+msgInBgSelected: #c2dcf2 -> #d5e1d4
+msgOutBg: #effdde -> #e3eae2
+msgOutBgSelected: #b7dbdb -> #c9d7c8
+msgSelectOverlay: #358cd44c -> #5b7a5e4c
+msgStickerOverlay: #358cd47f -> #5b7a5e7f
+msgOutServiceFg: #45a32d -> #4f6e52
+msgOutServiceFgSelected: #469992 -> #4f6e52
+msgInShadow: #748ea229 -> #6b6f6b29
+msgInShadowSelected: #548dbb29 -> #5b7a5e29
+msgOutShadow: #3ac3461d -> #5b7a5e1d
+msgOutShadowSelected: #37a78d22 -> #4f6e5222
+msgInDateFg: #a0acb6 -> #8a8f8a
+msgInDateFgSelected: #6a9cc5 -> #5b7a5e
+msgOutDateFg: #6db566 -> #5b7a5e
+msgOutDateFgSelected: #56b2a6 -> #4f6e52
+msgOutReplyBarColor: #5eb854 -> #5b7a5e
+msgInMonoFg: #4e7391 -> #4f6e52
+msgOutMonoFg: #459866 -> #3f5e42
+msgDateImgBgSelected: #1c4a7187 -> #2c3a2d87
+msgFileThumbLinkOutFg: #4ba831 -> #4f6e52
+msgFileThumbLinkOutFgSelected: #31a298 -> #4f6e52
+msgFileInBgOver: #4eade3 -> #557258
+msgFileInBgSelected: #51a3d3 -> #4f6e52
+msgFileOutBg: #5fbe67 -> #5b7a5e
+msgFileOutBgSelected: #50ac9b -> #4f6e52
+msgWaveformInActiveSelected: #51a3d3 -> #4f6e52
+msgWaveformInInactive: #d4dee6 -> #d3d8d2
+msgWaveformInInactiveSelected: #9cc1e1 -> #b5c7b4
+msgWaveformOutActive: #5ebd66 -> #5b7a5e
+msgWaveformOutActiveSelected: #6badad -> #4f6e52
+msgWaveformOutInactive: #b3e2b4 -> #b5c7b4
+msgWaveformOutInactiveSelected: #91c3c3 -> #9db59f
+historyComposeAreaBg: msgInBg -> windowBg
+overviewPhotoSelectOverlay: #40ace333 -> #5b7a5e33
+profileStatusFgOver: #7c99b2 -> #626662
+mainMenuCloudBg: #2785bf | activeButtonBgRipple -> #4d6850 | activeButtonBgRipple
+mediaPlayerDisabledFg: #9dd1ef -> #b5c7b4
+mediaviewTextLinkFg: #4db8ff -> #b2ceb4
+sideBarBg: #293a4c -> #2b2f2b
+sideBarBgActive: #17212b -> #1d201d
+sideBarBgRipple: #1e2b38 -> #232623
+sideBarTextFg: #8897a6 -> #9aa29a
+sideBarTextFgActive: #64b9fa -> #9dbb9f
+sideBarIconFg: #8393a3 -> #8f978f
+sideBarIconFgActive: #5eb5f7 -> #9dbb9f
+sideBarBadgeBg: #5eb5f7 -> #9dbb9f
+sideBarBadgeBgMuted: #8393a3 -> #8a928a
+sideBarBadgeFg: #ffffff -> #131513
+photoEditorItemBaseHandleFg: #3ccaef -> #5b7a5e
+currencyFg: #168acd -> #4f6e52 | windowActiveTextFg
+dialogsMentionIconFg: #40a7e3 | dialogsVerifiedIconBg -> #5b7a5e | dialogsVerifiedIconBg

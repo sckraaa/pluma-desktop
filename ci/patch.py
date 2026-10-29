@@ -9,6 +9,10 @@ again: no Telegram datacenter address or server key is left in the client's
 sources, the fallbacks that reach Telegram are never started, and the
 identity is Pluma's.
 
+The brand is Pluma's too: the name in the interface, plm:// links in place
+of tg://, the icons rendered in brand/, and the palette "graphite and sage"
+of the default light and dark themes (brand/palette-*.txt).
+
 The api_id and api_hash are not edits: the build passes them to CMake
 (-D TDESKTOP_API_ID / TDESKTOP_API_HASH), together with the options that
 compile out the updater and the crash reports (the patch makes CMake refuse
@@ -20,11 +24,15 @@ Standard library only, so the CI and a developer machine run it as is.
 import argparse
 import base64
 import hashlib
+import io
 import ipaddress
 import pathlib
 import re
+import struct
 import sys
 import uuid
+import zipfile
+import zlib
 
 # Telegram's own server keys (production, test) with the fingerprints the
 # server announces for them, and the key Telegram signs its "special config"
@@ -92,14 +100,85 @@ CMAKE_VARIABLES = "cmake/variables.cmake"
 # texts, the link scheme and the default themes.
 BRAND = pathlib.Path(__file__).resolve().parent.parent / "brand"
 LANG = "Telegram/Resources/langs/lang.strings"
+NIGHT_THEME = "Telegram/Resources/night.tdesktop-theme"
 SHELL_PAGE = "Telegram/Resources/bot_webview_shell_html/page.js"
 CUSTOM_SHORTCUTS = "Telegram/Resources/default_shortcuts-custom.json"
+EMBEDDED_THEMES = SOURCES + "/window/themes/window_themes_embedded.cpp"
 EXPORT_HTML = SOURCES + "/export/output/export_output_html.cpp"
 INTRO_QR = SOURCES + "/intro/intro_qr.cpp"
+CONNECTION_BOX = SOURCES + "/boxes/connection_box.cpp"
 ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
 # In the lib_ui and lib_base submodules.
+PALETTE = "Telegram/lib_ui/ui/colors.palette"
 TEXT_ENTITY = "Telegram/lib_ui/ui/text/text_entity.cpp"
 QTHELP_URL = "Telegram/lib_base/base/qthelp_url.cpp"
+
+# Upstream files that brand/tree replaces, rendered from brand/svg by
+# brand/render.sh, with the SHA-256 of the pinned upstream's file: the patch
+# replaces a file only when it is still upstream's (icons of a release that
+# changes them are looked at again).
+ASSETS = (
+    ("Telegram/Resources/art/icon128.png", "731431e47a5bc91c697d25c3a54fe7ba004752f5b66e0f282c47588ff7a314e6"),
+    ("Telegram/Resources/art/icon128@2x.png", "a6e26ac151cea4bf7642ce5ffcfed1dfec938a0c2db2ce26626adb4b14880b9c"),
+    ("Telegram/Resources/art/icon16.png", "ea1f36152b143cc2664daef5026656d55be2230ed42d43628e17ef7d2fff718c"),
+    ("Telegram/Resources/art/icon16@2x.png", "beecd061f6df3a63a8165bcac0b4acc322f5d096f1439c06e812225cfa3e23ae"),
+    ("Telegram/Resources/art/icon256.ico", "6d27da5cf7669e32dc2cf09e331befe8e39045f75f95e0cbfe02c16e675d81bb"),
+    ("Telegram/Resources/art/icon256.png", "3fb1400c7dc9bbc3b5cb3ffedcbf4a9b09c53e28b57a7ff33a8a6b9048864090"),
+    ("Telegram/Resources/art/icon256@2x.png", "c395c36446e752513c3bba8a31da3a0bfd130440be2b71e6c3fa5ea05ffbd7ce"),
+    ("Telegram/Resources/art/icon32.png", "9e4180c78c895783b4559c5e1a7868a2c9aa30a29969fe5dbe9a4ce4cf5cde6c"),
+    ("Telegram/Resources/art/icon32@2x.png", "a67e2b8375e8ef28655f8772a85013ce637124971c0307d9d04497233cac400a"),
+    ("Telegram/Resources/art/icon48.png", "041b78681a35f07c3c929662fc66b6592c88588dc7297a5394ef7f923f2118e2"),
+    ("Telegram/Resources/art/icon48@2x.png", "2f7c026037ddfe12ecd3567f296aa6cbfb98a3c7f278798a9eca5f434f2893f7"),
+    ("Telegram/Resources/art/icon512.png", "e297771c75bd2f81d637a3234f83568be62092f67d16946be23895fa92fa7119"),
+    ("Telegram/Resources/art/icon512@2x.png", "286fbd6f210511daf5e7d26b62784d5d6abe575d72863b45c409f4e57b93db5d"),
+    ("Telegram/Resources/art/icon64.png", "554dff9f55697d4e8ec69e9aa53678aa5dae3e91aa13adc3b115526d8d51dfc9"),
+    ("Telegram/Resources/art/icon64@2x.png", "3072dec3872444fc3c1b8d7900205d3867e2fa312bb7084ac4f820a1ca518b78"),
+    ("Telegram/Resources/art/icon_round512@2x.png", "fe5ef7cc2d6de70c63db265c849af6f912b1c0792eae9e12bec627b4f8366234"),
+    ("Telegram/Resources/art/logo_256.png", "3fb1400c7dc9bbc3b5cb3ffedcbf4a9b09c53e28b57a7ff33a8a6b9048864090"),
+    ("Telegram/Resources/art/logo_256_no_margin.png", "44af9a76a532559ef8cb450b48096713be819103ab79a19d7e4abb9b32ff4cb7"),
+    ("Telegram/Resources/icons/intro_plane_inner.png", "4a7592dd9a7436cc0f5cb9f1f5676e69d3d1f97831f521204ba2f1675b7c33ea"),
+    ("Telegram/Resources/icons/intro_plane_inner@2x.png", "25b9ad6b0176fbb787aa63947229e4d7bfb2b3de54be402cc50936a8a953da3f"),
+    ("Telegram/Resources/icons/intro_plane_inner@3x.png", "6b4af679260bdf4585b825342f7cbc62ea61794c21ee5caa3b55cf59283ba5e4"),
+    ("Telegram/Resources/icons/intro_plane_outer.png", "0119d5f36727e4634126dd15548398d37dbc11a03c12abb2798d8796fc5f49bd"),
+    ("Telegram/Resources/icons/intro_plane_outer@2x.png", "9fd5188991564ae806b3ff4daa1412e0dab1e538c1d4b6127a9b88dfac0b5cc7"),
+    ("Telegram/Resources/icons/intro_plane_outer@3x.png", "c596bbdda0e38786863d13579f3e995d2b541ddebb8c732caeeb4997616ac3e7"),
+    ("Telegram/Resources/icons/intro_plane_top.png", "b2debf476ba94567633411b3786c30e3e4a2ea234f913756bd2ea04537fe2ab7"),
+    ("Telegram/Resources/icons/intro_plane_top@2x.png", "ffe198e9f246c686782e4edfa242c0c7522f6b451ccddd76752bd3f5bce4e4f3"),
+    ("Telegram/Resources/icons/intro_plane_top@3x.png", "a51803e3a345802577e0ad9e1d50560abfe347fcadc798415c109298151d2285"),
+    ("Telegram/Resources/icons/intro_plane_trace.png", "e27a03292893b813ba89175f4667020280dc9bf980007a8a3216b071b23318f3"),
+    ("Telegram/Resources/icons/intro_plane_trace@2x.png", "bfd4f363c9142f91b9bcc2186420a5d539581ab8557c88dc6adca4b52da9c15c"),
+    ("Telegram/Resources/icons/intro_plane_trace@3x.png", "dcb075d5ac7a8b84113307cca7351b3aa21f517ea32b70db67dea73ee3bcdfb8"),
+    ("Telegram/Resources/icons/intro_qr_plane.png", "7a3f2aadcb125f33757729cf707afc987a4ca1b8f288b2b49dec86a34402238d"),
+    ("Telegram/Resources/icons/intro_qr_plane@2x.png", "482b4caa7daa25fa31bd3dd56b853df4506e4cfd241cb24a518344c7a5474ab5"),
+    ("Telegram/Resources/icons/intro_qr_plane@3x.png", "1f4a91ceda3f74a9b544c810c54383c7d2ee7fc6056b04f19a71e5f24c21b267"),
+    ("Telegram/Resources/icons/mac_tray_icon.png", "fdd45401382301b3495398a7e40919e5717c2b7239240a843d01ef15ebc54a1c"),
+    ("Telegram/Resources/icons/mac_tray_icon@2x.png", "ccadde7f1b72e1aec15dc1054be5f36191357df847f883bc0f7d54b439f3b369"),
+    ("Telegram/Resources/icons/mac_tray_icon@3x.png", "334731eed269374c2c3cb5836aa70a932fbf2697715bd2574ba4b2c5b4291eb5"),
+    ("Telegram/Resources/icons/plane_white.svg", "03c4d53763861ff93e08314a3f5bf710059cb89aadfffc44c6be24dba29e57cb"),
+    ("Telegram/Resources/icons/tray_monochrome.svg", "a93380f2c7e6aae4d5fde8940020bd966e97ad8c4880f45c016edfef3f5193e1"),
+    ("Telegram/Resources/icons/tray_monochrome_attention.svg", "2b67ee19839dbbb9f57f2d7433fd6dc1059634d6d081c5e4c422c14f53fcfcc7"),
+    ("Telegram/Resources/icons/tray_monochrome_mute.svg", "efa1439bd60b58db7b755f5d21be854ea686a0e1e2f1aa6e43bf35c083ee72fc"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon128.png", "440c9bda08c610968689793f91e8c9ddb6f68cbe036ec1c565652e4a490c31ee"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon128@2x.png", "2224aff4b266bbe8537a3665976755532fbed0f0a1b9c3c5b69ce685a14d81e9"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon16.png", "0c0865970588581338734e89ae3a34a93926f4f75117d72e903748528e3dc0cc"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon16@2x.png", "507d7c6066057ffce3539d6cf36eef4ec187187b4306d66586b4451e144ab6a4"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon256.png", "b82ae7291bd5fe75257ba7b10f04eb720aa1bd07a233a3e9f4998db6e4b2d3b0"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon256@2x.png", "560712f2fd027401853644906d4bd403ff702446a77c48650cca47cbd22fb1e4"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon32.png", "2f09885d2a44487631b73aad913060aa9c19da2f2cce289060f9c2b0fea01ca5"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon32@2x.png", "b66147a5f0b64ce49df92b26f7e833bd732f6cb42f2d65259ed55e18b6b37327"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon512.png", "d5f261f0e500cb9c553e515a59e7c802c6ad1c13d8a29dd306f65cbd7892a546"),
+    ("Telegram/Telegram/Images.xcassets/Icon.appiconset/icon512@2x.png", "23cd0fb47b2a26eef1abf69e760dfb5deb02b1a60ce60f05c5f9d8c65f2f7b36"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_128x128.png", "440c9bda08c610968689793f91e8c9ddb6f68cbe036ec1c565652e4a490c31ee"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_128x128@2x.png", "2224aff4b266bbe8537a3665976755532fbed0f0a1b9c3c5b69ce685a14d81e9"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_16x16.png", "0c0865970588581338734e89ae3a34a93926f4f75117d72e903748528e3dc0cc"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_16x16@2x.png", "507d7c6066057ffce3539d6cf36eef4ec187187b4306d66586b4451e144ab6a4"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_256x256.png", "b82ae7291bd5fe75257ba7b10f04eb720aa1bd07a233a3e9f4998db6e4b2d3b0"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_256x256@2x.png", "560712f2fd027401853644906d4bd403ff702446a77c48650cca47cbd22fb1e4"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_32x32.png", "2f09885d2a44487631b73aad913060aa9c19da2f2cce289060f9c2b0fea01ca5"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_32x32@2x.png", "b66147a5f0b64ce49df92b26f7e833bd732f6cb42f2d65259ed55e18b6b37327"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_512x512.png", "d5f261f0e500cb9c553e515a59e7c802c6ad1c13d8a29dd306f65cbd7892a546"),
+    ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_512x512@2x.png", "23cd0fb47b2a26eef1abf69e760dfb5deb02b1a60ce60f05c5f9d8c65f2f7b36"),
+)
 
 # The classes whose network requests go to Google, Mozilla and Firebase for
 # Telegram's backup addresses and time: they may be constructed nowhere.
@@ -115,10 +194,10 @@ MARKER = "pluma-patch.txt"
 # these (ci/fetch-upstream.sh sparse). verify() scans all the sources.
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, WIN_RC, DESKTOP_FILE,
                   QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
-                  LANG, SHELL_PAGE, CUSTOM_SHORTCUTS)
+                  LANG, NIGHT_THEME, SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
-SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/text/text_entity.cpp"),
-                   ("Telegram/lib_base", "base/qthelp_url.cpp"))
+SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.palette"),
+                   ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"))
 
 SOURCE_SUFFIXES = (".cpp", ".h", ".mm", ".m", ".c", ".cc", ".hpp")
 
@@ -220,8 +299,11 @@ class Tree:
             raise PatchError(f"{root}: not a telegramdesktop/tdesktop checkout")
 
     def read(self, rel):
+        return self.read_bytes(rel).decode("utf-8")
+
+    def read_bytes(self, rel):
         try:
-            return (self.root / rel).read_bytes().decode("utf-8")
+            return (self.root / rel).read_bytes()
         except FileNotFoundError:
             raise PatchError(f"{rel}: missing; upstream moved it, or the checkout lacks it")
 
@@ -230,9 +312,12 @@ class Tree:
         return (self.root / rel).read_bytes().decode("utf-8", errors="replace")
 
     def write(self, rel, text):
+        self.write_bytes(rel, text.encode("utf-8"))
+
+    def write_bytes(self, rel, data):
         p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(text.encode("utf-8"))
+        p.write_bytes(data)
 
     def lf_only(self, rel):
         if "\r\n" in self.read(rel):
@@ -663,6 +748,175 @@ REGISTER_URL_SCHEME = """\
 		.displayAppDescription = AppName.utf16(),
 	});"""
 
+# The default themes, palette "graphite and sage" (brand/palette-*.txt): the
+# night theme is a zip of its colours and a 1x1 background, which the patch
+# writes again; the background is the chat's, a shade below the window's.
+NIGHT_THEME_SHA256 = "364fcd7288453377e16db9c733fd98699b161248bc62cc62f78d58d909951d3a"
+NIGHT_COLORS, NIGHT_BACKGROUND = "colors.tdesktop-theme", "background.png"
+NIGHT_WALLPAPER = (0x0F, 0x11, 0x0F)
+
+# The theme tiles of Settings > Chat Settings and the base colour of the
+# accent picker, which recolours what is near it: the Pluma accent.
+EMBEDDED_CLASSIC = ("""\
+			EmbeddedType::Default,
+			qColor("9bd494"),
+			qColor("eaffdc"),
+			qColor("ffffff"),
+			qColor("eaffdc"),
+			qColor("ffffff"),
+			name(tr::lng_settings_theme_classic),
+			QString(),
+			qColor("40a7e3")
+""", """\
+			EmbeddedType::Default,
+			qColor("9bd494"),
+			qColor("e3eae2"),
+			qColor("ffffff"),
+			qColor("e3eae2"),
+			qColor("ffffff"),
+			name(tr::lng_settings_theme_classic),
+			QString(),
+			qColor("5b7a5e") // pluma: the accent of brand/palette-day.txt
+""")
+EMBEDDED_NIGHT = ("""\
+			EmbeddedType::Night,
+			qColor("485761"),
+			qColor("5ca7d4"),
+			qColor("6b808d"),
+			qColor("6b808d"),
+			qColor("5ca7d4"),
+			name(tr::lng_settings_theme_tinted),
+			":/gui/night.tdesktop-theme",
+			qColor("5288c1")
+""", """\
+			EmbeddedType::Night,
+			qColor("3a423a"),
+			qColor("7fa082"),
+			qColor("5f685f"),
+			qColor("5f685f"),
+			qColor("7fa082"),
+			name(tr::lng_settings_theme_tinted),
+			":/gui/night.tdesktop-theme",
+			qColor("9dbb9f") // pluma: the accent of brand/palette-night.txt
+""")
+# When the user picks an accent for the night theme, the text on what the
+# accent fills keeps its contrast: Pluma's text there is dark, so a dark
+# accent turns it white.
+NIGHT_CONTRAST = ("""\
+		result.keepContrast = base::flat_map<QLatin1String, Pair>{ {
+			//{ qstr("windowFgActive"), Pair{ cColor("5288c1"), cColor("17212b") } }, // windowBgActive
+			{ qstr("activeButtonFg"), Pair{ cColor("2f6ea5"), cColor("17212b") } }, // activeButtonBg
+			{ qstr("profileVerifiedCheckFg"), Pair{ cColor("5288c1"), cColor("17212b") } }, // profileVerifiedCheckBg
+			{ qstr("overviewCheckFgActive"), Pair{ cColor("5288c1"), cColor("17212b") } }, // overviewCheckBgActive
+			{ qstr("historyFileInIconFg"), Pair{ cColor("3f96d0"), cColor("182533") } }, // msgFileInBg, msgInBg
+			{ qstr("historyFileInIconFgSelected"), Pair{ cColor("6ab4f4"), cColor("2e70a5") } }, // msgFileInBgSelected, msgInBgSelected
+			{ qstr("historyFileInRadialFg"), Pair{ cColor("3f96d0"), cColor("182533") } }, // msgFileInBg, msgInBg
+			{ qstr("historyFileInRadialFgSelected"), Pair{ cColor("6ab4f4"), cColor("2e70a5") } }, // msgFileInBgSelected, msgInBgSelected
+			{ qstr("historyFileOutIconFg"), Pair{ cColor("4c9ce2"), cColor("2b5278") } }, // msgFileOutBg, msgOutBg
+			{ qstr("historyFileOutIconFgSelected"), Pair{ cColor("58abf3"), cColor("2e70a5") } }, // msgFileOutBgSelected, msgOutBgSelected
+			{ qstr("historyFileOutRadialFg"), Pair{ cColor("4c9ce2"), cColor("2b5278") } }, // msgFileOutBg, msgOutBg
+			{ qstr("historyFileOutRadialFgSelected"), Pair{ cColor("58abf3"), cColor("2e70a5") } }, // msgFileOutBgSelected, msgOutBgSelected
+		} };
+""", """\
+		// pluma: the night colours of brand/palette-night.txt.
+		result.keepContrast = base::flat_map<QLatin1String, Pair>{ {
+			{ qstr("activeButtonFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // activeButtonBg
+			{ qstr("profileVerifiedCheckFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // profileVerifiedCheckBg
+			{ qstr("overviewCheckFgActive"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // overviewCheckBgActive
+			{ qstr("historyFileInIconFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // msgFileInBg
+			{ qstr("historyFileInIconFgSelected"), Pair{ cColor("b2ceb4"), cColor("ffffff") } }, // msgFileInBgSelected
+			{ qstr("historyFileInRadialFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // msgFileInBg
+			{ qstr("historyFileInRadialFgSelected"), Pair{ cColor("b2ceb4"), cColor("ffffff") } }, // msgFileInBgSelected
+			{ qstr("historyFileOutIconFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // msgFileOutBg
+			{ qstr("historyFileOutIconFgSelected"), Pair{ cColor("b2ceb4"), cColor("ffffff") } }, // msgFileOutBgSelected
+			{ qstr("historyFileOutRadialFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // msgFileOutBg
+			{ qstr("historyFileOutRadialFgSelected"), Pair{ cColor("b2ceb4"), cColor("ffffff") } }, // msgFileOutBgSelected
+		} };
+""")
+# The circle under the mark in the centre of QR codes (sign-in, proxy).
+QR_COLORS = ((INTRO_QR, "\treturn QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.\n",
+              "\treturn QColor(0x5B, 0x7A, 0x5E); // pluma: the default windowBgActive.\n"),
+             (CONNECTION_BOX, "\treturn QColor(0x40, 0xA7, 0xE3);\n",
+              "\treturn QColor(0x5B, 0x7A, 0x5E); // pluma: the default windowBgActive.\n"))
+
+# Telegram's accent blues, in no default colour of Pluma's (verify()).
+TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5288c1", "6ab3f3", "2f6ea5",
+                  "4082bc", "2b5278", "6ab2f2", "72bcfd", "64b9fa", "5eb5f7")
+# Keys of the default themes that may stay blue: user colours, file type
+# colours, the Premium, statistics and call palettes (verify()).
+KEPT_BLUE = re.compile(r"historyPeer[47]\w*|msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
+                       r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+|groupCall\w+")
+
+
+def load_table(path):
+    """The lines "key: upstream value -> Pluma value" of a brand table."""
+    rows = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, rest = line.partition(": ")
+        old, arrow, new = rest.partition(" -> ")
+        if not sep or not arrow or not re.fullmatch(r"[A-Za-z0-9_]+", key) or not old or not new:
+            raise PatchError(f"{path.name}:{n}: expected 'key: upstream value -> Pluma value'")
+        rows.append((key, old, new))
+    if len({key for key, _, _ in rows}) != len(rows):
+        raise PatchError(f"{path.name}: a key is there twice")
+    return rows
+
+
+def recolor(text, rows, where):
+    """The colours of a palette or theme with every "key: old;" of rows made
+    "key: new;", and the keys with old "-" added."""
+    text = "\n" + text
+    for key, old, new in rows:
+        if old == "-":
+            if re.search(rf"^{key}:", text, re.M):
+                raise PatchError(f"{where}: {key} is there already; upstream added it")
+            text += f"{key}: {new}; // pluma\n"
+            continue
+        line = f"\n{key}: {old};"
+        if text.count(line) != 1:
+            raise PatchError(f"{where}: {text.count(line)} occurrences of {line.strip()!r}, expected 1; "
+                             "upstream changed the colour")
+        text = text.replace(line, f"\n{key}: {new};")
+    return text[1:]
+
+
+def palette_values(text):
+    """{key: value} of a palette or theme, the value as written."""
+    return dict(re.findall(r"^([A-Za-z0-9_]+):\s*([^;]*?)\s*;", text, re.M))
+
+
+def night_colors(data):
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            if z.namelist() != [NIGHT_COLORS, NIGHT_BACKGROUND]:
+                raise PatchError(f"{NIGHT_THEME}: holds {z.namelist()}")
+            return z.read(NIGHT_COLORS).decode("utf-8")
+    except zipfile.BadZipFile:
+        raise PatchError(f"{NIGHT_THEME}: not a zip")
+
+
+def png_1x1(rgb):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\0" + bytes(rgb), 9)) + chunk(b"IEND", b""))
+
+
+def night_theme(colors):
+    """The night theme's zip, the same for the same colours."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for name, data in ((NIGHT_COLORS, colors.encode("utf-8")), (NIGHT_BACKGROUND, png_1x1(NIGHT_WALLPAPER))):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            z.writestr(info, data)
+    return out.getvalue()
+
 
 def lang_entries(text):
     entries = list(LANG_ENTRY.finditer(text))
@@ -749,6 +1003,46 @@ def rebrand(tree, c):
                  '\taddOne(QString::fromLatin1("plm")); // local urls (pluma)\n')
     tree.replace(QTHELP_URL, '\t\t|| equals(qstr("tg"))\n', '\t\t|| equals(qstr("plm")) // pluma\n')
 
+    # The icons.
+    for rel, sha256 in ASSETS:
+        if hashlib.sha256(tree.read_bytes(rel)).hexdigest() != sha256:
+            raise PatchError(f"{rel}: not the pinned upstream's file; upstream changed it (brand/render.sh)")
+        tree.write_bytes(rel, (BRAND / "tree" / rel).read_bytes())
+
+    # The colours: the light palette compiled in, the night theme, the theme
+    # tiles and the accent picker, the QR codes.
+    tree.write(PALETTE, recolor(tree.read(PALETTE), load_table(BRAND / "palette-day.txt"), PALETTE))
+    data = tree.read_bytes(NIGHT_THEME)
+    if hashlib.sha256(data).hexdigest() != NIGHT_THEME_SHA256:
+        raise PatchError(f"{NIGHT_THEME}: not the pinned upstream's theme; upstream changed it")
+    colors = recolor(night_colors(data), load_table(BRAND / "palette-night.txt"), f"{NIGHT_THEME}: {NIGHT_COLORS}")
+    tree.write_bytes(NIGHT_THEME, night_theme(colors))
+    for old, new in (EMBEDDED_CLASSIC, EMBEDDED_NIGHT, NIGHT_CONTRAST):
+        tree.replace(EMBEDDED_THEMES, old, new)
+    for rel, old, new in QR_COLORS:
+        tree.replace(rel, old, new)
+
+
+def is_blue(value):
+    """A colour of Telegram's blues: hue 185-240, not grey."""
+    m = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", value)
+    if not m:
+        return False
+    r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4))
+    high, low = max(r, g, b), min(r, g, b)
+    if high - low < 0.12 * 255 or b != high:
+        return False
+    hue = 60 * (4 + (r - g) / (high - low)) % 360
+    return 185 <= hue <= 240
+
+
+def resolve(values, key, seen=()):
+    """The colour a palette key has: its literal, or its reference's."""
+    value = values[key].split("|")[0].strip()
+    if value.startswith("#") or value in seen or value not in values:
+        return value
+    return resolve(values, value, seen + (key,))
+
 
 def verify_brand(tree):
     """Checks the brand independently of how the edits were made."""
@@ -784,6 +1078,19 @@ def verify_brand(tree):
             or 'qstr("tg")' in tree.read(QTHELP_URL)):
         raise PatchError(f"{TEXT_ENTITY}, {QTHELP_URL}: texts still link tg:// and not plm://")
 
+    # Pluma's icons, and no Telegram blue in the default themes but what
+    # KEPT_BLUE keeps.
+    for rel, _ in ASSETS:
+        if tree.read_bytes(rel) != (BRAND / "tree" / rel).read_bytes():
+            raise PatchError(f"{rel}: not Pluma's (brand/tree)")
+    day = palette_values(tree.read(PALETTE))
+    night = {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))}
+    for where, values in ((PALETTE, day), (NIGHT_THEME, night)):
+        for key in values:
+            color = resolve(values, key)
+            if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
+                raise PatchError(f"{where}: {key} is Telegram's blue {color}")
+
 
 CODE_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|R"([^(\s]*)\((.*?)\)\1"|"(?:[^"\\\n]|\\.)*"'
                          r"|'(?:[^'\\\n]|\\.)*'", re.S)
@@ -803,9 +1110,10 @@ def code_telegram(text):
 
 def brand_edited():
     """The text files rebrand() edits."""
-    return tuple(dict.fromkeys((LANG, TEXT_ENTITY, QTHELP_URL, ABOUT_BOX)
+    return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, ABOUT_BOX)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
-                               + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)))
+                               + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
+                               + tuple(rel for rel, _, _ in QR_COLORS)))
 
 
 def check_upstream(tree, c):

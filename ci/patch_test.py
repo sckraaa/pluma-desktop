@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import patch  # noqa: E402
@@ -234,10 +235,22 @@ class TreeTest(unittest.TestCase):
 
 
 class BrandTest(unittest.TestCase):
+    def test_tree_is_the_assets(self):
+        tree = patch.BRAND / "tree"
+        files = sorted(p.relative_to(tree).as_posix() for p in tree.rglob("*") if p.is_file())
+        self.assertEqual(files, sorted(path for path, _ in patch.ASSETS))
+        self.assertEqual(len(set(path for path, _ in patch.ASSETS)), len(patch.ASSETS))
+
     def test_strings_table(self):
         strings = patch.load_strings()
         self.assertEqual(strings["lng_intro_qr_title"], 1)
         self.assertNotIn("lng_about_text1_api", strings)
+
+    def test_palette_tables(self):
+        day = patch.load_table(patch.BRAND / "palette-day.txt")
+        night = patch.load_table(patch.BRAND / "palette-night.txt")
+        self.assertIn(("windowBgActive", "#40a7e3", "#5b7a5e"), day)
+        self.assertIn(("windowBg", "#17212b", "#131513"), night)
 
     def test_name_telegram(self):
         self.assertEqual(patch.name_telegram("Telegram Desktop and Telegram's cloud", "Pluma"),
@@ -251,6 +264,42 @@ class BrandTest(unittest.TestCase):
         self.assertEqual(patch.lang_counts(text), {"lng_a": 1, "lng_b": 1})
         with self.assertRaises(patch.PatchError):
             patch.lang_counts(text + '"lng_c" = "multi\nline";\n')
+
+    def test_recolor(self):
+        text = "a: #111111; // one\nb: a;\nc: #222222 | a;\n"
+        self.assertEqual(patch.recolor(text, [("a", "#111111", "#333333"), ("c", "#222222 | a", "#444444"),
+                                              ("d", "-", "#555555")], "t"),
+                         "a: #333333; // one\nb: a;\nc: #444444;\nd: #555555; // pluma\n")
+        for rows in ([("a", "#111112", "#333333")], [("b", "c", "#333333")], [("a", "-", "#333333")]):
+            with self.subTest(rows=rows), self.assertRaises(patch.PatchError):
+                patch.recolor(text, rows, "t")
+
+    def test_load_table_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            for line in ("a #111 -> #222", "a: #111 #222", "a: #111 -> #222\na: #333 -> #444"):
+                with self.subTest(line=line), self.assertRaises(patch.PatchError):
+                    path = pathlib.Path(d) / "t.txt"
+                    path.write_text(line + "\n")
+                    patch.load_table(path)
+
+    def test_is_blue(self):
+        for color in ("#40a7e3", "#5288c1", "#2b5278", "#6ab3f3cc", "#3390ec"):
+            with self.subTest(color=color):
+                self.assertTrue(patch.is_blue(color))
+        for color in ("#5b7a5e", "#9dbb9f", "#131513", "#17212b", "#997be1", "#ffffff", "windowBg"):
+            with self.subTest(color=color):
+                self.assertFalse(patch.is_blue(color))
+
+    def test_resolve(self):
+        values = patch.palette_values("a: #111111;\nb: a;\nc: #222222 | b;\nd: c; // x\n")
+        self.assertEqual([patch.resolve(values, k) for k in "abcd"], ["#111111", "#111111", "#222222", "#222222"])
+
+    def test_night_theme_is_stable(self):
+        a = patch.night_theme("windowBg: #131513;\n")
+        self.assertEqual(a, patch.night_theme("windowBg: #131513;\n"))
+        self.assertEqual(patch.night_colors(a), "windowBg: #131513;\n")
+        with zipfile.ZipFile(io.BytesIO(a)) as z:
+            self.assertEqual(z.read(patch.NIGHT_BACKGROUND)[:8], b"\x89PNG\r\n\x1a\n")
 
     def test_code_telegram(self):
         text = ('// Telegram\n#include "telegram.h"\nauto a = u"Telegram Desktop"_q; auto b = "TelegramWebviewProxy";\n'
@@ -330,6 +379,11 @@ DAMAGE = (
     (S + "/core/sandbox.cpp", "namespace {\n", 'namespace {\nconst auto kLink = "tg://resolve";\n'),
     (patch.TEXT_ENTITY, 'addOne(QString::fromLatin1("tg")); // local urls', 'addOne(QString::fromLatin1("tg")); // local'),
     (patch.QTHELP_URL, '|| equals(qstr("tg"))', '|| equals(qstr("tg")) || equals(qstr("tg2"))'),
+    # The colours.
+    (patch.PALETTE, "windowBgActive: #40a7e3;", "windowBgActive: #40a7e4;"),
+    (patch.PALETTE, "// basic\n", "// basic\nnewAccentFg: #3390ec;\n"),
+    (patch.EMBEDDED_THEMES, '\t\t\tqColor("5288c1")\n\t\t},', '\t\t\tqColor("5288c2")\n\t\t},'),
+    (patch.INTRO_QR, "QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.", "QColor(0x40, 0xA7, 0xE3);"),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -403,9 +457,9 @@ class RecordingTree(patch.Tree):
         super().__init__(root)
         self.written = written
 
-    def write(self, rel, text):
+    def write_bytes(self, rel, data):
         self.written.add(str(rel))
-        super().write(rel, text)
+        super().write_bytes(rel, data)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -511,6 +565,26 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('\t\t.protocol = u"plm"_q,\n\t\t.protocolName = u"Pluma Link"_q,\n', application)
         self.assertNotIn('u"tonsite"_q,\n\t\t.protocolName', application)
         self.assertIn('addOne(QString::fromLatin1("plm"));', tree.read(patch.TEXT_ENTITY))
+        # The icons and the colours.
+        for path, _ in patch.ASSETS:
+            self.assertEqual(tree.read_bytes(path), (patch.BRAND / "tree" / path).read_bytes())
+        self.assertIn("\nwindowBgActive: #5b7a5e; //", tree.read(patch.PALETTE))
+        night = patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))
+        self.assertEqual((night["windowBg"], night["msgOutBg"], night["historyPeerSavedMessagesBg"]),
+                         ("#131513", "#2c3a2d", "#7fa082"))
+        self.assertIn('qColor("9dbb9f") // pluma', tree.read(patch.EMBEDDED_THEMES))
+        self.assertIn("QColor(0x5B, 0x7A, 0x5E)", tree.read(patch.CONNECTION_BOX))
+
+    def test_changed_binary_files(self):
+        """An icon or the night theme of another release stops the patch."""
+        for rel in (patch.ASSETS[0][0], patch.NIGHT_THEME):
+            with self.subTest(rel=rel):
+                self.tearDown()
+                self.written.add(rel)
+                (self.root / rel).write_bytes(self.files[rel] + b"\0")
+                with self.assertRaises(patch.PatchError) as e:
+                    self.run_patch()
+                self.assertIn(rel, str(e.exception))
 
     def test_build_edits_stay_in_their_platform(self):
         """Each edit of prepare.py changes the commands of one platform only
