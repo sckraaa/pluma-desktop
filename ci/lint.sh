@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 ACTIONLINT_VERSION=1.7.12
 
-shellcheck -x ci/*.sh
+shellcheck -x ci/*.sh brand/*.sh
 
 actionlint=$(command -v actionlint || true)
 if [ -z "$actionlint" ]; then
