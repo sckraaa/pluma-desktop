@@ -233,6 +233,31 @@ class TreeTest(unittest.TestCase):
             patch.Tree(d)
 
 
+class BrandTest(unittest.TestCase):
+    def test_strings_table(self):
+        strings = patch.load_strings()
+        self.assertEqual(strings["lng_intro_qr_title"], 1)
+        self.assertNotIn("lng_about_text1_api", strings)
+
+    def test_name_telegram(self):
+        self.assertEqual(patch.name_telegram("Telegram Desktop and Telegram's cloud", "Pluma"),
+                         ("Pluma and Pluma's cloud", 2))
+        self.assertEqual(patch.name_telegram("See https://telegram.org/faq and t.me/TelegramTips on Telegram.", "Pluma"),
+                         ("See https://telegram.org/faq and t.me/TelegramTips on Pluma.", 1))
+        self.assertEqual(patch.name_telegram("{telegram}", "Pluma"), ("{telegram}", 0))
+
+    def test_lang_entries(self):
+        text = '/*\nTelegram\n*/\n"lng_a" = "Open Telegram";\n"lng_b" =  "x \\"Telegram\\"";\n'
+        self.assertEqual(patch.lang_counts(text), {"lng_a": 1, "lng_b": 1})
+        with self.assertRaises(patch.PatchError):
+            patch.lang_counts(text + '"lng_c" = "multi\nline";\n')
+
+    def test_code_telegram(self):
+        text = ('// Telegram\n#include "telegram.h"\nauto a = u"Telegram Desktop"_q; auto b = "TelegramWebviewProxy";\n'
+                'auto c = "https://desktop.telegram.org"; auto d = \'"\'; auto e = R"(Telegram)";\n')
+        self.assertEqual(patch.code_telegram(text), 2)
+
+
 # --- the patch on the pinned upstream ------------------------------------------
 
 S = patch.SOURCES
@@ -293,6 +318,13 @@ DAMAGE = (
     (patch.WIN_SPECIFIC, '+ "\\\\Telegram.lnk";\n\t\t}\n\t\tif (SUCCEEDED(commonDesktopRes))', '+ "\\\\Telegram Desktop.lnk";\n\t\t}\n\t\tif (SUCCEEDED(commonDesktopRes))'),
     (patch.WIN_RC, 'VALUE "FileDescription", "Telegram Desktop"', 'VALUE "FileDescription", "Telegram"'),
     (patch.CMAKE_APP, 'set(bundle_identifier "com.tdesktop.Telegram")', 'set(bundle_identifier "com.tdesktop.TelegramDesktop")'),
+    # The brand: the strings that name Telegram, what stays, the code.
+    (patch.LANG, '"lng_menu_contacts" = "Contacts";', '"lng_menu_contacts" = "Telegram Contacts";'),
+    (patch.LANG, '"lng_open_from_tray" = "Open Telegram";', '"lng_open_from_tray" = "Open Telegram Desktop or Telegram";'),
+    (patch.LANG, '"lng_about_text1_api" = "Telegram API";', '"lng_about_text1_api" = "the Telegram API";'),
+    (S + "/intro/intro_start.cpp", 'u"Telegram Desktop"_q', 'u"Telegram"_q'),
+    (patch.EXPORT_HTML, '" joined Telegram";', '" has joined Telegram";'),
+    (S + "/window/main_window.cpp", "namespace {\n", 'namespace {\nconst auto kTitle = "Telegram";\n'),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -454,6 +486,19 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("lipo -create Release.arm64/libtg_owt.a Release.x86_64/libtg_owt.a", prepare)
         self.assertIn("    SET CONFIGURATIONS=-debug-and-release\n", prepare)
         self.assertEqual(prepare.count("-force-debug-info"), 2)
+
+    def test_brand(self):
+        tree, _ = self.run_patch()
+        # The name.
+        lang = tree.read(patch.LANG)
+        for line in ('"lng_intro_qr_title" = "Scan From Mobile Pluma";\n', '"lng_premium_summary_title" = "Pluma Premium";\n',
+                     '"lng_telegram_features_url" = "https://t.me/TelegramTips";\n',
+                     '"lng_about_text1_api" = "Telegram API";\n', '"lng_auction_change_to_me" =  "Do you want'):
+            self.assertIn(line, lang)
+        self.assertEqual(patch.lang_counts(self.files[patch.LANG].decode("utf-8")), patch.load_strings())
+        self.assertEqual(patch.lang_counts(lang), {})
+        self.assertIn('box->setTitle(u"Pluma"_q);', tree.read(patch.ABOUT_BOX))
+        self.assertIn('setTitleText(rpl::single(u"Pluma"_q));', tree.read(S + "/intro/intro_start.cpp"))
 
     def test_build_edits_stay_in_their_platform(self):
         """Each edit of prepare.py changes the commands of one platform only

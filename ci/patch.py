@@ -88,6 +88,15 @@ LINUX_WORKFLOW = ".github/workflows/linux.yml"
 # In the cmake_helpers submodule at cmake/.
 CMAKE_VARIABLES = "cmake/variables.cmake"
 
+# The brand (task 017 of the server repository): the files of brand/, the
+# texts, the link scheme and the default themes.
+BRAND = pathlib.Path(__file__).resolve().parent.parent / "brand"
+LANG = "Telegram/Resources/langs/lang.strings"
+SHELL_PAGE = "Telegram/Resources/bot_webview_shell_html/page.js"
+CUSTOM_SHORTCUTS = "Telegram/Resources/default_shortcuts-custom.json"
+EXPORT_HTML = SOURCES + "/export/output/export_output_html.cpp"
+ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
+
 # The classes whose network requests go to Google, Mozilla and Firebase for
 # Telegram's backup addresses and time: they may be constructed nowhere.
 FALLBACK_CLASSES = {
@@ -101,7 +110,8 @@ MARKER = "pluma-patch.txt"
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse). verify() scans all the sources.
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, WIN_RC, DESKTOP_FILE,
-                  QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW)
+                  QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
+                  LANG, SHELL_PAGE, CUSTOM_SHORTCUTS)
 # The same for files of submodules: (submodule, path inside it).
 SUBMODULE_PATHS = (("cmake", "variables.cmake"),)
 
@@ -487,6 +497,237 @@ BUILD_EDITS = (
      ""),
 )
 
+# --- the brand ---------------------------------------------------------------
+
+# The name in the code: (file, upstream text, Pluma's with {name}, how many).
+# Log lines, identifiers, file formats nobody sees, the alpha-only and
+# crash-report-only texts (both compiled out) stay; verify() counts what is
+# left (CODE_TELEGRAM).
+CODE_NAMES = (
+    (SOURCES + "/intro/intro_start.cpp", 'setTitleText(rpl::single(u"Telegram Desktop"_q));',
+     'setTitleText(rpl::single(u"{name}"_q));', 1),
+    (ABOUT_BOX, 'box->setTitle(u"Telegram Desktop"_q);', 'box->setTitle(u"{name}"_q);', 1),
+    (SOURCES + "/window/main_window.cpp", '(user.isEmpty() ? u"Telegram"_q : user)',
+     '(user.isEmpty() ? u"{name}"_q : user)', 1),
+    (SOURCES + "/window/notifications_manager_default.cpp", 'TextWithEntities{ u"Telegram Desktop"_q }',
+     'TextWithEntities{ u"{name}"_q }', 1),
+    (SOURCES + "/settings/sections/settings_notifications.cpp", 'elided(u"Telegram Desktop"_q, rectForName.width())',
+     'elided(u"{name}"_q, rectForName.width())', 1),
+    (SOURCES + "/platform/mac/window_title_mac.mm", 'p.drawText(titleRect, u"Telegram"_q, style::al_center);',
+     'p.drawText(titleRect, u"{name}"_q, style::al_center);', 1),
+    (SOURCES + "/platform/mac/global_menu_mac.mm", '\t\t\tu"About Telegram"_q,\n', '\t\t\tu"About {name}"_q,\n', 1),
+    (SOURCES + "/platform/mac/global_menu_mac.mm", '\t\tu"Show Telegram"_q,\n', '\t\tu"Show {name}"_q,\n', 1),
+    (SOURCES + "/platform/mac/global_menu_mac.mm", '_menuBar->addMenu(u"Telegram"_q)', '_menuBar->addMenu(u"{name}"_q)', 1),
+    # The {telegram} of "Quit {telegram}" and "About {telegram}".
+    (SOURCES + "/platform/linux/main_window_linux.cpp", 'u"Telegram"_q)', 'u"{name}"_q)', 2),
+    (WIN_SPECIFIC, 'L"Telegram autorun link.\\n"\n\t\t"You can disable autorun in Telegram settings.");',
+     'L"{name} autorun link.\\n"\n\t\t"You can disable autorun in {name} settings.");', 1),
+    (WIN_SPECIFIC, 'L"Telegram send to link.\\n"\n\t\t"You can disable send to menu item in Telegram settings.");',
+     'L"{name} send to link.\\n"\n\t\t"You can disable send to menu item in {name} settings.");', 1),
+    # The ring of text around a round video being recorded.
+    (SOURCES + "/ui/controls/round_video_recorder.cpp", 'u"Telegram"_q.toUpper(),', 'u"{name}"_q.toUpper(),', 1),
+    # The title of a bot web app's window on Linux, until the app sets one.
+    (SOURCES + "/ui/chat/attach/attach_bot_webview_linux_shell.cpp", '"document.title = \'Telegram\';"',
+     '"document.title = \'{name}\';"', 1),
+    (SHELL_PAGE, "document.title = (data && data.title) || 'Telegram';",
+     "document.title = (data && data.title) || '{name}';", 2),
+    # The name of the service notifications account (777000) until the
+    # server's arrives.
+    (SOURCES + "/data/data_session.cpp", 'MTP_string("Telegram"),', 'MTP_string("{name}"),', 1),
+    (SOURCES + "/data/data_message_reactions.cpp", '.title = u"Telegram Star"_q,', '.title = u"{name} Star"_q,', 1),
+    (SOURCES + "/lang/lang_hardcoded.h", "Telegram Passport", "{name} Passport", 5),
+    # The HTML of an export.
+    (EXPORT_HTML, '"of Telegram Desktop. Please update the application."',
+     '"of {name}. Please update the application."', 1),
+    (EXPORT_HTML, '" joined Telegram";', '" joined {name}";', 1),
+    (EXPORT_HTML, "Telegram Premium", "{name} Premium", 7),
+    (EXPORT_HTML, '" Telegram Stars."', '" {name} Stars."', 5),
+    (EXPORT_HTML, '"Telegram and received', '"{name} and received', 2),
+    (EXPORT_HTML, '"selected by Telegram and received', '"selected by {name} and received', 2),
+    (EXPORT_HTML, '" was randomly selected by Telegram."', '" was randomly selected by {name}."', 1),
+    # The window shown when the app cannot start (no writable data folder).
+    (SOURCES + "/core/crash_report_window.cpp", 'setWindowTitle(title.isEmpty() ? u"Telegram"_q : title);',
+     'setWindowTitle(title.isEmpty() ? u"{name}"_q : title);', 1),
+    (SOURCES + "/core/crash_report_window.cpp", 'u"Could not start Telegram Desktop!\\nYou can see complete log below:"_q',
+     'u"Could not start {name}!\\nYou can see complete log below:"_q', 1),
+    # Local automation: the question, and the error the other program gets.
+    (SOURCES + "/core/external_control.cpp", 'u"Telegram Desktop over the local socket', 'u"{name} over the local socket', 1),
+    (SOURCES + "/core/external_control.cpp", 'u"Telegram window to enable"_q', 'u"{name} window to enable"_q', 1),
+    (SOURCES + "/core/mime_type.cpp", 'u"Telegram sticker (*.tgs)"_q', 'u"{name} sticker (*.tgs)"_q', 1),
+    # The headers of the shortcut files in the data folder.
+    (SOURCES + "/core/shortcuts.cpp", "// This is a list of default shortcuts for Telegram Desktop\n",
+     "// This is a list of default shortcuts for {name}\n", 1),
+    (SOURCES + "/core/shortcuts.cpp", "// This is a list of changed shortcuts for Telegram Desktop\n",
+     "// This is a list of changed shortcuts for {name}\n", 1),
+    (CUSTOM_SHORTCUTS, "// This is a list of your own shortcuts for Telegram Desktop\n",
+     "// This is a list of your own shortcuts for {name}\n", 1),
+)
+
+# What stays of "Telegram" as a word in the string literals of the sources
+# (links and copyright headers aside), per file: the edits above leave these
+# on purpose, and a new one in an upstream update stops the patch here.
+CODE_TELEGRAM = {
+    # The updater and its startup task, which Pluma does not build.
+    "_other/startup_task_win.cpp": 1,
+    "_other/updater_linux.cpp": 4,
+    "_other/updater_osx.m": 2,
+    "_other/updater_win.cpp": 9,
+    "core/update_checker.cpp": 1,
+    # Log lines.
+    "api/api_updates.cpp": 1,
+    "core/crash_reports.cpp": 1,
+    "core/launcher.cpp": 2,
+    "core/sandbox.cpp": 1,
+    # The windows of a crash report, compiled out (TDESKTOP_DISABLE_CRASH_REPORTS).
+    "core/crash_report_window.cpp": 7,
+    # The ways into Telegram's support and site.
+    "boxes/phone_banned_box.cpp": 1,
+    "window/window_main_menu.cpp": 1,
+    # Builds Pluma does not make: alpha versions, the Mac App Store, Windows Store.
+    "boxes/about_box.cpp": 1,
+    "core/file_utilities.cpp": 1,
+    "platform/win/specific_win.cpp": 1,
+    "platform/win/windows_app_user_model_id.cpp": 1,
+    # The name of the link scheme in the system's settings.
+    "core/application.cpp": 1,
+    # Telegram Desktop's own api_id in the list of sessions.
+    "api/api_authorizations.cpp": 1,
+    # Names in files and protocols nobody reads: the calendar file's PRODID,
+    # the generator of a rich message export, the test example of an export,
+    # the company name sent to Stripe, the resource file of the macOS bundle.
+    "core/click_handler_types.cpp": 1,
+    "iv/iv_rich_page.h": 1,
+    "export/output/export_output_abstract.cpp": 1,
+    "payments/payments_form.cpp": 1,
+    "platform/mac/launcher_mac.mm": 1,
+}
+
+# The built-in English (lang.strings): every "Telegram" outside a link names
+# Pluma, "Telegram Desktop" included; the keys and their counts are pinned in
+# brand/strings.txt (patch.py --strings prints them for a lang.strings). The
+# links keep opening Telegram's pages. Kept: the credit of the protocol in
+# the about box.
+LANG_ENTRY = re.compile(r'^"(?P<key>[A-Za-z0-9_#]+)" = +"(?P<value>(?:[^"\\\n]|\\.)*)";$', re.M)
+LANG_LINK = re.compile(r"(?:https?://)?(?:[\w-]+\.)*(?:telegram\.org|telegram\.me|t\.me|fragment\.com)"
+                       r"(?:/[^\s\"<>)\]]*)?", re.I)
+LANG_KEEP = {"lng_about_text1_api": "Telegram API"}
+
+
+def lang_entries(text):
+    entries = list(LANG_ENTRY.finditer(text))
+    lines = sum(1 for line in text.split("\n") if line.startswith('"'))
+    if len(entries) != lines:
+        raise PatchError(f"{LANG}: {lines - len(entries)} entries in a form the patch does not read")
+    return entries
+
+
+def name_telegram(value, name):
+    """value with every "Telegram" outside its links naming name, and how
+    many there were."""
+    out, count, pos = [], 0, 0
+    for m in [*LANG_LINK.finditer(value), None]:
+        plain = value[pos:m.start() if m else len(value)]
+        count += plain.count("Telegram")
+        out.append(plain.replace("Telegram Desktop", name).replace("Telegram", name))
+        if m:
+            out.append(m.group(0))
+            pos = m.end()
+    return "".join(out), count
+
+
+def lang_counts(text):
+    """{key: how many "Telegram" outside links} of a lang.strings, in its
+    order, LANG_KEEP aside."""
+    result = {}
+    for m in lang_entries(text):
+        if m["key"] not in LANG_KEEP:
+            count = name_telegram(m["value"], "")[1]
+            if count:
+                result[m["key"]] = count
+    return result
+
+
+def load_strings():
+    result = {}
+    path = BRAND / "strings.txt"
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.fullmatch(r"([A-Za-z0-9_#]+) ([1-9][0-9]*)", line)
+        if not m or m.group(1) in result:
+            raise PatchError(f"{path.name}:{n}: expected 'key count', each key once")
+        result[m.group(1)] = int(m.group(2))
+    return result
+
+
+def rebrand(tree, c):
+    """The brand of Pluma (task 017 of the server repository)."""
+    name = c.app_name
+
+    # The texts: the built-in English and the places in the code.
+    text = tree.read(LANG)
+    found, expected = lang_counts(text), load_strings()
+    if found != expected:
+        def keys(ks):
+            return ", ".join(sorted(ks)[:5]) or "none"
+        changed = {k for k in set(found) & set(expected) if found[k] != expected[k]}
+        raise PatchError(f"{LANG}: the strings that name Telegram are not those of brand/strings.txt "
+                         f"(new: {keys(set(found) - set(expected))}; gone: {keys(set(expected) - set(found))}; "
+                         f"changed: {keys(changed)}); look at them and write the table again "
+                         "(patch.py --strings)")
+    for key, value in LANG_KEEP.items():
+        tree.expect(LANG, f'"{key}" = "{value}";\n')
+
+    def entry(m):
+        if m["key"] in LANG_KEEP:
+            return m.group(0)
+        head = m.group(0)[:m.start("value") - m.start()]
+        return head + name_telegram(m["value"], name)[0] + '";'
+    tree.write(LANG, LANG_ENTRY.sub(entry, text))
+    for rel, old, new, count in CODE_NAMES:
+        tree.replace(rel, old, new.replace("{name}", name), count=count)
+
+
+def verify_brand(tree):
+    """Checks the brand independently of how the edits were made."""
+    # No Telegram in the built-in English but links and LANG_KEEP, nor in the
+    # string literals of the code but what CODE_TELEGRAM keeps.
+    for m in lang_entries(tree.read(LANG)):
+        if "Teamgram" in m["value"] or (m["key"] not in LANG_KEEP and name_telegram(m["value"], "")[1]):
+            raise PatchError(f"{LANG}: {m['key']} still names Telegram")
+    left = {}
+    for rel in tree.sources():
+        count = code_telegram(tree.scan(rel))
+        if count:
+            left[rel[len(SOURCES) + 1:]] = count
+    if left != CODE_TELEGRAM:
+        diff = sorted(k for k in set(left) | set(CODE_TELEGRAM) if left.get(k) != CODE_TELEGRAM.get(k))
+        raise PatchError(f"{SOURCES}: Telegram in the texts of {', '.join(diff[:5])} "
+                         "is not what CODE_TELEGRAM keeps")
+
+
+CODE_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|R"([^(\s]*)\((.*?)\)\1"|"(?:[^"\\\n]|\\.)*"'
+                         r"|'(?:[^'\\\n]|\\.)*'", re.S)
+CODE_LINK = re.compile(r"(?:https?://)?(?:[\w-]+\.)*(?:telegram\.org|telegram\.me|t\.me|telegram\.dog)\S*", re.I)
+
+
+def code_telegram(text):
+    """How many times the string literals of a source name Telegram as a
+    word (links aside)."""
+    count = 0
+    for m in CODE_STRING.finditer(text):
+        s = m.group(0)
+        if not s.startswith("/"):
+            count += len(re.findall(r"\bTelegram\b", CODE_LINK.sub("", s)))
+    return count
+
+
+def brand_edited():
+    """The text files rebrand() edits."""
+    return tuple(dict.fromkeys((LANG, ABOUT_BOX)
+                               + tuple(rel for rel, _, _, _ in CODE_NAMES)))
+
 
 def check_upstream(tree, c):
     """The checkout is the one upstream.env describes: the schema layer the
@@ -512,7 +753,7 @@ def check_upstream(tree, c):
     # The options the build passes are still the upstream's.
     tree.expect(CMAKE_VARIABLES, 'option(DESKTOP_APP_DISABLE_AUTOUPDATE "Disable autoupdate."')
     tree.expect(CMAKE_VARIABLES, 'option(DESKTOP_APP_DISABLE_CRASH_REPORTS "Disable crash report generation."')
-    for rel in EDITED:
+    for rel in EDITED + brand_edited():
         tree.lf_only(rel)
 
 
@@ -664,6 +905,8 @@ def patch(tree, c):
     tree.replace(PLIST, "\t<key>CFBundleGetInfoString</key>\n\t<string>Telegram Desktop messaging app</string>\n",
                  f"\t<key>CFBundleGetInfoString</key>\n\t<string>{name}</string>\n")
 
+    rebrand(tree, c)
+
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
                        f"server {address} port {c.port}, server key {c.fingerprint:#018x}.\n")
@@ -790,6 +1033,7 @@ def verify(tree, c):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):
         raise PatchError(f"{LINUX}: the application ID is not {c.app_id}")
+    verify_brand(tree)
 
 
 def main(argv=None):
@@ -800,8 +1044,17 @@ def main(argv=None):
     if args == ["--submodule-paths"]:
         print("\n".join(f"{sub} {path}" for sub, path in SUBMODULE_PATHS))
         return 0
+    if len(args) == 2 and args[0] == "--strings":
+        try:
+            counts = lang_counts(pathlib.Path(args[1]).read_bytes().decode("utf-8"))
+        except PatchError as e:
+            print(f"patch: {e}", file=sys.stderr)
+            return 1
+        print("\n".join(f"{key} {count}" for key, count in counts.items()))
+        return 0
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
-                                 epilog="patch.py --paths and --submodule-paths print the upstream paths the patch reads.")
+                                 epilog="patch.py --paths and --submodule-paths print the upstream paths the patch reads; "
+                                        "patch.py --strings <lang.strings> the table of brand/strings.txt.")
     ap.add_argument("--source", required=True, help="the tdesktop checkout")
     ap.add_argument("--upstream", required=True, help="upstream.env")
     ap.add_argument("--app", required=True, help="config/app.env")
