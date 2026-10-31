@@ -94,6 +94,11 @@ PREPARE = "Telegram/build/prepare/prepare.py"
 DOCKER_ENV = "Telegram/build/docker/centos_env"
 BUILDING_WIN = "docs/building-win.md"
 LINUX_WORKFLOW = ".github/workflows/linux.yml"
+# The banner of contacts' birthdays at the top of the chat list.
+BIRTHDAY_CONTACTS = SOURCES + "/dialogs/suggestions/suggestion_birthday_contacts.cpp"
+# The gift button of a chat and the birthday row of a profile.
+HISTORY_WIDGET = SOURCES + "/history/history_widget.cpp"
+PROFILE_ACTIONS = SOURCES + "/info/profile/info_profile_actions.cpp"
 # In the cmake_helpers submodule at cmake/.
 CMAKE_VARIABLES = "cmake/variables.cmake"
 
@@ -509,7 +514,7 @@ CMAKE_DEFINITIONS = "target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABL
 # The files the patch edits; it refuses CRLF in any of them.
 EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY_DATA, APPLICATION, LAUNCHER,
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
-          PLIST, DESKTOP_FILE, PREPARE)
+          PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS)
 
 
 # Backports of upstream fixes to the build scripts, each as (file, the
@@ -591,6 +596,130 @@ BUILD_EDITS = (
               + "    mkdir Debug\n"
                 "    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a\n",
      ""),
+)
+
+# The banner "It's ...'s birthday today!" at the top of the chat list, as
+# (the pinned upstream's text, Pluma's) of BIRTHDAY_CONTACTS. Upstream shows
+# it only to those who can buy Premium (Session::premiumCanBuy(), false when
+# help.getAppConfig sets premium_purchase_blocked, as the Pluma server does),
+# and a click opens the gift box. Pluma has no Premium and no gifts: the
+# banner shows to everyone, and a click opens the chat with the contact or,
+# for several, a box "Birthdays" with them, where a click opens the chat
+# (ContactsBoxController::rowClicked). It says "Send message" in place of
+# "Send them a Gift.", and closing it, which still dismisses it as upstream
+# does, shows no toast that a gift can be sent later. When it shows and how
+# it looks stay upstream's. The chat it opens and the contact's profile offer
+# no gift either (BIRTHDAY_GIFTS).
+BIRTHDAY_BANNER = (
+    ('#include "boxes/star_gift_box.h"\n', '#include "boxes/peer_list_controllers.h"\n'),
+    ("bool Available(const Context &context) {\n"
+     "\tconst auto session = context.session.get();\n"
+     "\treturn session->premiumCanBuy()\n"
+     "\t\t&& session->promoSuggestions().current(kSugBirthdayContacts.utf8());\n"
+     "}\n",
+     "// pluma: the contacts with a birthday today in a box of the contacts,\n"
+     "// where a click opens the chat (ContactsBoxController::rowClicked).\n"
+     "// Without a search controller its search filters them by name and sends\n"
+     "// no contacts.search.\n"
+     "class BirthdayContactsController final : public ContactsBoxController {\n"
+     "public:\n"
+     "\tBirthdayContactsController(\n"
+     "\t\tnot_null<Main::Session*> session,\n"
+     "\t\tstd::vector<UserId> users)\n"
+     "\t: ContactsBoxController(session, nullptr)\n"
+     "\t, _users(std::move(users)) {\n"
+     "\t}\n"
+     "\n"
+     "protected:\n"
+     "\tstd::unique_ptr<PeerListRow> createRow(\n"
+     "\t\t\tnot_null<UserData*> user) override {\n"
+     "\t\treturn ranges::contains(_users, peerToUser(user->id))\n"
+     "\t\t\t? ContactsBoxController::createRow(user)\n"
+     "\t\t\t: nullptr;\n"
+     "\t}\n"
+     "\n"
+     "private:\n"
+     "\tconst std::vector<UserId> _users;\n"
+     "\n"
+     "};\n"
+     "\n"
+     "bool Available(const Context &context) {\n"
+     "\t// pluma: not only for those who can buy Premium: the banner opens a\n"
+     "\t// chat, not the gift box.\n"
+     "\tconst auto session = context.session.get();\n"
+     "\treturn session->promoSuggestions().current(kSugBirthdayContacts.utf8());\n"
+     "}\n"),
+    ("\t\tcontent->setClickedCallback([=] {\n"
+     "\t\t\tif (isSingle) {\n"
+     "\t\t\t\tUi::ShowStarGiftBox(controller, first);\n"
+     "\t\t\t} else {\n"
+     "\t\t\t\tUi::ChooseStarGiftRecipient(controller);\n"
+     "\t\t\t}\n"
+     "\t\t});\n"
+     "\t\tcontent->setHideCallback([=] {\n"
+     "\t\t\tpromo->dismiss(kSugBirthdayContacts.utf8());\n"
+     "\t\t\tcontroller->showToast(\n"
+     "\t\t\t\ttr::lng_dialogs_suggestions_birthday_contact_dismiss(\n"
+     "\t\t\t\t\ttr::now));\n"
+     "\t\t\trecompute();\n"
+     "\t\t});\n",
+     "\t\t// pluma: no gift box. The chat with the contact, or a box with those\n"
+     "\t\t// whose birthday is today, to open the chat with one.\n"
+     "\t\tcontent->setClickedCallback([=] {\n"
+     "\t\t\tif (isSingle) {\n"
+     "\t\t\t\tcontroller->showPeerHistory(first);\n"
+     "\t\t\t} else {\n"
+     "\t\t\t\tcontroller->show(Box<PeerListBox>(\n"
+     "\t\t\t\t\tstd::make_unique<BirthdayContactsController>(\n"
+     "\t\t\t\t\t\tsession,\n"
+     "\t\t\t\t\t\tusers),\n"
+     "\t\t\t\t\t[](not_null<PeerListBox*> box) {\n"
+     "\t\t\t\t\t\tbox->setTitle(tr::lng_gift_subtitle_birthdays());\n"
+     "\t\t\t\t\t\tbox->addButton(tr::lng_close(), [=] {\n"
+     "\t\t\t\t\t\t\tbox->closeBox();\n"
+     "\t\t\t\t\t\t});\n"
+     "\t\t\t\t\t}));\n"
+     "\t\t\t}\n"
+     "\t\t});\n"
+     "\t\t// pluma: no toast that a gift can be sent later in Settings.\n"
+     "\t\tcontent->setHideCallback([=] {\n"
+     "\t\t\tpromo->dismiss(kSugBirthdayContacts.utf8());\n"
+     "\t\t\trecompute();\n"
+     "\t\t});\n"),
+    ("\t\tauto text = isSingle\n"
+     "\t\t\t? tr::lng_dialogs_suggestions_birthday_contact_about(\n"
+     "\t\t\t\ttr::now,\n"
+     "\t\t\t\tTextWithEntities::Simple)\n"
+     "\t\t\t: tr::lng_dialogs_suggestions_birthday_contacts_about(\n"
+     "\t\t\t\ttr::now,\n"
+     "\t\t\t\tTextWithEntities::Simple);\n",
+     "\t\t// pluma: what a click does, in place of the offer of a gift.\n"
+     "\t\tauto text = tr::lng_context_send_message(\n"
+     "\t\t\ttr::now,\n"
+     "\t\t\tTextWithEntities::Simple);\n"),
+)
+
+# Where upstream offers a gift on a contact's birthday although Premium cannot
+# be bought, as (file, the pinned upstream's text, Pluma's). Upstream shows
+# the gift button of a chat (HistoryWidget::refreshSendGiftToggle) on the
+# contact's birthday whatever Premium, and the birthday row of a profile opens
+# the gift box on any day while Premium cannot be bought, for gifts paid in
+# Stars. Pluma has no Premium, no Stars and no gifts: both offer a gift only
+# while Premium can be bought, as the gift button of a profile's top bar
+# (info_profile_top_bar.cpp) and the Android and web apps do.
+BIRTHDAY_GIFTS = (
+    (HISTORY_WIDGET,
+     "\t\t&& !user->isBot()\n"
+     "\t\t&& ((disallowed & Type::SendHide)\n",
+     "\t\t&& !user->isBot()\n"
+     "\t\t// pluma: no gift while Premium cannot be bought.\n"
+     "\t\t&& session().premiumCanBuy()\n"
+     "\t\t&& ((disallowed & Type::SendHide)\n"),
+    (PROFILE_ACTIONS,
+     "\t\tconst auto disable = !today && user->session().premiumCanBuy();\n",
+     "\t\t// pluma: the gift on the birthday only, and only while Premium can be\n"
+     "\t\t// bought.\n"
+     "\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n"),
 )
 
 # --- the brand ---------------------------------------------------------------
@@ -1339,6 +1468,13 @@ def patch(tree, c):
                  f"\t<key>CFBundleName</key>\n\t<string>{name}</string>\n")
     tree.replace(PLIST, "\t<key>CFBundleGetInfoString</key>\n\t<string>Telegram Desktop messaging app</string>\n",
                  f"\t<key>CFBundleGetInfoString</key>\n\t<string>{name}</string>\n")
+
+    # The banner of contacts' birthdays: without Premium, a click opens the
+    # chat, no gift is offered (BIRTHDAY_BANNER).
+    for old, new in BIRTHDAY_BANNER:
+        tree.replace(BIRTHDAY_CONTACTS, old, new)
+    for rel, old, new in BIRTHDAY_GIFTS:
+        tree.replace(rel, old, new)
 
     rebrand(tree, c)
 

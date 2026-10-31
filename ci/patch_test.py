@@ -311,6 +311,7 @@ class BrandTest(unittest.TestCase):
 
 S = patch.SOURCES
 DC, INSTANCE, LOADER, LINUX, WIN_APP_ID = patch.DC_OPTIONS, patch.INSTANCE, patch.CONFIG_LOADER, patch.LINUX, patch.WIN_APP_ID
+BIRTHDAY = patch.BIRTHDAY_CONTACTS
 
 # Damage to each place the patch edits or checks, as (file, text in the
 # pinned upstream, replacement): every one must stop the patch with an error
@@ -392,6 +393,17 @@ DAMAGE = (
     (patch.BANNED_BOX, '"login@stel.com"', '"recover@telegram.org"'),
     (patch.DATA_PEER, "static auto result = Window::LogoNoMargin().scaledToWidth(", "static auto result = Window::Logo().scaledToWidth("),
     (patch.ENTITLEMENTS, "<key>com.apple.security.device.camera</key>", "<key>com.apple.security.device.usb</key>"),
+    # The banner of contacts' birthdays: the Premium check, the gift box, the
+    # offer of a gift, the toast of its closing.
+    (BIRTHDAY, "\treturn session->premiumCanBuy()\n", "\treturn session->premiumPossible()\n"),
+    (BIRTHDAY, "\t\t\t\tUi::ChooseStarGiftRecipient(controller);\n", "\t\t\t\tUi::ChooseStarGiftRecipient(controller, users);\n"),
+    (BIRTHDAY, "? tr::lng_dialogs_suggestions_birthday_contact_about(", "? tr::lng_dialogs_suggestions_birthday_gift_about("),
+    (BIRTHDAY, "tr::lng_dialogs_suggestions_birthday_contact_dismiss(", "tr::lng_dialogs_suggestions_birthday_contacts_dismiss("),
+    # The gift of a chat and of a profile on a contact's birthday.
+    (patch.HISTORY_WIDGET, "\t\t&& !user->isBot()\n\t\t&& ((disallowed & Type::SendHide)\n",
+     "\t\t&& !user->isBot()\n\t\t&& !user->isInaccessible()\n\t\t&& ((disallowed & Type::SendHide)\n"),
+    (patch.PROFILE_ACTIONS, "const auto disable = !today && user->session().premiumCanBuy();",
+     "const auto disable = !today && user->session().premiumPossible();"),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -589,6 +601,45 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("isNotificationsUser()", tree.read(patch.DATA_PEER))
         self.assertNotIn("OpenFaq", tree.read(patch.SETTINGS_INTRO))
         self.assertIn("void BuildHelpSection(SectionBuilder &builder) {\n\t// pluma:", tree.read(patch.SETTINGS_MAIN))
+
+    def test_birthday_banner(self):
+        """The banner of contacts' birthdays shows without Premium, a click
+        opens the chat or a box "Birthdays" with them, and no text of it
+        offers a gift."""
+        tree, _ = self.run_patch()
+        text = tree.read(BIRTHDAY)
+        self.assertIn("\treturn session->promoSuggestions().current(kSugBirthdayContacts.utf8());\n}\n", text)
+        self.assertIn("\t\t\tif (isSingle) {\n\t\t\t\tcontroller->showPeerHistory(first);\n\t\t\t} else {\n"
+                      "\t\t\t\tcontroller->show(Box<PeerListBox>(\n"
+                      "\t\t\t\t\tstd::make_unique<BirthdayContactsController>(\n", text)
+        self.assertIn("class BirthdayContactsController final : public ContactsBoxController {\n", text)
+        # Its search filters the few rows by name and sends no contacts.search.
+        self.assertIn("\t: ContactsBoxController(session, nullptr)\n", text)
+        self.assertIn("\t\t\t\t\t\tbox->setTitle(tr::lng_gift_subtitle_birthdays());\n"
+                      "\t\t\t\t\t\tbox->addButton(tr::lng_close(), [=] {\n", text)
+        self.assertIn("\t\tcontent->setHideCallback([=] {\n\t\t\tpromo->dismiss(kSugBirthdayContacts.utf8());\n"
+                      "\t\t\trecompute();\n\t\t});\n", text)
+        self.assertIn('#include "boxes/peer_list_controllers.h"\n', text)
+        for gone in ("premiumCanBuy", "StarGift", "star_gift_box.h", "showToast", "_birthday_contact_about",
+                     "_birthday_contacts_about", "_birthday_contact_dismiss"):
+            self.assertNotIn(gone, text)
+        # Its texts are keys of the built-in English, and none offers a gift.
+        lang = {m["key"].split("#")[0]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+        keys = set(re.findall(r"\btr::(lng_\w+)\(", text))
+        self.assertEqual(keys, {"lng_dialogs_suggestions_birthday_contact_title",
+                                "lng_dialogs_suggestions_birthday_contacts_title", "lng_context_send_message",
+                                "lng_gift_subtitle_birthdays", "lng_close"})
+        self.assertEqual(lang["lng_context_send_message"], "Send message")
+        self.assertEqual(lang["lng_gift_subtitle_birthdays"], "Birthdays")
+        for key in keys:
+            self.assertNotIn("gift", lang[key].lower(), key)
+        # The chat it opens and the contact's profile offer no gift while
+        # Premium cannot be bought.
+        self.assertIn("\t\t&& !user->isBot()\n\t\t// pluma: no gift while Premium cannot be bought.\n"
+                      "\t\t&& session().premiumCanBuy()\n\t\t&& ((disallowed & Type::SendHide)\n",
+                      tree.read(patch.HISTORY_WIDGET))
+        self.assertIn("\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n",
+                      tree.read(patch.PROFILE_ACTIONS))
 
     def test_changed_binary_files(self):
         """An icon or the night theme of another release stops the patch."""
