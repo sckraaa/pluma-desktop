@@ -1033,7 +1033,9 @@ QR_COLORS = ((INTRO_QR, "\treturn QColor(0x40, 0xA7, 0xE3); // Default windowBgA
 # cyan slot 7), which every theme defines and the accent picker leaves as they
 # are (kColorizeIgnoredKeys in window_themes_embedded.cpp). Blue becomes the
 # palette's sage and cyan a teal without Telegram's blue, in every theme of
-# the app; the dark themes keep Telegram's cyan names. The other five stay
+# the app; cyan names in the dark themes take the teal Telegram's Android app
+# shows at night (Telegram's own here, #62d4e3 and #57c9e0, lean to blue).
+# The other five stay
 # Telegram's, and so do the colours from 7 up, whose names and bars the server
 # colours (help.getPeerColors). What draws the blue or cyan slot as a plain
 # colour takes these keys and follows them; so do folder tags, in the second
@@ -1065,7 +1067,7 @@ IDENTITY_COLORS = (
     ("historyPeer4NameFg", None, "#4f6e52", "#9dbb9f"),
     ("historyPeer4UserpicBg", "#5caffa", "#7fa082", "#7fa082"),
     ("historyPeer4UserpicBg2", "#408acf", "#5b7a5e", "#5b7a5e"),
-    ("historyPeer7NameFg", None, "#1f8a80", None),
+    ("historyPeer7NameFg", None, "#1f8a80", "#53ccc6"),
     ("historyPeer7UserpicBg", "#5bcbe3", "#5bcbc4", "#5bcbc4"),
     ("historyPeer7UserpicBg2", "#359ad4", "#2c9c98", "#2c9c98"),
 )
@@ -1107,10 +1109,8 @@ EXPORT_USERPICS = (
 TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5288c1", "6ab3f3", "2f6ea5",
                   "4082bc", "2b5278", "6ab2f2", "72bcfd", "64b9fa", "5eb5f7")
 # Keys of the default themes that may stay blue (verify()): file type
-# colours, the Premium, statistics and call palettes, and people's cyan name,
-# Telegram's #62d4e3 in the dark theme (the check of IDENTITY_COLORS holds
-# the light one to its teal).
-KEPT_BLUE = re.compile(r"historyPeer7NameFg|msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
+# colours and the Premium, statistics and call palettes.
+KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
                        r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+|groupCall\w+")
 
 

@@ -279,12 +279,12 @@ class BrandTest(unittest.TestCase):
                          "historyPeer4NameFg: #4f6e52; // blue\nhistoryPeer4UserpicBg: #7fa082;\n"
                          "historyPeer4UserpicBg2: #5b7a5e | historyPeer4UserpicBg;\nhistoryPeer7NameFg: #1f8a80;\n"
                          "historyPeer7UserpicBg: #5bcbc4;\nhistoryPeer7UserpicBg2: #2c9c98 | historyPeer7UserpicBg;\n")
-        # A dark theme keeps Telegram's cyan name.
+        # A dark theme has a cyan name of its own.
         dark = light.replace("windowActiveTextFg", "#65bdf3").replace("#2996ad", "#62d4e3")
         self.assertEqual(patch.palette_values(patch.identity(dark, patch.NIGHT_THEME)),
                          {"historyPeer4NameFg": "#9dbb9f", "historyPeer4UserpicBg": "#7fa082",
                           "historyPeer4UserpicBg2": "#5b7a5e | historyPeer4UserpicBg",
-                          "historyPeer7NameFg": "#62d4e3", "historyPeer7UserpicBg": "#5bcbc4",
+                          "historyPeer7NameFg": "#53ccc6", "historyPeer7UserpicBg": "#5bcbc4",
                           "historyPeer7UserpicBg2": "#2c9c98 | historyPeer7UserpicBg"})
         # Another colour, a key twice or none, a changed name kept: the patch
         # stops.
@@ -667,7 +667,7 @@ class UpstreamTest(unittest.TestCase):
 
     def test_people_colours(self):
         """People's blue is sage and cyan teal in every theme, the dark ones
-        with Telegram's cyan names; the themes of Telegram keep their other
+        with names of their own; the themes of Telegram keep their other
         colours and files; the export's avatars take the middle of the
         gradients."""
         def files(data):
@@ -684,7 +684,7 @@ class UpstreamTest(unittest.TestCase):
         night = patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))
         self.assertEqual([night[key] for key in ("historyPeer4NameFg", "historyPeer4UserpicBg2",
                                                  "historyPeer7NameFg", "historyPeer7UserpicBg")],
-                         ["#9dbb9f", "#5b7a5e", "#62d4e3", "#5bcbc4"])
+                         ["#9dbb9f", "#5b7a5e", "#53ccc6", "#5bcbc4"])
         for rel in patch.TELEGRAM_THEMES:
             with self.subTest(rel=rel):
                 dark = patch.IDENTITY_THEMES[rel][0]
@@ -730,7 +730,7 @@ class UpstreamTest(unittest.TestCase):
             # Not blue: only the check of IDENTITY_COLORS sees these.
             (patch.PALETTE, lambda d: d.replace(b"historyPeer4NameFg: #4f6e52;", b"historyPeer4NameFg: #5b7a5e;")),
             (patch.NIGHT_THEME, lambda d: patch.night_theme(patch.night_colors(d).replace(
-                "historyPeer7NameFg: #62d4e3;", "historyPeer7NameFg: #53ccc6;"))),
+                "historyPeer7NameFg: #53ccc6;", "historyPeer7NameFg: #1f8a80;"))),
             # Telegram's blue back in its themes, and in the export.
             (patch.DAY_BLUE_THEME, lambda d: patch.with_colors(d, patch.zipped_colors(d, "").replace(
                 "historyPeer4NameFg: #4f6e52;", "historyPeer4NameFg: windowActiveTextFg;"))),
