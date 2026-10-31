@@ -5,9 +5,10 @@
 #
 # One line per colour: "key: upstream value -> Pluma value". ci/patch.py
 # replaces each one and stops when the upstream value differs. The rest keeps
-# upstream's values: user colours, file type colours, alerts, greys, the
-# calls and Premium palettes, and the default chat background (a green
-# gradient pattern, data/data_wall_paper.cpp).
+# upstream's values: file type colours, alerts, greys, the calls and Premium
+# palettes, and the default chat background (a green gradient pattern,
+# data/data_wall_paper.cpp). People's colours are those of every theme
+# (IDENTITY_COLORS in ci/patch.py): blue sage, cyan teal, the rest Telegram's.
 #
 # Background #ffffff, text #111111, secondary text #6b6f6b; accent #5b7a5e
 # with white on it (buttons, switches, counters, the current chat); soft
@@ -55,7 +56,6 @@ historySendingOutIconFg: #98d292 -> #9db59f
 historySendingInIconFg: #a0adb5 -> #a3a8a3
 historyCallArrowInFgSelected: #2592a8 -> #4f6e52
 historyUnreadBarFg: #538bb4 -> #5b7a5e
-historyPeer4NameFg: windowActiveTextFg -> #168acd
 historyPeerSavedMessagesBg: historyPeer4UserpicBg -> #6f8f72
 historyPeerSavedMessagesBg2: historyPeer4UserpicBg2 -> #5b7a5e
 msgInBg: windowBg -> #f1f2f0

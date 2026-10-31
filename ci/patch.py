@@ -10,8 +10,9 @@ sources, the fallbacks that reach Telegram are never started, and the
 identity is Pluma's.
 
 The brand is Pluma's too: the name in the interface, plm:// links in place
-of tg://, the icons rendered in brand/, and the palette "graphite and sage"
-of the default light and dark themes (brand/palette-*.txt).
+of tg://, the icons rendered in brand/, the palette "graphite and sage"
+of the default light and dark themes (brand/palette-*.txt), and people's
+blue and cyan identity colours in every theme (IDENTITY_COLORS).
 
 The api_id and api_hash are not edits: the build passes them to CMake
 (-D TDESKTOP_API_ID / TDESKTOP_API_HASH), together with the options that
@@ -119,6 +120,13 @@ MAIN_MENU = SOURCES + "/window/window_main_menu.cpp"
 SETTINGS_MAIN = SOURCES + "/settings/sections/settings_main.cpp"
 DATA_PEER = SOURCES + "/data/data_peer.cpp"
 SETTINGS_INTRO = SOURCES + "/settings/settings_intro.cpp"
+# The other themes of Settings > Chat Settings (Day, Night), the bases of
+# chat themes, and the stylesheet of the HTML export: people's colours.
+DAY_BLUE_THEME = "Telegram/Resources/day-blue.tdesktop-theme"
+NIGHT_GREEN_THEME = "Telegram/Resources/night-green.tdesktop-theme"
+DAY_BASE_THEME = "Telegram/Resources/day-custom-base.tdesktop-theme"
+NIGHT_BASE_THEME = "Telegram/Resources/night-custom-base.tdesktop-theme"
+EXPORT_CSS = "Telegram/Resources/export_html/css/style.css"
 # In the lib_ui and lib_base submodules.
 PALETTE = "Telegram/lib_ui/ui/colors.palette"
 TEXT_ENTITY = "Telegram/lib_ui/ui/text/text_entity.cpp"
@@ -205,7 +213,8 @@ MARKER = "pluma-patch.txt"
 # these (ci/fetch-upstream.sh sparse). verify() scans all the sources.
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTITLEMENTS, WIN_RC, DESKTOP_FILE,
                   QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
-                  LANG, NIGHT_THEME, SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
+                  LANG, NIGHT_THEME, DAY_BLUE_THEME, NIGHT_GREEN_THEME, DAY_BASE_THEME, NIGHT_BASE_THEME, EXPORT_CSS,
+                  SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
 SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.palette"),
                    ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"))
@@ -884,7 +893,9 @@ REGISTER_URL_SCHEME = """\
 # night theme is a zip of its colours and a 1x1 background, which the patch
 # writes again; the background is the chat's, a shade below the window's.
 NIGHT_THEME_SHA256 = "364fcd7288453377e16db9c733fd98699b161248bc62cc62f78d58d909951d3a"
-NIGHT_COLORS, NIGHT_BACKGROUND = "colors.tdesktop-theme", "background.png"
+# The file of a zipped theme that holds its colours.
+THEME_COLORS = "colors.tdesktop-theme"
+NIGHT_COLORS, NIGHT_BACKGROUND = THEME_COLORS, "background.png"
 NIGHT_WALLPAPER = (0x0F, 0x11, 0x0F)
 
 # The theme tiles of Settings > Chat Settings and the base colour of the
@@ -971,12 +982,94 @@ QR_COLORS = ((INTRO_QR, "\treturn QColor(0x40, 0xA7, 0xE3); // Default windowBgA
              (CONNECTION_BOX, "\treturn QColor(0x40, 0xA7, 0xE3);\n",
               "\treturn QColor(0x5B, 0x7A, 0x5E); // pluma: the default windowBgActive.\n"))
 
+# People's identity colours. Telegram gives every user and chat one of seven
+# colours by its id (Ui::DecideColorIndex, id % 7: 0 red, 1 orange, 2 violet,
+# 3 green, 4 cyan, 5 blue, 6 pink) for its letter avatar, a gradient from the
+# first colour at the top to the second (Ui::EmptyUserpic), its name in groups
+# and the bars of its replies and link previews
+# (Ui::ChatStyle::computeColorIndexValues). Each colour has the palette keys
+# of a slot N, historyPeerN* (Ui::ColorIndexToPaletteIndex: blue is slot 4,
+# cyan slot 7), which every theme defines and the accent picker leaves as they
+# are (kColorizeIgnoredKeys in window_themes_embedded.cpp). Blue becomes the
+# palette's sage and cyan a teal without Telegram's blue, in every theme of
+# the app; the dark themes keep Telegram's cyan names. The other five stay
+# Telegram's, and so do the colours from 7 up, whose names and bars the server
+# colours (help.getPeerColors). What draws the blue or cyan slot as a plain
+# colour takes these keys and follows them; so do folder tags, in the second
+# colour of their slot (dialogs_inner_widget.cpp, edit_filter_box.cpp). Blue:
+# the session icons of Settings > Devices for Windows, macOS and the rest
+# (settings_active_sessions.cpp), the placeholder of a photo to choose
+# (userpic_button.cpp), the picture of a shared folder link
+# (filter_link_header.cpp), the icons of Contacts and Not archived among the
+# chats of a folder (edit_filter_chats_list.cpp), the giveaway icon and badge
+# in the list of boosts (statistics.style,
+# info_statistics_list_controllers.cpp), and, in Day, Night and the bases,
+# whose historyPeerSavedMessagesBg2 (and the day base's
+# historyPeerSavedMessagesBg) refer to the blue slot, the avatars of Saved
+# Messages, Replies, My Notes and the currency of a gift transfer
+# (empty_userpic.cpp) and of a search of posts in the history of Stars
+# (credits_graphics.cpp). Cyan: the session icons of iPhone and iPad, the App
+# Store in the history of Stars (credits_graphics.cpp), the icons of
+# Non-contacts and Read among the chats of a folder, and what
+# st::colorIndexBlue draws, which is 4, Telegram's cyan, despite its name
+# (color_indices.style): the tag "+N" of more folders
+# (dialogs_inner_widget.cpp), the rows of the list of boosts
+# (info_statistics_list_controllers.cpp), the giveaway to chosen users
+# (giveaway_type_row.cpp), the bar of a sponsored message without a colour
+# (sponsored_message_bar.cpp).
+# As (key, Telegram's value in every theme or None for each theme's own
+# (IDENTITY_THEMES), Pluma's in the light themes, in the dark themes or None
+# to keep Telegram's).
+IDENTITY_COLORS = (
+    ("historyPeer4NameFg", None, "#4f6e52", "#9dbb9f"),
+    ("historyPeer4UserpicBg", "#5caffa", "#7fa082", "#7fa082"),
+    ("historyPeer4UserpicBg2", "#408acf", "#5b7a5e", "#5b7a5e"),
+    ("historyPeer7NameFg", None, "#1f8a80", None),
+    ("historyPeer7UserpicBg", "#5bcbe3", "#5bcbc4", "#5bcbc4"),
+    ("historyPeer7UserpicBg2", "#359ad4", "#2c9c98", "#2c9c98"),
+)
+# The themes that define them, as {theme: (dark, Telegram's names of blue and
+# cyan there)}: the palette compiled in (Classic, and the colours a theme
+# leaves out), the default dark theme (Tinted), Day and Night, and the bases
+# of chat themes (Window::Theme::PreparePaletteCallback).
+IDENTITY_THEMES = {
+    PALETTE: (False, {"historyPeer4NameFg": "windowActiveTextFg", "historyPeer7NameFg": "#2996ad"}),
+    NIGHT_THEME: (True, {"historyPeer4NameFg": "#65bdf3", "historyPeer7NameFg": "#62d4e3"}),
+    DAY_BLUE_THEME: (False, {"historyPeer4NameFg": "windowActiveTextFg", "historyPeer7NameFg": "#2996ad"}),
+    NIGHT_GREEN_THEME: (True, {"historyPeer4NameFg": "#68c7f3", "historyPeer7NameFg": "#57c9e0"}),
+    DAY_BASE_THEME: (False, {"historyPeer4NameFg": "windowActiveTextFg", "historyPeer7NameFg": "#2996ad"}),
+    NIGHT_BASE_THEME: (True, {"historyPeer4NameFg": "#65bdf3", "historyPeer7NameFg": "#62d4e3"}),
+}
+# The zipped themes that keep Telegram's colours but these, with the SHA-256
+# of the pinned upstream's file: the patch writes their colours again and
+# keeps the rest of the zip as it is.
+TELEGRAM_THEMES = {
+    DAY_BLUE_THEME: "cef14bea54261604211dee578ddb03f3588517687d1f2be55d63de3ee4eea224",
+    NIGHT_GREEN_THEME: "ed9d02e0d20c0144d833ff10374ea8ccaa20fbda6e9746192f71692afda82e32",
+    DAY_BASE_THEME: "174eb399f66ba04143eb8cd3dfe2593f7e66ba16674e2bf5d334cd300bdd6952",
+    NIGHT_BASE_THEME: "ca675f580b40f8ecfb1d581f29ebd777c03eab4c27821251a369ed16f6f5cb5d",
+}
+# The HTML export draws a letter avatar in one colour, the class userpic1 to
+# userpic8 by slot (export_output_html.cpp), from the export's style.css:
+# Telegram's colours there lie near the middle of the app's gradient
+# (#4f9cd9 for #5caffa to #408acf). Blue and cyan take the middle of Pluma's
+# gradients (#6d8d70, #44b4ae); the media icons that shared their rules keep
+# Telegram's colours. As (the pinned upstream's rule, the slot).
+EXPORT_USERPICS = (
+    (".color_blue,\n.userpic4,\n.media_audio_file .fill,\n.media_voice_message .fill {\n"
+     "    background-color: #4f9cd9;\n}\n", 4),
+    (".color_sea,\n.userpic7,\n.media_location .fill,\n.media_video .fill {\n"
+     "    background-color: #47bcd1;\n}\n", 7),
+)
+
 # Telegram's accent blues, in no default colour of Pluma's (verify()).
 TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5288c1", "6ab3f3", "2f6ea5",
                   "4082bc", "2b5278", "6ab2f2", "72bcfd", "64b9fa", "5eb5f7")
-# Keys of the default themes that may stay blue: user colours, file type
-# colours, the Premium, statistics and call palettes (verify()).
-KEPT_BLUE = re.compile(r"historyPeer[47]\w*|msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
+# Keys of the default themes that may stay blue (verify()): file type
+# colours, the Premium, statistics and call palettes, and people's cyan name,
+# Telegram's #62d4e3 in the dark theme (the check of IDENTITY_COLORS holds
+# the light one to its teal).
+KEPT_BLUE = re.compile(r"historyPeer7NameFg|msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
                        r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+|groupCall\w+")
 
 
@@ -1037,17 +1130,69 @@ def png_1x1(rgb):
             + chunk(b"IDAT", zlib.compress(b"\0" + bytes(rgb), 9)) + chunk(b"IEND", b""))
 
 
-def night_theme(colors):
-    """The night theme's zip, the same for the same colours."""
+def theme_zip(files):
+    """A zipped theme of (name, data), the same for the same files."""
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-        for name, data in ((NIGHT_COLORS, colors.encode("utf-8")), (NIGHT_BACKGROUND, png_1x1(NIGHT_WALLPAPER))):
+        for name, data in files:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             info.external_attr = 0o100644 << 16
             z.writestr(info, data)
     return out.getvalue()
+
+
+def night_theme(colors):
+    """The night theme's zip, the same for the same colours."""
+    return theme_zip(((NIGHT_COLORS, colors.encode("utf-8")), (NIGHT_BACKGROUND, png_1x1(NIGHT_WALLPAPER))))
+
+
+def zipped_colors(data, where):
+    """The colours of a zipped theme."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            if z.namelist().count(THEME_COLORS) != 1:
+                raise PatchError(f"{where}: holds {z.namelist()}")
+            return z.read(THEME_COLORS).decode("utf-8")
+    except zipfile.BadZipFile:
+        raise PatchError(f"{where}: not a zip")
+
+
+def with_colors(data, colors):
+    """A zipped theme with other colours, its other files as they were."""
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return theme_zip([(name, colors.encode("utf-8") if name == THEME_COLORS else z.read(name))
+                          for name in z.namelist()])
+
+
+def identity(text, theme):
+    """The colours of a theme of IDENTITY_THEMES with people's blue and cyan
+    of IDENTITY_COLORS. Each key must hold Telegram's value; a fallback after
+    "|" stays."""
+    dark, names = IDENTITY_THEMES[theme]
+    for key, telegram, on_light, on_dark in IDENTITY_COLORS:
+        old, new = telegram or names[key], on_dark if dark else on_light
+        line = re.compile(rf"^{key}: {re.escape(old)}((?: \| [A-Za-z0-9_]+)?;)", re.M)
+        found = len(line.findall(text))
+        if found != 1:
+            raise PatchError(f"{theme}: {found} occurrences of '{key}: {old};', expected 1; "
+                             "upstream changed the colour")
+        if new:
+            text = line.sub(lambda m: f"{key}: {new}{m.group(1)}", text)
+    return text
+
+
+def middle(a, b):
+    """The colour halfway between two #rrggbb."""
+    return "#" + "".join(f"{(int(a[i:i + 2], 16) + int(b[i:i + 2], 16) + 1) // 2:02x}" for i in (1, 3, 5))
+
+
+def export_userpic(slot):
+    """The colour of the export's letter avatars of a slot: the middle of
+    Pluma's gradient."""
+    light = {key: value for key, _, value, _ in IDENTITY_COLORS}
+    return middle(light[f"historyPeer{slot}UserpicBg"], light[f"historyPeer{slot}UserpicBg2"])
 
 
 def lang_entries(text):
@@ -1142,13 +1287,23 @@ def rebrand(tree, c):
         tree.write_bytes(rel, (BRAND / "tree" / rel).read_bytes())
 
     # The colours: the light palette compiled in, the night theme, the theme
-    # tiles and the accent picker, the QR codes.
-    tree.write(PALETTE, recolor(tree.read(PALETTE), load_table(BRAND / "palette-day.txt"), PALETTE))
+    # tiles and the accent picker, the QR codes; people's blue and cyan in
+    # every theme and in the export.
+    palette = recolor(tree.read(PALETTE), load_table(BRAND / "palette-day.txt"), PALETTE)
+    tree.write(PALETTE, identity(palette, PALETTE))
     data = tree.read_bytes(NIGHT_THEME)
     if hashlib.sha256(data).hexdigest() != NIGHT_THEME_SHA256:
         raise PatchError(f"{NIGHT_THEME}: not the pinned upstream's theme; upstream changed it")
     colors = recolor(night_colors(data), load_table(BRAND / "palette-night.txt"), f"{NIGHT_THEME}: {NIGHT_COLORS}")
-    tree.write_bytes(NIGHT_THEME, night_theme(colors))
+    tree.write_bytes(NIGHT_THEME, night_theme(identity(colors, NIGHT_THEME)))
+    for rel, sha256 in TELEGRAM_THEMES.items():
+        data = tree.read_bytes(rel)
+        if hashlib.sha256(data).hexdigest() != sha256:
+            raise PatchError(f"{rel}: not the pinned upstream's theme; upstream changed it")
+        tree.write_bytes(rel, with_colors(data, identity(zipped_colors(data, rel), rel)))
+    for old, slot in EXPORT_USERPICS:
+        tree.replace(EXPORT_CSS, old, old.replace(f"\n.userpic{slot},", "")
+                     + f".userpic{slot} {{\n    background-color: {export_userpic(slot)}; /* pluma */\n}}\n")
     for old, new in (EMBEDDED_CLASSIC, EMBEDDED_NIGHT, NIGHT_CONTRAST):
         tree.replace(EMBEDDED_THEMES, old, new)
     for rel, old, new in QR_COLORS:
@@ -1268,6 +1423,26 @@ def verify_brand(tree):
             if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
                 raise PatchError(f"{where}: {key} is Telegram's blue {color}")
 
+    # People's blue and cyan in every theme, the colours a theme leaves out
+    # taken from the palette, and in the export: Pluma's colour as drawn, or
+    # Telegram's value as written where it stays (a reference among them).
+    for theme, (dark, names) in IDENTITY_THEMES.items():
+        values = {**day, **palette_values(tree.read(theme) if theme == PALETTE
+                                          else zipped_colors(tree.read_bytes(theme), theme))}
+        for key, telegram, on_light, on_dark in IDENTITY_COLORS:
+            pluma = on_dark if dark else on_light
+            color = resolve(values, key) if pluma else values[key].split("|")[0].strip()
+            expected = pluma or telegram or names[key]
+            if color.lower() != expected.lower():
+                raise PatchError(f"{theme}: people's {key} is {color}, not {expected}")
+    css = re.sub(r"/\*.*?\*/", "", tree.read(EXPORT_CSS), flags=re.S)
+    rules = [([s.strip() for s in m.group(1).split(",")], m.group(2))
+             for m in re.finditer(r"([^{}]*)\{([^{}]*)\}", css)]
+    for _, slot in EXPORT_USERPICS:
+        found = [body for selectors, body in rules if f".userpic{slot}" in selectors]
+        if [re.findall(r"background-color:\s*([^;\s]+)", body) for body in found] != [[export_userpic(slot)]]:
+            raise PatchError(f"{EXPORT_CSS}: the letter avatars .userpic{slot} are not {export_userpic(slot)} alone")
+
 
 CODE_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|R"([^(\s]*)\((.*?)\)\1"|"(?:[^"\\\n]|\\.)*"'
                          r"|'(?:[^'\\\n]|\\.)*'", re.S)
@@ -1288,7 +1463,7 @@ def code_telegram(text):
 def brand_edited():
     """The text files rebrand() edits."""
     return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN,
-                                SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX, DATA_PEER)
+                                SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX, DATA_PEER, EXPORT_CSS)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
                                + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
                                + tuple(rel for rel, _, _ in QR_COLORS)))

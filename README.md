@@ -41,7 +41,7 @@ After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - no code that constructs the classes asking Google, Mozilla or Firebase;
 - the updater and the crash reports compiled out;
 - the identity of every platform;
-- the brand: no text that names Telegram but what `LANG_KEEP` and `CODE_TELEGRAM` keep, no `tg://` link, Pluma's icons, no Telegram blue in the default themes but what `KEPT_BLUE` keeps.
+- the brand: no text that names Telegram but what `LANG_KEEP` and `CODE_TELEGRAM` keep, no `tg://` link, Pluma's icons, no Telegram blue in the default themes but what `KEPT_BLUE` keeps, people's blue and cyan Pluma's in every theme and in the export.
 
 The check also covers the layer (`api.tl` says `LAYER 228`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
 
@@ -69,12 +69,15 @@ The brand of Pluma (task 017 of the server repository) comes from [`brand/`](bra
   - The default light theme, Classic: `colors.palette` of lib_ui, [`brand/palette-day.txt`](brand/palette-day.txt).
   - The default dark theme, which a fresh install opens on a dark system (Tinted): `night.tdesktop-theme`, [`brand/palette-night.txt`](brand/palette-night.txt). The patch writes the theme's zip again.
   - The theme tiles of Settings, the base colour of the accent picker, the circle in the centre of QR codes.
+  - People's colours, the seven Telegram gives a user or a chat by its id for its letter avatar (a gradient), its name in groups and the bars of its replies and link previews, stay Telegram's, except blue and cyan (`IDENTITY_COLORS`): blue is the palette's sage (avatars #7fa082 to #5b7a5e, names #4f6e52, in the dark themes #9dbb9f), and cyan a teal without Telegram's blue (avatars #5bcbc4 to #2c9c98, names #1f8a80; the dark themes keep Telegram's cyan names, #62d4e3 in Tinted). So in every theme of the app: Classic and Tinted, Day and Night, whose own colours stay Telegram's (those they leave out come from Classic, and are Pluma's), and the bases of chat themes (`TELEGRAM_THEMES`). The accent picker leaves them as it does upstream. The HTML export draws a letter avatar in one colour, there the middle of the gradient (#6d8d70, #44b4ae). The colours from 7 up come from the server (`help.getPeerColors`) for names and bars, and stay; upstream draws their letter avatars in the slot of their number modulo 7. What draws the blue or cyan slot as a plain colour follows, and so do folder tags, in the second colour of their slot:
+    - blue, now sage: the session icons of Settings → Devices for Windows, macOS and the rest, the placeholder of a photo to choose, the picture of a shared folder link, the icons of Contacts and Not archived among the chats of a folder, the giveaway icon and badge in the list of boosts; in Day, Night and the bases of chat themes, whose Saved Messages gradient refers to the blue slot, the avatars of Saved Messages, Replies and My Notes, of the currency of a gift transfer and of a search of posts in the history of Stars;
+    - cyan, now teal: the session icons of iPhone and iPad, the App Store in the history of Stars, the icons of Non-contacts and Read among the chats of a folder, and what upstream draws in `colorIndexBlue`, which is cyan's id 4 despite its name: the tag "+N" of more folders, the rows of the list of boosts, the giveaway to chosen users, the bar of a sponsored message without a colour.
 
-  Outgoing bubbles are one colour: Desktop draws gradient bubbles for cloud chat themes only. Blue stays where it means something else (`KEPT_BLUE`): user colours, file type colours, the Premium, statistics and group call palettes. The Day and Night themes and the accent presets of the picker are Telegram's, for the user to pick.
+  Outgoing bubbles are one colour: Desktop draws gradient bubbles for cloud chat themes only. Blue stays where it means something else (`KEPT_BLUE`): file type colours, the Premium, statistics and group call palettes, and Telegram's cyan names of people in Tinted. The accent presets of the picker are Telegram's, and so are the Day and Night themes, for the user to pick, but for people's blue and cyan and the colours they leave out to Classic.
 - **The service notifications account** is drawn as any user: by the photo the server gives it (`pluma-admin service-photo`), by its letter until that loads. Upstream draws its logo meanwhile, and the list of chats kept the logo over the photo.
 - **Ways into Telegram's services**, gone: the FAQ, Telegram Features and Ask a Question in Settings (the server does not serve `help.getSupport`), the FAQ in the login screen's settings and in the About box, the link of the main menu's footer to desktop.telegram.org, the Help of a banned phone number (an e-mail to Telegram's support).
 
-To change an icon, edit its SVG in `brand/svg` and run `brand/render.sh` (librsvg's `rsvg-convert` and ImageMagick 7); commit the SVG and the rendered files together. The palettes are tables of `key: upstream value -> Pluma value`.
+To change an icon, edit its SVG in `brand/svg` and run `brand/render.sh` (librsvg's `rsvg-convert` and ImageMagick 7); commit the SVG and the rendered files together. The palettes are tables of `key: upstream value -> Pluma value`; people's colours are one table for every theme, `IDENTITY_COLORS` in `ci/patch.py`, a line for each colour.
 
 ## Configuration
 
@@ -259,7 +262,7 @@ ci/package.sh linux|windows|macos dev  # out/pluma-desktop-<version>-<system>-de
 1. Change `upstream.env`: the tag and its commit, the version, the layer, and the toolchain of the tag (Qt in `Telegram/build/qt_version.py`, the SDK and toolset in `docs/building-win.md`, ccache in `.github/workflows/linux.yml`, the default Xcode of the macOS image). The layer must be one the server speaks. A new ccache also needs the SHA-256 of its archives in `ci/setup.sh`: the static Linux build, macOS and Windows.
 2. Run `ci/fetch-upstream.sh sparse` and the tests.
 3. Remove the backports the new release already has: their edits no longer match.
-4. The brand: look at what the release changed in the strings, icons and default themes the patch names. `python3 ci/patch.py --strings upstream/Telegram/Resources/langs/lang.strings` prints the table of `brand/strings.txt`; `ASSETS` in `ci/patch.py` holds the SHA-256 of the icons it replaces; the palettes, the upstream value of each colour.
+4. The brand: look at what the release changed in the strings, icons and default themes the patch names. `python3 ci/patch.py --strings upstream/Telegram/Resources/langs/lang.strings` prints the table of `brand/strings.txt`; `ASSETS` in `ci/patch.py` holds the SHA-256 of the icons it replaces; the palettes, the upstream value of each colour; `IDENTITY_THEMES`, Telegram's names of people's blue and cyan in each theme, and `TELEGRAM_THEMES`, the SHA-256 of the themes the patch changes for them alone.
 5. Push. Where the upstream moved something, `ci/patch.py` names the file and the text it expected. A changed `centos_env` makes `linux-env` build a new image first.
 
 ## Setting up the repository

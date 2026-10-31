@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -251,6 +252,60 @@ class BrandTest(unittest.TestCase):
         night = patch.load_table(patch.BRAND / "palette-night.txt")
         self.assertIn(("windowBgActive", "#40a7e3", "#5b7a5e"), day)
         self.assertIn(("windowBg", "#17212b", "#131513"), night)
+        # People's colours are IDENTITY_COLORS's, the same in every theme.
+        people = {key for key, _, _, _ in patch.IDENTITY_COLORS}
+        self.assertEqual([key for key, _, _ in day + night if key in people], [])
+
+    def test_identity_tables(self):
+        # Every theme names Telegram's values of the keys that differ by theme.
+        own = {key for key, telegram, _, _ in patch.IDENTITY_COLORS if telegram is None}
+        for theme, (_, names) in patch.IDENTITY_THEMES.items():
+            with self.subTest(theme=theme):
+                self.assertEqual(set(names), own)
+        self.assertEqual(set(patch.IDENTITY_THEMES), {patch.PALETTE, patch.NIGHT_THEME, *patch.TELEGRAM_THEMES})
+        for key, telegram, on_light, on_dark in patch.IDENTITY_COLORS:
+            with self.subTest(key=key):
+                self.assertTrue(telegram is None or patch.is_blue(telegram))
+                self.assertFalse(any(patch.is_blue(color) for color in (on_light, on_dark) if color))
+        # The export's avatars: the middle of the sage and the teal gradients.
+        self.assertEqual(patch.middle("#000000", "#ffffff"), "#808080")
+        self.assertEqual((patch.export_userpic(4), patch.export_userpic(7)), ("#6d8d70", "#44b4ae"))
+
+    def test_identity(self):
+        light = ("historyPeer4NameFg: windowActiveTextFg; // blue\nhistoryPeer4UserpicBg: #5caffa;\n"
+                 "historyPeer4UserpicBg2: #408acf | historyPeer4UserpicBg;\nhistoryPeer7NameFg: #2996ad;\n"
+                 "historyPeer7UserpicBg: #5bcbe3;\nhistoryPeer7UserpicBg2: #359ad4 | historyPeer7UserpicBg;\n")
+        self.assertEqual(patch.identity(light, patch.PALETTE),
+                         "historyPeer4NameFg: #4f6e52; // blue\nhistoryPeer4UserpicBg: #7fa082;\n"
+                         "historyPeer4UserpicBg2: #5b7a5e | historyPeer4UserpicBg;\nhistoryPeer7NameFg: #1f8a80;\n"
+                         "historyPeer7UserpicBg: #5bcbc4;\nhistoryPeer7UserpicBg2: #2c9c98 | historyPeer7UserpicBg;\n")
+        # A dark theme keeps Telegram's cyan name.
+        dark = light.replace("windowActiveTextFg", "#65bdf3").replace("#2996ad", "#62d4e3")
+        self.assertEqual(patch.palette_values(patch.identity(dark, patch.NIGHT_THEME)),
+                         {"historyPeer4NameFg": "#9dbb9f", "historyPeer4UserpicBg": "#7fa082",
+                          "historyPeer4UserpicBg2": "#5b7a5e | historyPeer4UserpicBg",
+                          "historyPeer7NameFg": "#62d4e3", "historyPeer7UserpicBg": "#5bcbc4",
+                          "historyPeer7UserpicBg2": "#2c9c98 | historyPeer7UserpicBg"})
+        # Another colour, a key twice or none, a changed name kept: the patch
+        # stops.
+        for theme, text in ((patch.PALETTE, light.replace("#5caffa", "#5caffb")),
+                            (patch.PALETTE, light + "historyPeer4UserpicBg: #5caffa;\n"),
+                            (patch.PALETTE, light.replace("historyPeer7NameFg:", "historyPeer7NameFgOld:")),
+                            (patch.NIGHT_THEME, dark.replace("#62d4e3", "#62d4e4"))):
+            with self.subTest(text=text), self.assertRaises(patch.PatchError):
+                patch.identity(text, theme)
+
+    def test_with_colors(self):
+        theme = patch.theme_zip(((patch.THEME_COLORS, b"a: #111111;\n"), ("background.jpg", b"\xff\xd8jpeg")))
+        out = patch.with_colors(theme, "a: #222222;\n")
+        self.assertEqual(out, patch.with_colors(theme, "a: #222222;\n"))
+        self.assertEqual(patch.zipped_colors(out, "t"), "a: #222222;\n")
+        with zipfile.ZipFile(io.BytesIO(out)) as z:
+            self.assertEqual(z.namelist(), [patch.THEME_COLORS, "background.jpg"])
+            self.assertEqual(z.read("background.jpg"), b"\xff\xd8jpeg")
+        for data in (patch.theme_zip((("background.png", b""),)), b"colors"):
+            with self.subTest(data=data[:8]), self.assertRaises(patch.PatchError):
+                patch.zipped_colors(data, "t")
 
     def test_name_telegram(self):
         self.assertEqual(patch.name_telegram("Telegram Desktop and Telegram's cloud", "Pluma"),
@@ -385,6 +440,9 @@ DAMAGE = (
     (patch.PALETTE, "// basic\n", "// basic\nnewAccentFg: #3390ec;\n"),
     (patch.EMBEDDED_THEMES, '\t\t\tqColor("5288c1")\n\t\t},', '\t\t\tqColor("5288c2")\n\t\t},'),
     (patch.INTRO_QR, "QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.", "QColor(0x40, 0xA7, 0xE3);"),
+    # People's colours: another cyan name, the export's rule of blue avatars.
+    (patch.PALETTE, "historyPeer7NameFg: #2996ad;", "historyPeer7NameFg: #2996ae;"),
+    (patch.EXPORT_CSS, ".userpic4,\n.media_audio_file .fill,", ".userpic4,\n.media_audio .fill,"),
     # The ways into Telegram's services.
     (patch.SETTINGS_MAIN, "OpenAskQuestionConfirm(controller); },", "OpenAskQuestion(controller); },"),
     (patch.SETTINGS_INTRO, "\t\tOpenFaq(nullptr);\n", "\t\tOpenFaq({});\n"),
@@ -602,6 +660,101 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("OpenFaq", tree.read(patch.SETTINGS_INTRO))
         self.assertIn("void BuildHelpSection(SectionBuilder &builder) {\n\t// pluma:", tree.read(patch.SETTINGS_MAIN))
 
+    def test_people_colours(self):
+        """People's blue is sage and cyan teal in every theme, the dark ones
+        with Telegram's cyan names; the themes of Telegram keep their other
+        colours and files; the export's avatars take the middle of the
+        gradients."""
+        def files(data):
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                return {name: z.read(name) for name in z.namelist()}
+
+        tree, _ = self.run_patch()
+        palette = patch.palette_values(tree.read(patch.PALETTE))
+        self.assertEqual([palette[key] for key in ("historyPeer4NameFg", "historyPeer4NameFgSelected",
+                                                   "historyPeer4UserpicBg", "historyPeer4UserpicBg2",
+                                                   "historyPeer7NameFg", "historyPeer7UserpicBg2")],
+                         ["#4f6e52", "historyPeer4NameFg", "#7fa082", "#5b7a5e | historyPeer4UserpicBg",
+                          "#1f8a80", "#2c9c98 | historyPeer7UserpicBg"])
+        night = patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))
+        self.assertEqual([night[key] for key in ("historyPeer4NameFg", "historyPeer4UserpicBg2",
+                                                 "historyPeer7NameFg", "historyPeer7UserpicBg")],
+                         ["#9dbb9f", "#5b7a5e", "#62d4e3", "#5bcbc4"])
+        for rel in patch.TELEGRAM_THEMES:
+            with self.subTest(rel=rel):
+                dark = patch.IDENTITY_THEMES[rel][0]
+                people = {key: on_dark if dark else on_light for key, _, on_light, on_dark in patch.IDENTITY_COLORS}
+                pinned, patched = files(self.files[rel]), files(tree.read_bytes(rel))
+                self.assertEqual(list(pinned), list(patched))
+                for name in pinned:
+                    if name != patch.THEME_COLORS:
+                        self.assertEqual(pinned[name], patched[name])
+                before, after = (patch.palette_values(f[patch.THEME_COLORS].decode("utf-8")) for f in (pinned, patched))
+                self.assertEqual({key: after[key] for key in after if after[key] != before[key]},
+                                 {key: color for key, color in people.items() if color})
+        # The avatars of Saved Messages, Replies and My Notes: Classic and
+        # Tinted take the palettes' sage; Day, Night and the bases refer to
+        # the blue slot for the second colour (the day base for the first too)
+        # and leave the rest to Classic, so sage too.
+        day = patch.palette_values(tree.read(patch.PALETTE))
+        saved = {}
+        for rel in patch.IDENTITY_THEMES:
+            values = {**day, **patch.palette_values(tree.read(rel) if rel == patch.PALETTE
+                                                    else patch.zipped_colors(tree.read_bytes(rel), rel))}
+            saved[rel] = tuple(patch.resolve(values, key)
+                               for key in ("historyPeerSavedMessagesBg", "historyPeerSavedMessagesBg2"))
+        self.assertEqual(saved, {patch.PALETTE: ("#6f8f72", "#5b7a5e"), patch.NIGHT_THEME: ("#7fa082", "#5b7a5e"),
+                                 patch.DAY_BLUE_THEME: ("#6f8f72", "#5b7a5e"),
+                                 patch.NIGHT_GREEN_THEME: ("#6f8f72", "#5b7a5e"),
+                                 patch.DAY_BASE_THEME: ("#7fa082", "#5b7a5e"),
+                                 patch.NIGHT_BASE_THEME: ("#6f8f72", "#5b7a5e")})
+        css = tree.read(patch.EXPORT_CSS)
+        self.assertIn(".color_blue,\n.media_audio_file .fill,\n.media_voice_message .fill {\n"
+                      "    background-color: #4f9cd9;\n}\n"
+                      ".userpic4 {\n    background-color: #6d8d70; /* pluma */\n}\n", css)
+        self.assertIn(".color_sea,\n.media_location .fill,\n.media_video .fill {\n"
+                      "    background-color: #47bcd1;\n}\n"
+                      ".userpic7 {\n    background-color: #44b4ae; /* pluma */\n}\n", css)
+
+    def test_people_colours_are_verified(self):
+        """verify() finds people's colours other than IDENTITY_COLORS's in a
+        theme or in the export, Telegram's blue among them, however the edits
+        were made."""
+        tree, c = self.run_patch()
+        damage = (
+            # Not blue: only the check of IDENTITY_COLORS sees these.
+            (patch.PALETTE, lambda d: d.replace(b"historyPeer4NameFg: #4f6e52;", b"historyPeer4NameFg: #5b7a5e;")),
+            (patch.NIGHT_THEME, lambda d: patch.night_theme(patch.night_colors(d).replace(
+                "historyPeer7NameFg: #62d4e3;", "historyPeer7NameFg: #53ccc6;"))),
+            # Telegram's blue back in its themes, and in the export.
+            (patch.DAY_BLUE_THEME, lambda d: patch.with_colors(d, patch.zipped_colors(d, "").replace(
+                "historyPeer4NameFg: #4f6e52;", "historyPeer4NameFg: windowActiveTextFg;"))),
+            (patch.NIGHT_BASE_THEME, lambda d: patch.with_colors(d, patch.zipped_colors(d, "").replace(
+                "historyPeer4UserpicBg2: #5b7a5e;", "historyPeer4UserpicBg2: #408acf;"))),
+            (patch.EXPORT_CSS, lambda d: d + b".userpic4 {\n    background-color: #4f9cd9;\n}\n"),
+        )
+        for rel, damaged in damage:
+            with self.subTest(rel=rel):
+                patched = tree.read_bytes(rel)
+                self.assertNotEqual(damaged(patched), patched, "the damage does not apply to the patched file")
+                tree.write_bytes(rel, damaged(patched))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+                tree.write_bytes(rel, patched)
+
+    def test_people_colours_kept(self):
+        """A colour of IDENTITY_COLORS set to None stays Telegram's as
+        written, a reference to another key too, and verify() accepts it."""
+        table = tuple((key, telegram, None if key == "historyPeer4NameFg" else on_light, on_dark)
+                      for key, telegram, on_light, on_dark in patch.IDENTITY_COLORS)
+        with unittest.mock.patch.object(patch, "IDENTITY_COLORS", table):
+            tree, _ = self.run_patch()
+        for rel, colors in ((patch.PALETTE, tree.read(patch.PALETTE)),
+                            (patch.DAY_BLUE_THEME, patch.zipped_colors(tree.read_bytes(patch.DAY_BLUE_THEME), ""))):
+            with self.subTest(rel=rel):
+                self.assertEqual(patch.palette_values(colors)["historyPeer4NameFg"], "windowActiveTextFg")
+
     def test_birthday_banner(self):
         """The banner of contacts' birthdays shows without Premium, a click
         opens the chat or a box "Birthdays" with them, and no text of it
@@ -642,8 +795,8 @@ class UpstreamTest(unittest.TestCase):
                       tree.read(patch.PROFILE_ACTIONS))
 
     def test_changed_binary_files(self):
-        """An icon or the night theme of another release stops the patch."""
-        for rel in (patch.ASSETS[0][0], patch.NIGHT_THEME):
+        """An icon or a zipped theme of another release stops the patch."""
+        for rel in (patch.ASSETS[0][0], patch.NIGHT_THEME, *patch.TELEGRAM_THEMES):
             with self.subTest(rel=rel):
                 self.tearDown()
                 self.written.add(rel)

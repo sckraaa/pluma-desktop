@@ -6,8 +6,10 @@
 # One line per colour: "key: upstream value -> Pluma value". ci/patch.py
 # replaces each one and stops when the upstream value differs; "-" for the
 # upstream value adds a key the upstream theme leaves to Classic's default.
-# The rest keeps upstream's values: user colours (red, green, blue, purple...),
-# file type colours, red and orange alerts, greys.
+# The rest keeps upstream's values: file type colours, red and orange alerts,
+# greys. People's colours are those of every theme (IDENTITY_COLORS in
+# ci/patch.py): blue sage, cyan teal with Telegram's cyan names, the rest
+# Telegram's.
 #
 # Background #131513, text #e8ece8, secondary text #9aa29a; accent #9dbb9f
 # with #131513 on it (buttons, switches, counters); soft accent #7fa082 and
