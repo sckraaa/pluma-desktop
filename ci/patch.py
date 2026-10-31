@@ -100,6 +100,8 @@ BIRTHDAY_CONTACTS = SOURCES + "/dialogs/suggestions/suggestion_birthday_contacts
 # The gift button of a chat and the birthday row of a profile.
 HISTORY_WIDGET = SOURCES + "/history/history_widget.cpp"
 PROFILE_ACTIONS = SOURCES + "/info/profile/info_profile_actions.cpp"
+# The suggestions above the chat list, the birthday banner among them.
+TOP_BAR_SUGGESTION = SOURCES + "/dialogs/dialogs_top_bar_suggestion.cpp"
 # In the cmake_helpers submodule at cmake/.
 CMAKE_VARIABLES = "cmake/variables.cmake"
 
@@ -523,7 +525,8 @@ CMAKE_DEFINITIONS = "target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABL
 # The files the patch edits; it refuses CRLF in any of them.
 EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY_DATA, APPLICATION, LAUNCHER,
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
-          PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS)
+          PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS,
+          TOP_BAR_SUGGESTION)
 
 
 # Backports of upstream fixes to the build scripts, each as (file, the
@@ -729,6 +732,44 @@ BIRTHDAY_GIFTS = (
      "\t\t// pluma: the gift on the birthday only, and only while Premium can be\n"
      "\t\t// bought.\n"
      "\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n"),
+)
+
+# The suggestion above the chat list that has to load first never showed.
+# TopBarSuggestionValue hands the consumer (the chat list) a new wrap only
+# when the suggestion makes it while the merge of promo, authorization and
+# Premium events runs; the birthday banner makes it after contacts.
+# getBirthdays answers, and nothing hands it over then: the banner stayed
+# hidden (seen on the dev build against a stand, 2026-10-31). The wrap made
+# later is handed over by the suggestion's done, once: the chat list takes
+# it into a unique_qptr, and handing the same wrap twice would delete it. As
+# (the pinned upstream's text, Pluma's) of TOP_BAR_SUGGESTION.
+TOP_BAR_WRAP = (
+    ("\t\t\tint activationId = 0;\n\t\t};\n",
+     "\t\t\tint activationId = 0;\n"
+     "\t\t\t// pluma: within processCurrentSuggestion of the merge below,\n"
+     "\t\t\t// which hands a new wrap to the consumer itself.\n"
+     "\t\t\tbool processing = false;\n"
+     "\t\t};\n"),
+    ("\t\t\t\t\t\tif (!state->wrap) {\n",
+     "\t\t\t\t\t\tconst auto created = !state->wrap;\n"
+     "\t\t\t\t\t\tif (!state->wrap) {\n"),
+    ("\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n"
+     "\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n"
+     "\t\t\t\t\t},\n",
+     "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n"
+     "\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n"
+     "\t\t\t\t\t\t// pluma: a wrap made after the merge below returned, when the\n"
+     "\t\t\t\t\t\t// suggestion had to load first, is handed over here.\n"
+     "\t\t\t\t\t\tif (created && !state->processing) {\n"
+     "\t\t\t\t\t\t\tconsumer.put_next_copy(state->wrap.get());\n"
+     "\t\t\t\t\t\t}\n"
+     "\t\t\t\t\t},\n"),
+    ("\t\t\tconst auto weak = base::make_weak(was);\n"
+     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n",
+     "\t\t\tconst auto weak = base::make_weak(was);\n"
+     "\t\t\tstate->processing = true;\n"
+     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n"
+     "\t\t\tstate->processing = false;\n"),
 )
 
 # --- the brand ---------------------------------------------------------------
@@ -1650,6 +1691,9 @@ def patch(tree, c):
         tree.replace(BIRTHDAY_CONTACTS, old, new)
     for rel, old, new in BIRTHDAY_GIFTS:
         tree.replace(rel, old, new)
+    # A suggestion above the chat list that loads first shows (TOP_BAR_WRAP).
+    for old, new in TOP_BAR_WRAP:
+        tree.replace(TOP_BAR_SUGGESTION, old, new)
 
     rebrand(tree, c)
 

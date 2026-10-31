@@ -457,6 +457,11 @@ DAMAGE = (
     (BIRTHDAY, "\t\t\t\tUi::ChooseStarGiftRecipient(controller);\n", "\t\t\t\tUi::ChooseStarGiftRecipient(controller, users);\n"),
     (BIRTHDAY, "? tr::lng_dialogs_suggestions_birthday_contact_about(", "? tr::lng_dialogs_suggestions_birthday_gift_about("),
     (BIRTHDAY, "tr::lng_dialogs_suggestions_birthday_contact_dismiss(", "tr::lng_dialogs_suggestions_birthday_contacts_dismiss("),
+    # The hand-over of a suggestion that loads first.
+    (patch.TOP_BAR_SUGGESTION, "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n",
+     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion, true);\n"),
+    (patch.TOP_BAR_SUGGESTION, "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n",
+     "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n\t\t\t\t\t\t\tToggle{ true, anim::type::slow });\n"),
     # The gift of a chat and of a profile on a contact's birthday.
     (patch.HISTORY_WIDGET, "\t\t&& !user->isBot()\n\t\t&& ((disallowed & Type::SendHide)\n",
      "\t\t&& !user->isBot()\n\t\t&& !user->isInaccessible()\n\t\t&& ((disallowed & Type::SendHide)\n"),
@@ -793,6 +798,17 @@ class UpstreamTest(unittest.TestCase):
                       tree.read(patch.HISTORY_WIDGET))
         self.assertIn("\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n",
                       tree.read(patch.PROFILE_ACTIONS))
+        # The banner shows although it loads the birthdays first: its wrap is
+        # handed to the chat list once, by done or by the merge.
+        top = tree.read(patch.TOP_BAR_SUGGESTION)
+        for s in ("\t\t\tbool processing = false;\n",
+                  "\t\t\t\t\t\tconst auto created = !state->wrap;\n\t\t\t\t\t\tif (!state->wrap) {\n",
+                  "\t\t\t\t\t\tif (created && !state->processing) {\n"
+                  "\t\t\t\t\t\t\tconsumer.put_next_copy(state->wrap.get());\n\t\t\t\t\t\t}\n",
+                  "\t\t\tstate->processing = true;\n\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n"
+                  "\t\t\tstate->processing = false;\n"):
+            self.assertIn(s, top)
+        self.assertEqual(top.count("consumer.put_next_copy(state->wrap.get());"), 2)
 
     def test_changed_binary_files(self):
         """An icon or a zipped theme of another release stops the patch."""
