@@ -32,8 +32,18 @@ jobs:
       actions: read
       contents: read
     steps:
+      # The scripts, upstream.env and notes of the commit the run built, not
+      # of main's head now: the package must say the version the app is.
+      - name: The commit of the desktop run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ inputs.run }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq '"sha=\(.head_sha)\nbranch=\(.head_branch)\nnumber=\(.run_number)"' >>"$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.run.outputs.sha }}
           persist-credentials: false
       - name: age
         run: ci/setup.sh age
@@ -78,25 +88,22 @@ jobs:
           ci/encrypt.sh signed
       - name: Publish to the site and the updater
         env:
-          GH_TOKEN: ${{ github.token }}
-          RUN: ${{ inputs.run }}
+          BRANCH: ${{ steps.run.outputs.branch }}
+          # The number the build was patched with is its own run's.
+          BUILD_NUMBER: ${{ steps.run.outputs.number }}
           PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
           PLUMA_UPDATE_KEY: ${{ secrets.PLUMA_UPDATE_KEY }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
         run: |
-          branch=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq .head_branch)
-          if [ "$branch" != main ]; then
-            echo "The desktop run built $branch, not main: not published."
+          if [ "$BRANCH" != main ]; then
+            echo "The desktop run built $BRANCH, not main: not published."
             exit 0
           fi
           if [ -z "$PLUMA_UPDATE_KEY" ] || [ -z "$RELEASES_UPLOAD_TOKEN" ]; then
             echo "::error::The release environment has no PLUMA_UPDATE_KEY or RELEASES_UPLOAD_TOKEN (README, Releases)."
             exit 1
           fi
-          # The number the build was patched with is its own run's.
-          BUILD_NUMBER=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq .run_number)
-          export BUILD_NUMBER
           umask 077
           keys=$RUNNER_TEMP/publish
           mkdir -p "$keys"

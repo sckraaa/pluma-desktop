@@ -555,7 +555,12 @@ jobs:
   # pluma-desktop-macos-notarizing, and the workflow staple-macos finishes it.
   release:
     needs: [check, linux, windows, macos]
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.check.outputs.target == 'server'
+    # Each system that built: a manual run of one system, or a failed build
+    # of another, still signs and publishes what there is.
+    if: >-
+      !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.check.outputs.target == 'server'
+      && (needs.macos.result == 'success' || needs.linux.result == 'success' || needs.windows.result == 'success')
     runs-on: macos-26
     timeout-minutes: 60
     environment: release
@@ -566,19 +571,23 @@ jobs:
       - name: age
         run: ci/setup.sh age
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.macos.result == 'success'
         with:
           name: pluma-desktop-macos
           path: build
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.linux.result == 'success'
         with:
           name: pluma-desktop-linux
           path: build-linux
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.windows.result == 'success'
         with:
           name: pluma-desktop-windows
           path: build-windows
       - name: Sign and notarize
         id: sign
+        if: needs.macos.result == 'success'
         env:
           DEVELOPER_ID_P12_B64: ${{ secrets.PLUMA_DEVELOPER_ID_P12 }}
           PLUMA_DEVELOPER_ID_PASSWORD: ${{ secrets.PLUMA_DEVELOPER_ID_PASSWORD }}
@@ -635,7 +644,11 @@ jobs:
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
           BUILD_NUMBER: ${{ github.run_number }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
           NOTARIZED: ${{ steps.sign.outputs.notarized }}
+          BUILT_LINUX: ${{ needs.linux.result }}
+          BUILT_WINDOWS: ${{ needs.windows.result }}
+          BUILT_MACOS: ${{ needs.macos.result }}
         run: |
           if [ -z "$PLUMA_UPDATE_KEY" ] || [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$PLUMA_AGE_IDENTITY" ]; then
             echo "::error::The release environment has no PLUMA_UPDATE_KEY, RELEASES_UPLOAD_TOKEN or PLUMA_AGE_IDENTITY (README, Releases)."
@@ -658,12 +671,24 @@ jobs:
             age --decrypt --identity "$keys/age.key" --output "$out" "$1"
             printf '%s' "$out"
           }
-          ci/publish.sh linux "$(decrypt "$(one build-linux/*.tar.xz.age)")"
-          ci/publish.sh windows "$(decrypt "$(one build-windows/*.zip.age)")"
-          if [ "$NOTARIZED" = true ]; then
-            ci/publish.sh macos "$(decrypt "$(one signed/*.zip.age)")"
+          if [ "$BUILT_LINUX" = success ]; then
+            ci/publish.sh linux "$(decrypt "$(one build-linux/*.tar.xz.age)")"
           else
+            echo "::warning::The Linux build failed: Linux is not published."
+          fi
+          if [ "$BUILT_WINDOWS" = success ]; then
+            ci/publish.sh windows "$(decrypt "$(one build-windows/*.zip.age)")"
+          else
+            echo "::warning::The Windows build failed: Windows is not published."
+          fi
+          if [ "$BUILT_MACOS" != success ]; then
+            echo "::warning::The macOS build failed: macOS is not published."
+          elif [ "$NOTARIZED" = true ]; then
+            ci/publish.sh macos "$(decrypt "$(one signed/*.zip.age)")"
+          elif [ "$SIGNED" = true ]; then
             echo "::warning::The macOS app is not notarized yet; staple-macos publishes it once Apple is done."
+          else
+            echo "::warning::The macOS app is not signed (no Developer ID in the release environment): macOS is not published."
           fi
       - name: Upload the signed app
         if: steps.sign.outputs.signed == 'true'
