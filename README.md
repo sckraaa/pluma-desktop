@@ -29,6 +29,11 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - The banner shows although it loads the birthdays first (`TOP_BAR_WRAP`): upstream hands the chat list a suggestion only when it is ready at once, and the banner, which waits for `contacts.getBirthdays`, stayed hidden.
   - The server provides `contacts.getBirthdays`, whose users carry the `contact` flag: the box lists the contacts the app knows. `BIRTHDAY_CONTACTS_TODAY` need not be among the pending suggestions of `help.getPromoData`.
 - **Tags of Saved Messages.** Telegram gives them to Premium alone; in Pluma every user tags messages of Saved Messages, searches by a tag and renames it, as upstream lets Premium do (`SAVED_TAGS`). `Main::Session::savedTagsAvailable()`, always true, stands for `premium()` where a tag is added or removed (`Window::ShowReactPremiumError`), where a click on a tag of a message searches by it, in the tags above a search of Saved Messages (a filter and the menu of a tag in place of the "Unlock" chip) and in the hint of the reactions selector. Nothing else of Premium opens: the tags take no custom emoji while Premium cannot be bought, and a message takes as many tags, and reactions, as the server's `reactions_user_max_default` (3 on Pluma), which upstream already reads for users without Premium.
+- **Updates from the Pluma server** (task 054 of the server repository; [Releases](#releases)). tdesktop's own updater is on, with Pluma's packages: the app asks `https://pluma.chat/dl/desktop/current4` (the server gives the prefix in `help.getConfig`; the default is `PLUMA_UPDATE_PREFIX`), downloads the package of its system, checks it with Pluma's 1024-bit key (tdesktop's format: RSA, SHA-1) in both key slots of `config.h`, and the Updater replaces the files.
+  - No check over MTProto: it reads Telegram's channel `tdhbcfeed`.
+  - The Updater looks for `Pluma.app` on macOS, and on Windows writes the uninstall entry under Pluma's GUID and name, not Telegram's (next to an installed Telegram Desktop it would have rewritten that one).
+  - `AppVersion` is upstream's plus the build number (`7000009 + N`): the updater takes only a higher version. tdesktop migrates settings by thresholds of the old version; the patch stops on a threshold above upstream's version, which an install of Pluma already past it would skip.
+  - A development build asks `https://127.0.0.1/dl/desktop`: it never updates itself from the real server.
 - **Brand:** the name, the icons and the colours of Pluma ([Branding](#branding)).
 
 - **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
@@ -50,7 +55,7 @@ The check also covers the layer (`api.tl` says `LAYER 228`), the version, and th
 What the patch leaves, and why:
 - **Links** to `t.me`, `telegram.org`, `fragment.com` and the like in the interface: the terms and the privacy policy, the Premium, Stars, ads and mini app pages, the source code and the changelog in the About box. Each opens only when clicked.
 - **Requests the user starts:** translation through a web provider, the address of a location being sent (Mapbox), payment forms (Stripe, Smartglocal), bot web apps and Instant View pages, files linked from messages. They reach the services the content names, as in any client.
-- **Telegram's 1024-bit update keys** in `config.h`. They only verify update packages, and the updater is compiled out.
+- **Telegram's 1024-bit update keys** in `_other/packer.cpp`, which Pluma does not build.
 - **Connections made through MTProto** (emoji sets, spellchecker dictionaries, the language pack, calls) go to the Pluma server, which answers for them.
 
 ## Branding
@@ -154,7 +159,7 @@ Publishing to the server for download is a later step.
 
 ### Signing (macOS)
 
-The job `sign-macos` takes the macOS app of a build for the server and signs it with the Developer ID Application certificate, with the hardened runtime, a secure timestamp and upstream's entitlements (`ci/macos.entitlements`, a copy of `Telegram.entitlements` that the patch checks). Apple notarizes it, and the ticket is stapled into the app, so Gatekeeper opens it without a warning, offline too. The job runs in the environment `release`, which holds the keys and waits for the owner's approval (*Review deployments* in the run). Its artifact is `pluma-desktop-macos-signed`, encrypted like the others:
+The job `release` takes the macOS app of a build for the server and signs it with the Developer ID Application certificate, with the hardened runtime, a secure timestamp and upstream's entitlements (`ci/macos.entitlements`, a copy of `Telegram.entitlements` that the patch checks). Apple notarizes it, and the ticket is stapled into the app, so Gatekeeper opens it without a warning, offline too. The job runs in the environment `release`, which holds the keys and waits for the owner's approval (*Review deployments* in the run). Its artifact is `pluma-desktop-macos-signed`, encrypted like the others:
 
 ```sh
 gh run download <run id> -R sckraaa/pluma-desktop -n pluma-desktop-macos-signed
@@ -173,6 +178,17 @@ The secrets of the environment `release`:
 - `PLUMA_AGE_IDENTITY`: the age key that decrypts the build.
 
 Without `PLUMA_DEVELOPER_ID_P12` the job signs nothing and says so. The step `sign` of `ci/sign-macos.sh` runs on a GitHub runner only: it puts a keychain of its own on the user's search list. The step `staple` needs only the API key, so it works on any Mac too. `ci/sign_test.py` runs both steps against fakes of the macOS tools.
+
+## Releases
+
+The job `release` of a build of `main` (one approval) hands the three builds to the releases service of the server after signing the macOS app (`ci/publish.sh`): the site offers the installers, and the updater of installed apps takes the update packages, which `ci/pack_update.py` packs and signs in tdesktop's format (Pluma packs them in Python, signs with `openssl`, and reads each package back as the app does before it goes out). When Apple's notarization outlasts the job, `staple-macos` publishes the macOS build. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt).
+
+Once, before the first build with the updater:
+
+1. The update key: `ci/update-key.sh` makes it in `~/pluma-secrets/desktop/update-key.pem` (back it up off-line; a new key locks every installed app out of updates), sets the secret `PLUMA_UPDATE_KEY` of the `release` environment and writes the public key to [`config/update_public.pem`](config/update_public.pem), which the patch builds in. Commit that file. Nothing secret is printed.
+2. The upload token: `teamgramd/deploy/releases/put-token.sh` of the server repository sets the secret `RELEASES_UPLOAD_TOKEN`.
+
+Not verified yet: the Windows package is raw LZMA from Python's `lzma` (liblzma, with an end marker), which the app decodes with the LZMA SDK's `LzmaUncompress` of a known size; the first update on Windows checks it.
 
 ## When it builds
 
