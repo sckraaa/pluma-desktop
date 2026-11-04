@@ -490,7 +490,8 @@ class Config:
         self.build = build
         major, minor, patch_ = (int(x) for x in self.version.split("."))
         self.upstream_app_version = major * 1000000 + minor * 1000 + patch_
-        self.app_version = self.upstream_app_version + build
+        # The release as Pluma shows it (ci/publish.sh).
+        self.release_version = f"{self.version}.{build:05d}"
 
         try:
             self.ipv4 = str(ipaddress.IPv4Address(server_ipv4))
@@ -545,13 +546,14 @@ class Config:
 #   to an installed Telegram Desktop it would rewrite that entry. It gets
 #   Pluma's GUID, name and site; Pluma has no installer, so the entry is not
 #   there. Its fallback folder (494) is Pluma's data folder.
-# - AppVersion is upstream's plus the build number: the updater takes only a
-#   higher version (update_checker.cpp 842-846, 491-494), and two builds of one
-#   upstream differ by their number. The number rises across upstream
-#   versions too. tdesktop migrates settings by thresholds of the old version
-#   (specific_win.cpp 668-671, specific_linux.cpp 832, all below 7000009); a
-#   threshold above upstream's own version would be skipped by an install of
-#   Pluma already past it, so the patch stops on one.
+# - The updater compares Pluma's build number, PlumaBuild of version.h (the
+#   run number of CI), where upstream compares AppVersion: the version of a
+#   package in /current4 (update_checker.cpp 842-846), in the package
+#   (490-493) and in the downloaded update (1791-1794). AppVersion stays
+#   upstream's: tdesktop keys its local data (streamAppVersion gates of the
+#   serializers) and its settings migrations by it, and a Pluma version above
+#   a later upstream's would make the next upstream misread them. The
+#   release is 7.0.9.NNNNN, the package t*upd<N>.
 UPDATE_CHECKER = SOURCES + "/core/update_checker.cpp"
 LOCAL_STORAGE = SOURCES + "/storage/localstorage.cpp"
 UPDATER_OSX = SOURCES + "/_other/updater_osx.m"
@@ -563,10 +565,21 @@ UPDATES_MTP_OLD = """\
 			std::make_unique<MtpChecker>(_session, _testing));
 """
 UPDATES_MTP_NEW = """\
-		// pluma: no check over MTProto; it reads Telegram's channel tdhbcfeed.
+		// pluma: no check over MTProto, which reads Telegram's channel
+		// tdhbcfeed: an empty checker fails at once, and the HTTP check's
+		// failure and timeout handling stays upstream's.
+		startImplementation(&_mtpImplementation, nullptr);
 """
 PUBLIC_KEY_SLOTS = ("UpdatesPublicKey", "UpdatesPublicBetaKey")
-VERSION_THRESHOLD = re.compile(r"[Vv]ersion\w*(?:\(\))?\s*<=?\s*(\d{7,})")
+# Where the updater compares versions: upstream's text, Pluma's.
+UPDATE_VERSION_EDITS = (
+    ("\t\t} else if (int32(version) <= AppVersion) {\n",
+     "\t\t} else if (int32(version) <= PlumaBuild) { // pluma: Pluma's build number\n"),
+    ("\t\t: uint64(AppVersion);\n",
+     "\t\t: uint64(PlumaBuild); // pluma: Pluma's build number\n"),
+    ("\t\t} else if (versionNum <= AppVersion) {\n",
+     "\t\t} else if (versionNum <= PlumaBuild) { // pluma: Pluma's build number\n"),
+)
 
 
 def key_literal(lines):
@@ -597,13 +610,10 @@ def patch_updates(tree, c):
     tree.replace(UPDATER_WIN, 'static const WCHAR *_programName = L"Telegram Desktop"; // folder in APPDATA, if current path is unavailable for writing\n',
                  f'static const WCHAR *_programName = L"{c.app_name}"; // pluma: the folder of AppName in APPDATA, if current path is unavailable for writing\n')
     tree.replace(VERSION_H, f"constexpr auto AppVersion = {c.upstream_app_version};\n",
-                 f"constexpr auto AppVersion = {c.app_version}; // pluma: upstream's {c.upstream_app_version} + build {c.build}\n")
-    thresholds = sorted({(int(v), str(p.relative_to(tree.root))) for p in (tree.root / SOURCES).rglob("*.cpp")
-                         for v in VERSION_THRESHOLD.findall(p.read_text(encoding="utf-8", errors="replace"))
-                         if int(v) > c.upstream_app_version})
-    if thresholds:
-        raise PatchError(f"{thresholds[0][1]}: a migration for versions below {thresholds[0][0]}, above upstream's "
-                         f"{c.upstream_app_version}; installs of Pluma past it would skip it (read it, then decide)")
+                 f"constexpr auto AppVersion = {c.upstream_app_version};\n"
+                 f"constexpr auto PlumaBuild = {c.build}; // pluma: the build number, which the updater compares\n")
+    for old, new in UPDATE_VERSION_EDITS:
+        tree.replace(UPDATE_CHECKER, old, new)
 
 
 def verify_updates(tree, c):
@@ -621,8 +631,15 @@ def verify_updates(tree, c):
     for trace in (TELEGRAM_APP_GUID, '"Telegram Desktop"', "Telegram FZ-LLC", "desktop.telegram.org"):
         if trace in win:
             raise PatchError(f"{UPDATER_WIN}: Telegram's {trace} is still there")
-    if f"constexpr auto AppVersion = {c.app_version};" not in tree.read(VERSION_H):
-        raise PatchError(f"{VERSION_H}: AppVersion is not {c.app_version}")
+    version = tree.read(VERSION_H)
+    if (f"constexpr auto AppVersion = {c.upstream_app_version};\n" not in version
+            or f"constexpr auto PlumaBuild = {c.build};" not in version):
+        raise PatchError(f"{VERSION_H}: AppVersion is not upstream's or PlumaBuild is not {c.build}")
+    for _, new in UPDATE_VERSION_EDITS:
+        if checker.count(new) != 1:
+            raise PatchError(f"{UPDATE_CHECKER}: the updater does not compare PlumaBuild ({new.strip()})")
+    if "startImplementation(&_mtpImplementation, nullptr);" not in checker:
+        raise PatchError(f"{UPDATE_CHECKER}: the empty MTProto checker is not there")
 
 
 # --- the patch ---------------------------------------------------------------
@@ -2087,7 +2104,7 @@ def main(argv=None):
         print(f"patch: {e}", file=sys.stderr)
         return 1
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
-    print(f"patch: {c.app_id} \"{c.app_name}\" {c.app_version}, api_id {c.api_id}, layer {c.layer}, "
+    print(f"patch: {c.app_id} \"{c.app_name}\" {c.release_version}, api_id {c.api_id}, layer {c.layer}, "
           f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint})")
     return 0
 

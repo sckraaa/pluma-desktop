@@ -67,6 +67,7 @@ docker run --rm \
 	-D "CMAKE_CXX_FLAGS_RELEASE=$release_flags" \
 	-D "TDESKTOP_API_ID=$PLUMA_API_ID" \
 	-D "TDESKTOP_API_HASH=$PLUMA_API_HASH" \
+	-D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
 	-D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
 
 binary="$dir/out/Release/Telegram"

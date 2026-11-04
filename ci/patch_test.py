@@ -611,14 +611,20 @@ class UpstreamTest(unittest.TestCase):
 
     def test_updates(self):
         tree, c = self.run_patch()
-        self.assertEqual(c.app_version, 7000009 + 57)
-        self.assertIn("constexpr auto AppVersion = 7000066; // pluma: upstream's 7000009 + build 57\n", tree.read(patch.VERSION_H))
+        version = tree.read(patch.VERSION_H)
+        # AppVersion stays upstream's; the updater compares the build number.
+        self.assertIn("constexpr auto AppVersion = 7000009;\n", version)
+        self.assertIn("constexpr auto PlumaBuild = 57; // pluma: the build number, which the updater compares\n", version)
+        self.assertEqual(c.release_version, "7.0.9.00057")
         self.assertIn('\treturn AutoupdatePrefix("https://pluma.chat/dl/desktop"); // pluma: the Pluma server\n',
                       tree.read(patch.LOCAL_STORAGE))
         keys = patch.embedded_keys(tree.read(patch.CONFIG_H))
         self.assertEqual([k[:2] for k in keys], [patch.parse_pkcs1_public_key(SHORT_KEY)] * 2)
         checker = tree.read(patch.UPDATE_CHECKER)
         self.assertNotIn("MtpChecker>(", checker)
+        self.assertIn("\t\tstartImplementation(&_mtpImplementation, nullptr);\n", checker)
+        self.assertNotIn("<= AppVersion", checker)
+        self.assertEqual(checker.count("PlumaBuild"), 3)
         self.assertIn('u"tupdates/temp/Pluma.app/Contents/Frameworks/Updater"_q', checker)
         self.assertIn('NSString *appName = @"Pluma.app";', tree.read(patch.UPDATER_OSX))
         win = tree.read(patch.UPDATER_WIN)
@@ -626,17 +632,17 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('const WCHAR *appURL = L"https://pluma.chat";', win)
         self.assertNotIn('L"Telegram Desktop"', win)
 
+    def test_build_scripts_keep_the_updater(self):
+        # The upstream's option defaults to ON without a special target
+        # (cmake/variables.cmake 14-39); the patch stops on ON.
+        for script in ("ci/build-linux.sh", "ci/macos.sh", "ci/windows.sh"):
+            text = (ROOT / script).read_text()
+            self.assertIn("-D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF", text, script)
+            self.assertIn("-D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON", text, script)
+
     def test_update_prefix_of_a_development_build(self):
         tree, _ = self.run_patch(app={"PLUMA_UPDATE_PREFIX": "https://127.0.0.1/dl/desktop"})
         self.assertIn('AutoupdatePrefix("https://127.0.0.1/dl/desktop")', tree.read(patch.LOCAL_STORAGE))
-
-    def test_migration_above_upstream(self):
-        # A migration for versions below one Pluma's installs are past.
-        rel = patch.SOURCES + "/core/sandbox.cpp"
-        self.written.add(rel)
-        (self.root / rel).write_bytes(self.files[rel] + b"\nvoid m(int oldVersion) { if (oldVersion < 7000010) {} }\n")
-        with self.assertRaisesRegex(patch.PatchError, "a migration for versions below 7000010"):
-            self.run_patch()
 
     def test_patch(self):
         tree, c = self.run_patch(server_ipv6="2001:db8::7", server_port="8443")
