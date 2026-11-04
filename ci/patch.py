@@ -102,6 +102,14 @@ HISTORY_WIDGET = SOURCES + "/history/history_widget.cpp"
 PROFILE_ACTIONS = SOURCES + "/info/profile/info_profile_actions.cpp"
 # The suggestions above the chat list, the birthday banner among them.
 TOP_BAR_SUGGESTION = SOURCES + "/dialogs/dialogs_top_bar_suggestion.cpp"
+# The tags of Saved Messages: the session, and where they check Premium.
+MAIN_SESSION_H = SOURCES + "/main/main_session.h"
+MAIN_SESSION = SOURCES + "/main/main_session.cpp"
+SECTION_WIDGET = SOURCES + "/window/section_widget.cpp"
+VIEW_ELEMENT = SOURCES + "/history/view/history_view_element.cpp"
+REACTIONS_SELECTOR = SOURCES + "/history/view/reactions/history_view_reactions_selector.cpp"
+SEARCH_TAGS = SOURCES + "/dialogs/dialogs_search_tags.cpp"
+DATA_REACTIONS = SOURCES + "/data/data_message_reactions.cpp"
 # In the cmake_helpers submodule at cmake/.
 CMAKE_VARIABLES = "cmake/variables.cmake"
 
@@ -526,7 +534,8 @@ CMAKE_DEFINITIONS = "target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABL
 EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY_DATA, APPLICATION, LAUNCHER,
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
           PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS,
-          TOP_BAR_SUGGESTION)
+          TOP_BAR_SUGGESTION, MAIN_SESSION_H, MAIN_SESSION, SECTION_WIDGET, VIEW_ELEMENT, REACTIONS_SELECTOR,
+          SEARCH_TAGS)
 
 
 # Backports of upstream fixes to the build scripts, each as (file, the
@@ -770,6 +779,80 @@ TOP_BAR_WRAP = (
      "\t\t\tstate->processing = true;\n"
      "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n"
      "\t\t\tstate->processing = false;\n"),
+)
+
+# The tags of Saved Messages, which Telegram gives to Premium alone, for
+# every user: Pluma has no Premium (the server sets premium_purchase_blocked).
+# Main::Session::savedTagsAvailable() stands for premium() at the places that
+# let a user tag a message, search by a tag, rename it, and at the hint of
+# the reactions selector, so they behave as upstream does for Premium; the
+# Premium promos there are no longer reached. The rest of Premium stays shut:
+# the selector of tags offers no custom emoji (LookupPossibleReactions keeps
+# premiumPossible()), and how many tags a message takes is the server's
+# reactions_user_max_default (SentReactionsLimit), as for reactions. As (file,
+# the pinned upstream's text, Pluma's).
+SAVED_TAGS = (
+    (MAIN_SESSION_H,
+     "\t[[nodiscard]] bool premiumCanBuy() const;\n",
+     "\t[[nodiscard]] bool premiumCanBuy() const;\n"
+     "\t// pluma: the tags of Saved Messages, which need Premium upstream.\n"
+     "\t[[nodiscard]] bool savedTagsAvailable() const;\n"),
+    (MAIN_SESSION,
+     "bool Session::premiumCanBuy() const {\n"
+     "\treturn _premiumPossible.current();\n"
+     "}\n",
+     "bool Session::premiumCanBuy() const {\n"
+     "\treturn _premiumPossible.current();\n"
+     "}\n"
+     "\n"
+     "bool Session::savedTagsAvailable() const {\n"
+     "\t// pluma: for every user, Premium or not; the server has no Premium.\n"
+     "\treturn true;\n"
+     "}\n"),
+    # Adding and removing a tag: the selector, the quick reaction, a click.
+    (SECTION_WIDGET,
+     "\tif (item->reactionsAreTags()) {\n"
+     "\t\tif (controller->session().premium()) {\n",
+     "\tif (item->reactionsAreTags()) {\n"
+     "\t\t// pluma: the tags without Premium.\n"
+     "\t\tif (controller->session().savedTagsAvailable()) {\n"),
+    # A click on a tag of a message searches by it.
+    (VIEW_ELEMENT,
+     "\t\t\t\tif (item->reactionsAreTags()) {\n"
+     "\t\t\t\t\tif (item->history()->session().premium()) {\n",
+     "\t\t\t\tif (item->reactionsAreTags()) {\n"
+     "\t\t\t\t\t// pluma: the search by a tag without Premium.\n"
+     "\t\t\t\t\tif (item->history()->session().savedTagsAvailable()) {\n"),
+    # The hint above the tags of the selector, in place of the offer of
+    # Premium.
+    (REACTIONS_SELECTOR,
+     "\t\t: item->history()->session().premium()\n"
+     "\t\t? TextWithEntities{ tr::lng_add_tag_about(tr::now) }\n",
+     "\t\t// pluma: the hint of a user who can tag, without Premium.\n"
+     "\t\t: item->history()->session().savedTagsAvailable()\n"
+     "\t\t? TextWithEntities{ tr::lng_add_tag_about(tr::now) }\n"),
+    # The tags above a search of Saved Messages, in the chat list and in the
+    # chat: a filter and the menu of a tag (rename), not the promo chip.
+    (SEARCH_TAGS,
+     "\trpl::combine(\n"
+     "\t\tstd::move(tags),\n"
+     "\t\tData::AmPremiumValue(&owner->session())\n"
+     "\t) | rpl::on_next([=](\n",
+     "\trpl::combine(\n"
+     "\t\tstd::move(tags),\n"
+     "\t\t// pluma: not Data::AmPremiumValue.\n"
+     "\t\trpl::single(owner->session().savedTagsAvailable())\n"
+     "\t) | rpl::on_next([=](\n"),
+)
+# What SAVED_TAGS leaves to upstream, in DATA_REACTIONS: a user without
+# Premium puts as many reactions, and tags, on a message as the server's
+# reactions_user_max_default says, and the tags of the selector take no
+# custom emoji while Premium cannot be bought.
+SAVED_TAGS_KEPT = (
+    "\treturn session->premium()\n"
+    "\t\t? config->get<int>(\"reactions_user_max_premium\", 3)\n"
+    "\t\t: config->get<int>(\"reactions_user_max_default\", 1);\n",
+    "\t\tresult.customAllowed = premiumPossible;\n\t\tresult.tags = true;\n",
 )
 
 # --- the brand ---------------------------------------------------------------
@@ -1694,6 +1777,11 @@ def patch(tree, c):
     # A suggestion above the chat list that loads first shows (TOP_BAR_WRAP).
     for old, new in TOP_BAR_WRAP:
         tree.replace(TOP_BAR_SUGGESTION, old, new)
+    # The tags of Saved Messages without Premium (SAVED_TAGS).
+    for s in SAVED_TAGS_KEPT:
+        tree.expect(DATA_REACTIONS, s)
+    for rel, old, new in SAVED_TAGS:
+        tree.replace(rel, old, new)
 
     rebrand(tree, c)
 

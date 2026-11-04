@@ -467,6 +467,21 @@ DAMAGE = (
      "\t\t&& !user->isBot()\n\t\t&& !user->isInaccessible()\n\t\t&& ((disallowed & Type::SendHide)\n"),
     (patch.PROFILE_ACTIONS, "const auto disable = !today && user->session().premiumCanBuy();",
      "const auto disable = !today && user->session().premiumPossible();"),
+    # The tags of Saved Messages: each Premium check the patch replaces, and
+    # what it leaves to upstream (the limit of tags, no custom emoji).
+    (patch.MAIN_SESSION_H, "\t[[nodiscard]] bool premiumCanBuy() const;\n", "\t[[nodiscard]] bool premiumCanBuy();\n"),
+    (patch.MAIN_SESSION, "\treturn _premiumPossible.current();\n", "\treturn _premiumPossible.current() && !premium();\n"),
+    (patch.SECTION_WIDGET, "\t\tif (controller->session().premium()) {\n\t\t\treturn false;\n",
+     "\t\tif (controller->session().premiumPossible()) {\n\t\t\treturn false;\n"),
+    (patch.VIEW_ELEMENT, "\t\t\t\t\tif (item->history()->session().premium()) {\n",
+     "\t\t\t\t\tif (item->history()->session().premiumPossible()) {\n"),
+    (patch.REACTIONS_SELECTOR, "\t\t: item->history()->session().premium()\n",
+     "\t\t: item->history()->session().premiumPossible()\n"),
+    (patch.SEARCH_TAGS, "\t\tData::AmPremiumValue(&owner->session())\n", "\t\tData::AmPremiumValue(owner)\n"),
+    (patch.DATA_REACTIONS, ': config->get<int>("reactions_user_max_default", 1);',
+     ": 1;"),
+    (patch.DATA_REACTIONS, "\t\tresult.customAllowed = premiumPossible;\n",
+     "\t\tresult.customAllowed = true;\n"),
     # Line endings the patch would not match.
     (patch.LAUNCHER, "void Launcher::init() {\n", "void Launcher::init() {\r\n"),
     # Traces of Telegram elsewhere in the sources: verify() must find them.
@@ -809,6 +824,50 @@ class UpstreamTest(unittest.TestCase):
                   "\t\t\tstate->processing = false;\n"):
             self.assertIn(s, top)
         self.assertEqual(top.count("consumer.put_next_copy(state->wrap.get());"), 2)
+
+    def test_saved_tags(self):
+        """The tags of Saved Messages work without Premium: savedTagsAvailable()
+        takes the place of premium() at the tag gates alone, and the limit of
+        tags and the custom emoji stay upstream's."""
+        tree, _ = self.run_patch()
+        self.assertIn("\t[[nodiscard]] bool premiumCanBuy() const;\n\t// pluma: the tags of Saved Messages, which need "
+                      "Premium upstream.\n\t[[nodiscard]] bool savedTagsAvailable() const;\n",
+                      tree.read(patch.MAIN_SESSION_H))
+        self.assertIn("\nbool Session::savedTagsAvailable() const {\n\t// pluma: for every user, Premium or not; the "
+                      "server has no Premium.\n\treturn true;\n}\n", tree.read(patch.MAIN_SESSION))
+        gates = {
+            patch.SECTION_WIDGET: "\tif (item->reactionsAreTags()) {\n\t\t// pluma: the tags without Premium.\n"
+                                  "\t\tif (controller->session().savedTagsAvailable()) {\n\t\t\treturn false;\n\t\t}\n"
+                                  "\t\tShowPremiumPreviewBox(controller, PremiumFeature::TagsForMessages);\n",
+            patch.VIEW_ELEMENT: "\t\t\t\t\tif (item->history()->session().savedTagsAvailable()) {\n"
+                                "\t\t\t\t\t\tconst auto tag = Data::SearchTagToQuery(id);\n",
+            patch.REACTIONS_SELECTOR: "\t\t: item->history()->session().savedTagsAvailable()\n"
+                                      "\t\t? TextWithEntities{ tr::lng_add_tag_about(tr::now) }\n",
+            patch.SEARCH_TAGS: "\t\tstd::move(tags),\n\t\t// pluma: not Data::AmPremiumValue.\n"
+                               "\t\trpl::single(owner->session().savedTagsAvailable())\n\t) | rpl::on_next([=](\n",
+        }
+        for rel, s in gates.items():
+            with self.subTest(rel=rel):
+                self.assertIn(s, tree.read(rel))
+        self.assertNotIn("Data::AmPremiumValue(", tree.read(patch.SEARCH_TAGS))
+        # Nothing else asks for it: no other Premium feature opens.
+        users = {rel for rel in tree.sources() if "savedTagsAvailable" in tree.read(rel)}
+        self.assertEqual(users, {patch.MAIN_SESSION_H, patch.MAIN_SESSION, *gates})
+        for rel in gates:
+            self.assertEqual(tree.read(rel).count("savedTagsAvailable()"), 1, rel)
+        # Each file changes by the patch's lines alone: one premium() less,
+        # and the text is upstream's otherwise.
+        for rel, old, new in patch.SAVED_TAGS:
+            with self.subTest(rel=rel):
+                self.assertEqual(tree.read(rel), self.files[rel].decode("utf-8").replace(old, new))
+        # The rest stays upstream's: the server's limit of tags on a message
+        # for a user without Premium, no custom emoji among the tags.
+        reactions = tree.read(patch.DATA_REACTIONS)
+        for s in patch.SAVED_TAGS_KEPT:
+            self.assertIn(s, reactions)
+        # No new text: the hint is a key the built-in English has.
+        lang = {m["key"].split("#")[0]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+        self.assertEqual(lang["lng_add_tag_about"], "Tag this message with an emoji for quick search.")
 
     def test_changed_binary_files(self):
         """An icon or a zipped theme of another release stops the patch."""
