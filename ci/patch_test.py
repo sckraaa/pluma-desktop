@@ -53,8 +53,8 @@ vJey5IOJDKqmyFBURdP6+0IuF3RgEvhPrCXTLFLSWgGTIZOUGkGO/NOVyzzKP9I4
 cHpcIp/hW3HkD564M7f9BbGSkXItXbTwpiEWj0kXJ0b0I1OSFYxRAgMBAAE=
 -----END RSA PUBLIC KEY-----"""
 
-# Telegram's key of its update packages, which may stay in config.h and
-# _other/packer.cpp only.
+# Telegram's key of its update packages, which may stay in _other/packer.cpp
+# only (Pluma's takes its place in config.h).
 UPDATE_KEY = """-----BEGIN RSA PUBLIC KEY-----
 MIGJAoGBAMA4ViQrjkPZ9xj0lrer3r23JvxOnrtE8nI69XLGSr+sRERz9YnUptnU
 BZpkIfKaRcl6XzNJiN28cVwO1Ui5JSa814UAiDHzWUqCaXUiUEQ6NmNTneiGx2sQ
@@ -107,7 +107,8 @@ def config(**over):
     upstream = patch.load_env(ROOT / "upstream.env")
     app = patch.load_env(ROOT / "config/app.env")
     app.update(over.pop("app", {}))
-    args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY)
+    args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY,
+                update_key_pem=SHORT_KEY, build=57)
     args.update(over)
     return patch.Config(upstream, app, **args)
 
@@ -149,6 +150,13 @@ class ConfigTest(unittest.TestCase):
             {"app": {"PLUMA_INSTANCE_GUID": "87a94ab0-e370-4cde-98d3-acc110c5967d"}},
             {"app": {"PLUMA_TOAST_ACTIVATOR_CLSID": "not-a-guid"}},
             {"app": {"PLUMA_TOAST_ACTIVATOR_CLSID": "BB4EA67A-F90A-4B50-B202-49660CE32557"}},
+            {"update_key_pem": OTHER_KEY},
+            {"update_key_pem": UPDATE_KEY},
+            {"app": {"PLUMA_UPDATE_PREFIX": "http://pluma.chat/dl/desktop"}},
+            {"app": {"PLUMA_UPDATE_PREFIX": "https://pluma.chat/dl/desktop/"}},
+            {"app": {"PLUMA_UPDATE_PREFIX": "https://td.telegram.org"}},
+            {"build": -1},
+            {"build": 100000},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
@@ -600,6 +608,35 @@ class UpstreamTest(unittest.TestCase):
         patch.patch(tree, c)
         patch.verify(tree, c)
         return tree, c
+
+    def test_updates(self):
+        tree, c = self.run_patch()
+        self.assertEqual(c.app_version, 7000009 + 57)
+        self.assertIn("constexpr auto AppVersion = 7000066; // pluma: upstream's 7000009 + build 57\n", tree.read(patch.VERSION_H))
+        self.assertIn('\treturn AutoupdatePrefix("https://pluma.chat/dl/desktop"); // pluma: the Pluma server\n',
+                      tree.read(patch.LOCAL_STORAGE))
+        keys = patch.embedded_keys(tree.read(patch.CONFIG_H))
+        self.assertEqual([k[:2] for k in keys], [patch.parse_pkcs1_public_key(SHORT_KEY)] * 2)
+        checker = tree.read(patch.UPDATE_CHECKER)
+        self.assertNotIn("MtpChecker>(", checker)
+        self.assertIn('u"tupdates/temp/Pluma.app/Contents/Frameworks/Updater"_q', checker)
+        self.assertIn('NSString *appName = @"Pluma.app";', tree.read(patch.UPDATER_OSX))
+        win = tree.read(patch.UPDATER_WIN)
+        self.assertIn("Uninstall\\\\{BB4EA67A-F90A-4B50-B202-49660CE32557}_is1", win)
+        self.assertIn('const WCHAR *appURL = L"https://pluma.chat";', win)
+        self.assertNotIn('L"Telegram Desktop"', win)
+
+    def test_update_prefix_of_a_development_build(self):
+        tree, _ = self.run_patch(app={"PLUMA_UPDATE_PREFIX": "https://127.0.0.1/dl/desktop"})
+        self.assertIn('AutoupdatePrefix("https://127.0.0.1/dl/desktop")', tree.read(patch.LOCAL_STORAGE))
+
+    def test_migration_above_upstream(self):
+        # A migration for versions below one Pluma's installs are past.
+        rel = patch.SOURCES + "/core/sandbox.cpp"
+        self.written.add(rel)
+        (self.root / rel).write_bytes(self.files[rel] + b"\nvoid m(int oldVersion) { if (oldVersion < 7000010) {} }\n")
+        with self.assertRaisesRegex(patch.PatchError, "a migration for versions below 7000010"):
+            self.run_patch()
 
     def test_patch(self):
         tree, c = self.run_patch(server_ipv6="2001:db8::7", server_port="8443")

@@ -153,7 +153,6 @@ client)
 			-D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
 			-D "TDESKTOP_API_ID=$PLUMA_API_ID" \
 			-D "TDESKTOP_API_HASH=$PLUMA_API_HASH" \
-			-D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
 			-D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON \
 			${cache[@]+"${cache[@]}"}
 		cmake --build ../out --config Release --parallel
