@@ -103,7 +103,7 @@ class PackTest(unittest.TestCase):
         d = self.files("rejects")
         (d / "Telegram").write_bytes(b"x")
         with self.assertRaisesRegex(pack_update.PackError, "version"):
-            pack_update.pack([d / "Telegram"], 1000000000, "linux", self.key)
+            pack_update.pack([d / "Telegram"], 0, "linux", self.key)
         with self.assertRaisesRegex(pack_update.PackError, "missing"):
             pack_update.pack([d / "Updater"], 7000066, "linux", self.key)
         with self.assertRaisesRegex(pack_update.PackError, "1024 bits"):

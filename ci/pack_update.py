@@ -52,9 +52,9 @@ LZMA_LC, LZMA_LP, LZMA_PB, LZMA_NICE = 4, 0, 2, 273
 LZMA_PROPS = bytes([LZMA_LC + 9 * (LZMA_LP + 5 * LZMA_PB)]) + struct.pack("<I", LZMA_DICT)
 LZMA_FILTERS = [{"id": lzma.FILTER_LZMA1, "dict_size": LZMA_DICT, "lc": LZMA_LC, "lp": LZMA_LP,
                  "pb": LZMA_PB, "nice_len": LZMA_NICE, "mode": lzma.MODE_NORMAL}]
-# Packer takes versions in this range (packer.cpp 199); 0x7FFFFFFF marks an
-# alpha package, which Pluma does not make.
-MIN_VERSION, MAX_VERSION = 1017, 999999999
+# The version is Pluma's build number, which its updater compares
+# (PlumaBuild); 0x7FFFFFFF marks an alpha package, which Pluma does not make.
+MIN_VERSION, MAX_VERSION = 1, 999999999
 MAX_SIZE = 1 << 30  # the largest uncompressed size the app takes
 
 
@@ -218,7 +218,7 @@ def read_back(package, os_name, public_key):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--os", required=True, choices=("windows", "macos", "linux"))
-    ap.add_argument("--version", required=True, type=int, help="AppVersion of the build")
+    ap.add_argument("--version", required=True, type=int, help="the build number, which the updater compares")
     ap.add_argument("--key", required=True, help="the private key, PEM")
     ap.add_argument("--public-key", required=True, help="the public key the app carries, PKCS#1 PEM")
     ap.add_argument("--out", required=True)

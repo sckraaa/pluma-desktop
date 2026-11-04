@@ -12,8 +12,10 @@
 # x64; Telegram and Updater on Linux, x64. The binary goes under upstream's
 # name, which the Updater renames to the installed one.
 #
-# The version is AppVersion, upstream's plus the build number (ci/patch.py,
-# updates); the notes are release/notes.en.txt and release/notes.ru.txt.
+# The release is <UPSTREAM_VERSION>.<build>, the build zero-padded to five
+# digits; the package carries the build number, which the updater compares
+# (PlumaBuild, ci/patch.py, updates), and is named by it. The notes are
+# release/notes.en.txt and release/notes.ru.txt.
 #
 # Environment:
 #   BUILD_NUMBER            the number the build was patched with (the run
@@ -44,8 +46,8 @@ fi
 for f in "$installer" release/notes.en.txt release/notes.ru.txt config/update_public.pem; do
 	[ -s "$f" ] || { echo "publish: $f is missing or empty" >&2; exit 1; }
 done
-IFS=. read -r major minor patch <<<"$UPSTREAM_VERSION"
-version=$((major * 1000000 + minor * 1000 + patch + build))
+build=$((10#$build))
+version="$UPSTREAM_VERSION.$(printf %05d "$build")"
 app=$PLUMA_APP_NAME
 
 python=python3
@@ -62,7 +64,7 @@ linux)
 	tar -C "$work/unpacked" -xJf "$installer"
 	cp -p "$work/unpacked/$app/$app" "$work/package/Telegram"
 	cp -p "$work/unpacked/$app/Updater" "$work/package/Updater"
-	update=tlinuxupd$version
+	update=tlinuxupd$build
 	paths=("$work/package/Telegram" "$work/package/Updater")
 	;;
 windows)
@@ -70,7 +72,7 @@ windows)
 	$python -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$installer" "$work/unpacked"
 	cp "$work/unpacked/$app/$app.exe" "$work/package/Telegram.exe"
 	cp "$work/unpacked/$app/Updater.exe" "$work/package/Updater.exe"
-	update=tx64upd$version
+	update=tx64upd$build
 	paths=("$work/package/Telegram.exe" "$work/package/Updater.exe")
 	;;
 macos)
@@ -80,7 +82,7 @@ macos)
 	ditto -x -k "$installer" "$work/unpacked"
 	ditto "$work/unpacked/$app.app" "$work/package/$app.app"
 	codesign --verify --deep --strict "$work/package/$app.app"
-	update=tmacupd$version
+	update=tmacupd$build
 	paths=("$work/package/$app.app")
 	;;
 *)
@@ -88,7 +90,7 @@ macos)
 	exit 2
 	;;
 esac
-$python -I ci/pack_update.py --os "$os" --version "$version" --key "$PLUMA_UPDATE_KEY_FILE" \
+$python -I ci/pack_update.py --os "$os" --version "$build" --key "$PLUMA_UPDATE_KEY_FILE" \
 	--public-key config/update_public.pem --out "$work/$update" "${paths[@]}"
 
 # The token goes in a header file, not on the command line.
