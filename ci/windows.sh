@@ -138,7 +138,7 @@ client)
 	export QT_RCC_SOURCE_DATE_OVERRIDE
 	start=$(date +%s)
 	in_vcvars ${check[@]+"${check[@]}"} "cd /d \"$windir\\Telegram\"" \
-		"call configure.bat -G \"Ninja Multi-Config\" qt6 -D TDESKTOP_API_ID=$PLUMA_API_ID -D TDESKTOP_API_HASH=$PLUMA_API_HASH -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON $cache" \
+		"call configure.bat -G \"Ninja Multi-Config\" qt6 -D TDESKTOP_API_ID=$PLUMA_API_ID -D TDESKTOP_API_HASH=$PLUMA_API_HASH -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON $cache" \
 		"cmake --build ..\\out --config Release --parallel"
 	echo "windows: the client took $((($(date +%s) - start) / 60)) min"
 	exe="$dir/out/Release/Telegram.exe"

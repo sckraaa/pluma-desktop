@@ -1,0 +1,1 @@
+Pluma now updates itself: a new version downloads in the background and is installed when the app restarts.

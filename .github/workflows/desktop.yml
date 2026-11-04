@@ -13,9 +13,13 @@
 #   windows       the libraries of Telegram/build/prepare/prepare.py, cached
 #                 by their state, then the client through ccache;
 #   macos         the same on macOS; the app is signed ad hoc;
-#   sign-macos    the macOS app of a build for the server, signed with the
-#                 Developer ID and notarized; when Apple takes longer than
-#                 the job waits, the workflow staple-macos finishes it;
+#   release       a build of main for the server, in the protected "release"
+#                 environment (one approval): the macOS app signed with the
+#                 Developer ID and notarized (when Apple takes longer than
+#                 the job waits, the workflow staple-macos finishes it), then
+#                 the three builds and their signed update packages handed to
+#                 the releases service of the server (ci/publish.sh), which
+#                 serves them on the site and to the apps' updater;
 #   prune-caches  keeps the newest cache of each kind.
 #
 # A build targets the server of the repository variables when they are set,
@@ -149,6 +153,8 @@ jobs:
       packages: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
+      # Added to AppVersion: the updater takes a higher version only.
+      PLUMA_BUILD: ${{ github.run_number }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -256,6 +262,8 @@ jobs:
     # variables that differ in case only (a TARGET next to libvpx's target).
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
+      # Added to AppVersion: the updater takes a higher version only.
+      PLUMA_BUILD: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -411,6 +419,8 @@ jobs:
       contents: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
+      # Added to AppVersion: the updater takes a higher version only.
+      PLUMA_BUILD: ${{ github.run_number }}
       # The paths of the libraries are part of their cache keys
       # (prepare.py): the same every run.
       UPSTREAM_DIR: /Users/runner/TBuild/tdesktop
@@ -543,9 +553,14 @@ jobs:
   # and waits for the owner's approval. Apple may take longer than the half
   # hour the job waits; the signed app is then kept as
   # pluma-desktop-macos-notarizing, and the workflow staple-macos finishes it.
-  sign-macos:
-    needs: [check, macos]
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.check.outputs.target == 'server'
+  release:
+    needs: [check, linux, windows, macos]
+    # Each system that built: a manual run of one system, or a failed build
+    # of another, still signs and publishes what there is.
+    if: >-
+      !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.check.outputs.target == 'server'
+      && (needs.macos.result == 'success' || needs.linux.result == 'success' || needs.windows.result == 'success')
     runs-on: macos-26
     timeout-minutes: 60
     environment: release
@@ -556,11 +571,23 @@ jobs:
       - name: age
         run: ci/setup.sh age
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.macos.result == 'success'
         with:
           name: pluma-desktop-macos
           path: build
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.linux.result == 'success'
+        with:
+          name: pluma-desktop-linux
+          path: build-linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.windows.result == 'success'
+        with:
+          name: pluma-desktop-windows
+          path: build-windows
       - name: Sign and notarize
         id: sign
+        if: needs.macos.result == 'success'
         env:
           DEVELOPER_ID_P12_B64: ${{ secrets.PLUMA_DEVELOPER_ID_P12 }}
           PLUMA_DEVELOPER_ID_PASSWORD: ${{ secrets.PLUMA_DEVELOPER_ID_PASSWORD }}
@@ -609,6 +636,60 @@ jobs:
             echo "gh workflow run staple-macos.yml -R $GITHUB_REPOSITORY -f run=$GITHUB_RUN_ID"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
+      - name: Publish to the site and the updater
+        if: github.ref == 'refs/heads/main'
+        env:
+          PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
+          PLUMA_UPDATE_KEY: ${{ secrets.PLUMA_UPDATE_KEY }}
+          RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+          PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
+          NOTARIZED: ${{ steps.sign.outputs.notarized }}
+          BUILT_LINUX: ${{ needs.linux.result }}
+          BUILT_WINDOWS: ${{ needs.windows.result }}
+          BUILT_MACOS: ${{ needs.macos.result }}
+        run: |
+          if [ -z "$PLUMA_UPDATE_KEY" ] || [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$PLUMA_AGE_IDENTITY" ]; then
+            echo "::error::The release environment has no PLUMA_UPDATE_KEY, RELEASES_UPLOAD_TOKEN or PLUMA_AGE_IDENTITY (README, Releases)."
+            exit 1
+          fi
+          umask 077
+          keys=$RUNNER_TEMP/publish
+          mkdir -p "$keys"
+          trap 'rm -rf "$keys"' EXIT
+          printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
+          printf '%s\n' "$PLUMA_UPDATE_KEY" >"$keys/update.pem"
+          export PLUMA_UPDATE_KEY_FILE=$keys/update.pem
+          one() { # one <the matches of a pattern>: exactly one file
+            if [ $# != 1 ] || [ ! -e "$1" ]; then echo "::error::expected one file: $*" >&2; return 1; fi
+            printf '%s' "$1"
+          }
+          decrypt() { # decrypt <file>.age: the plain file in $keys
+            local out
+            out=$keys/$(basename "$1" .age)
+            age --decrypt --identity "$keys/age.key" --output "$out" "$1"
+            printf '%s' "$out"
+          }
+          if [ "$BUILT_LINUX" = success ]; then
+            ci/publish.sh linux "$(decrypt "$(one build-linux/*.tar.xz.age)")"
+          else
+            echo "::warning::The Linux build failed: Linux is not published."
+          fi
+          if [ "$BUILT_WINDOWS" = success ]; then
+            ci/publish.sh windows "$(decrypt "$(one build-windows/*.zip.age)")"
+          else
+            echo "::warning::The Windows build failed: Windows is not published."
+          fi
+          if [ "$BUILT_MACOS" != success ]; then
+            echo "::warning::The macOS build failed: macOS is not published."
+          elif [ "$NOTARIZED" = true ]; then
+            ci/publish.sh macos "$(decrypt "$(one signed/*.zip.age)")"
+          elif [ "$SIGNED" = true ]; then
+            echo "::warning::The macOS app is not notarized yet; staple-macos publishes it once Apple is done."
+          else
+            echo "::warning::The macOS app is not signed (no Developer ID in the release environment): macOS is not published."
+          fi
       - name: Upload the signed app
         if: steps.sign.outputs.signed == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

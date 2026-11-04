@@ -25,6 +25,10 @@ dev)
 	SERVER_PORT=$PLUMA_SERVER_PORT
 	SERVER_IPV6=
 	cp config/dev/server_public.pem "$tmp/key.pem"
+	# A development build never updates itself from the real server: a
+	# prefix of nowhere, and a key whose private half nobody keeps.
+	update_prefix=https://127.0.0.1/dl/desktop
+	update_key=config/dev/update_public.pem
 	;;
 server)
 	# Half a configuration would build a client that cannot sign in.
@@ -35,6 +39,11 @@ server)
 		fi
 	done
 	printf '%s\n' "$RSA_PUBLIC_KEY" >"$tmp/key.pem"
+	update_key=config/update_public.pem
+	if [ ! -s "$update_key" ]; then
+		echo "configure: $update_key is missing; ci/update-key.sh makes it (README, Releases)" >&2
+		exit 1
+	fi
 	;;
 *)
 	echo "usage: configure.sh dev|server" >&2
@@ -44,5 +53,6 @@ esac
 
 $python -I ci/patch.py --source "$dir" --upstream upstream.env --app config/app.env \
 	--server-ipv4 "$SERVER_IPV4" --server-port "$SERVER_PORT" --server-ipv6 "${SERVER_IPV6:-}" \
-	--rsa-public-key "$tmp/key.pem"
+	--rsa-public-key "$tmp/key.pem" --update-public-key "$update_key" \
+	--build "${PLUMA_BUILD:-0}" ${update_prefix:+--update-prefix "$update_prefix"}
 echo "configure: $target build"

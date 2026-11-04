@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Packs the client built in $UPSTREAM_DIR (default ./upstream) into ./out:
 #   package.sh linux dev|server    pluma-desktop-<version>-linux[-dev].tar.xz:
-#                                  Pluma/Pluma and Pluma/chat.pluma.desktop.desktop;
+#                                  Pluma/Pluma, Pluma/Updater and
+#                                  Pluma/chat.pluma.desktop.desktop;
 #   package.sh windows dev|server  pluma-desktop-<version>-windows[-dev].zip:
-#                                  Pluma/Pluma.exe;
+#                                  Pluma/Pluma.exe and Pluma/Updater.exe;
 #   package.sh macos dev|server    pluma-desktop-<version>-macos[-dev].zip:
 #                                  Pluma.app with the Icon Composer icon of
-#                                  brand/Icon.icon, signed ad hoc.
+#                                  brand/Icon.icon, signed ad hoc, with the
+#                                  Updater in Contents/Frameworks.
+# The Updater, next to the app, installs the update packages the app
+# downloads (task 054 of the server repository).
 # The executables keep the upstream's names inside the build and get Pluma's
 # here. Each file comes with its SHA-256.
 set -euo pipefail
@@ -42,6 +46,7 @@ case $os in
 linux)
 	mkdir "$work/$app"
 	cp "$out/Telegram" "$work/$app/$app"
+	cp "$out/Updater" "$work/$app/Updater"
 	cp "$dir/lib/xdg/org.telegram.desktop.desktop" "$work/$app/$PLUMA_APP_ID.desktop"
 	file=$name.tar.xz
 	tar -C "$work" -cJf "out/$file" "$app"
@@ -49,6 +54,7 @@ linux)
 windows)
 	mkdir "$work/$app"
 	cp "$out/Telegram.exe" "$work/$app/$app.exe"
+	cp "$out/Updater.exe" "$work/$app/Updater.exe"
 	file=$name.zip
 	$python -I -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2], sys.argv[3])' \
 		"out/$name" "$work" "$app"
@@ -56,6 +62,10 @@ windows)
 macos)
 	bundle="$work/$app.app"
 	ditto "$out/Telegram.app" "$bundle"
+	if [ ! -x "$bundle/Contents/Frameworks/Updater" ]; then
+		echo "package: the app has no Updater in Contents/Frameworks" >&2
+		exit 1
+	fi
 	plist() {
 		/usr/libexec/PlistBuddy -c "Print :$1" "$bundle/Contents/Info.plist"
 	}
