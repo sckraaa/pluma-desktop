@@ -10,9 +10,10 @@ sources, the fallbacks that reach Telegram are never started, and the
 identity is Pluma's.
 
 The brand is Pluma's too: the name in the interface, plm:// links in place
-of tg://, the icons rendered in brand/, the palette "graphite and sage"
-of the default light and dark themes (brand/palette-*.txt), and people's
-blue and cyan identity colours in every theme (IDENTITY_COLORS).
+of tg:// and pluma.chat links beside t.me's, the icons rendered in brand/,
+the palette "graphite and sage" of the default light and dark themes
+(brand/palette-*.txt), and people's blue and cyan identity colours in every
+theme (IDENTITY_COLORS).
 
 The api_id and api_hash are not edits: the build passes them to CMake
 (-D TDESKTOP_API_ID / TDESKTOP_API_HASH), together with the options that
@@ -1155,6 +1156,153 @@ REGISTER_URL_SCHEME = """\
 		.displayAppDescription = AppName.utf16(),
 	});"""
 
+# pluma.chat links (task 026 of the server repository). pluma.chat is an
+# internal link host as t.me is: the app opens its links inside, as it opens
+# t.me's, and the links it builds for the user to copy, share or read are
+# pluma.chat's. Most of them come from the server's me_url_prefix already
+# (Main::Session::createInternalLink). The host is matched exactly: the names
+# under it (web.pluma.chat) are sites, not usernames as x.t.me are. t.me,
+# telegram.me and telegram.dog stay internal, as upstream has them, so the
+# links handed out before keep opening inside.
+LINK_HOST = "pluma.chat"
+# The paths of the site pluma.chat itself: the first segments of its pages
+# and its files. A pluma.chat link to one of them, or to the root, is the
+# site's page, not a username, and opens in the browser as any site's link
+# (no username is one of them: the server refuses them, ReservedUsername of
+# its user service, or they are too short). The same list in every client.
+SITE_PATHS = ("iphone", "ipad", "android", "mac", "windows", "linux", "web", "pero", "app", "en", "dl", "ios",
+              "collect", "assets", "_l", ".well-known",
+              "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json")
+# TryConvertUrlToLocal leaves those links as they are (the converter's
+# answer for any site link): the root with or without "/" and a query or a
+# fragment, and a site path followed by nothing, "/", a query or a fragment.
+SITE_LINK = (r"^(https?://)?pluma\.chat(/(" + "|".join(s.replace(".", r"\.") for s in SITE_PATHS)
+             + r")([/?#].*)?|/?([?#].*)?)$")
+LOCAL_URL_HANDLERS = SOURCES + "/core/local_url_handlers.cpp"
+CLICK_HANDLER_TYPES = SOURCES + "/core/click_handler_types.cpp"
+# Where the app recognises t.me as its own: (file, the pinned upstream's
+# text, Pluma's).
+LINK_HOSTS = (
+    # The one converter of https links into plm:// ones (TryConvertUrlToLocal):
+    # every link clicked, pasted, dropped or started with goes through it. The
+    # capture of the path stays the fifth. Before it, the site's own pages
+    # (SITE_LINK) are left as they are: the callers open a link that is not
+    # plm://, tonsite:// or internal: in the browser (UiIntegration::
+    # handleUrlClick, File::OpenUrl), as they do t.me/iv?url=.
+    (LOCAL_URL_HANDLERS,
+     "\tauto telegramMeMatch = regex_match("
+     r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.+)$"_q, url, matchOptions);' "\n",
+     "\t// pluma: the pages of the site pluma.chat open in the browser, as any\n"
+     "\t// site's: its root and its paths (SITE_PATHS of ci/patch.py).\n"
+     "\tif (regex_match(u\"" + SITE_LINK.replace("\\", "\\\\") + "\"_q, url, matchOptions)) {\n"
+     "\t\treturn url;\n"
+     "\t}\n"
+     "\t// pluma: pluma.chat links are internal, as t.me's; its exact host only.\n"
+     "\tauto telegramMeMatch = regex_match("
+     r'u"^(https?://)?(?:(www\\.)?(telegram\\.(me|dog)|t\\.me)|pluma\\.chat)/(.+)$"_q, url, matchOptions);' "\n"),
+    # A hidden link (a text with a link under it) to the app's own host asks
+    # before it opens.
+    (CLICK_HANDLER_TYPES,
+     "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",' "\n",
+     "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$|^pluma\\.chat$", // pluma' "\n"),
+    # The hosts whose links open without asking, and stay in a profile's
+    # bio without Premium (Info::Profile::StripExternalLinks).
+    (CLICK_HANDLER_TYPES,
+     "\t\t" r'"|telesco\\.pe"' "\n\t\t" '")$",\n',
+     "\t\t" r'"|telesco\\.pe"' "\n\t\t" '")$"\n\t\t' r'"|^pluma\\.chat$", // pluma' "\n"),
+    # Proxy links pasted into the proxy settings.
+    (SOURCES + "/boxes/connection_box.cpp",
+     "\t\t" r'R"((?:https?:\/\/[^\s]+|tg:\/\/[^\s]+|(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[^\s]+))",' "\n",
+     "\t\t" r'R"((?:https?:\/\/[^\s]+|tg:\/\/[^\s]+|(?:(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)|pluma\.chat)\/[^\s]+))", // pluma' "\n"),
+    # The link of a sticker set pasted as the set of a group.
+    (SOURCES + "/boxes/stickers_box.cpp",
+     '\t\tu"telegram.dog/"_q,\n\t\tu"addstickers/"_q,\n',
+     '\t\tu"telegram.dog/"_q,\n\t\tu"pluma.chat/"_q, // pluma\n\t\tu"addstickers/"_q,\n'),
+    # A link to a chat dropped on a folder (a username of a profile dragged).
+    (SOURCES + "/boxes/choose_filter_box.cpp",
+     '\t\t} else if (text.startsWith(u"https://t.me/"_q)) {\n\t\t\ttext = text.mid(13);\n',
+     '\t\t} else if (text.startsWith(u"https://t.me/"_q)) {\n\t\t\ttext = text.mid(13);\n'
+     '\t\t} else if (text.startsWith(u"https://pluma.chat/"_q)) { // pluma\n\t\t\ttext = text.mid(19);\n'),
+    # The links a fact check may hold.
+    (SOURCES + "/chat_helpers/message_field.cpp",
+     '\treturn url.startsWith(u"t.me/"_q) || url.startsWith(u"https://t.me/"_q);\n',
+     '\treturn url.startsWith(u"t.me/"_q) || url.startsWith(u"https://t.me/"_q)\n'
+     '\t\t|| url.startsWith(u"pluma.chat/"_q) // pluma\n'
+     '\t\t|| url.startsWith(u"https://pluma.chat/"_q);\n'),
+    # The search of Settings finds the username by "pluma.chat" too.
+    (SOURCES + "/settings/sections/settings_information.cpp",
+     '\t\t\t.keywords = { u"username"_q, u"link"_q, u"t.me"_q },\n',
+     '\t\t\t.keywords = { u"username"_q, u"link"_q, u"t.me"_q, u"pluma.chat"_q }, // pluma\n'),
+    # Links without a scheme ("pluma.chat/name", as the app shows a username)
+    # are links in the texts the app parses itself, as "t.me/name" are.
+    (TEXT_ENTITY,
+     '\taddOne(QString::fromLatin1("cat"));\n',
+     '\taddOne(QString::fromLatin1("cat"));\n\taddOne(QString::fromLatin1("chat")); // pluma: pluma.chat\n'),
+    # The name of an invite link in its list, where upstream shows the hash
+    # alone for t.me's (the server gives https://pluma.chat/+hash).
+    (SOURCES + "/boxes/peers/edit_peer_invite_links.cpp",
+     '\t).replace(\n\t\tu"t.me/joinchat/"_q,\n\t\tQString()\n\t);\n',
+     '\t).replace(\n\t\tu"t.me/joinchat/"_q,\n\t\tQString()\n\t).replace(\n\t\tu"pluma.chat/+"_q, // pluma\n\t\tQString()\n\t);\n'),
+    # The same for the invite links of a shared folder.
+    (SOURCES + "/boxes/filters/edit_filter_links.cpp",
+     '\t).replace(\n\t\tu"t.me/joinchat/"_q,\n\t\tQString()\n\t);\n',
+     '\t).replace(\n\t\tu"t.me/joinchat/"_q,\n\t\tQString()\n\t).replace(\n\t\tu"pluma.chat/+"_q, // pluma\n\t\tQString()\n\t);\n'),
+)
+# The links the app builds with t.me where the server's me_url_prefix does
+# not reach: (file, the text, how many). "t.me" becomes "pluma.chat" in each.
+LINK_BUILDERS = (
+    # The prefix of links until the server's config arrives, and when the
+    # server's is not a link (ValidatedInternalLinksDomain).
+    (SOURCES + "/mtproto/mtproto_config.h", 'u"https://t.me/"_q', 1),
+    # The link of a language that "Share" copies.
+    (SOURCES + "/boxes/language_box.cpp", 'u"https://t.me/setlanguage/"_q', 1),
+    # The links of mentions and channels in the HTML of a rich message.
+    (SOURCES + "/iv/iv_rich_message_html_export.cpp", 'u"https://t.me/"_q', 2),
+    # The links of forum topics in service messages and the admin log: they
+    # open inside, and "Copy link" copies them.
+    (SOURCES + "/history/history_item.cpp", 'u"https://t.me/c/%1/%2"_q', 1),
+    (VIEW_ELEMENT, 'u"https://t.me/c/%1/%2"_q', 1),
+    (SOURCES + "/history/admin_log/history_admin_log_item.cpp", 'u"https://t.me/c/%1/%2"_q', 1),
+    # The placeholder of the username in Settings, and the link of a new
+    # managed bot's username.
+    (SOURCES + "/settings/sections/settings_information.cpp", '"t.me/username"', 1),
+    (SOURCES + "/boxes/peers/create_managed_bot_box.cpp", 'u"t.me/"_q + full', 1),
+)
+# What stays of t.me in the string literals of the sources after the edits,
+# per file; a new one in an upstream update stops the patch here (look at it:
+# a link the app builds, a host it recognises, or Telegram's own).
+LINKS_KEPT = {
+    # The hosts recognised as the app's own, beside pluma.chat (LINK_HOSTS),
+    # and the user.t.me links, which become t.me/user ones inside.
+    "core/local_url_handlers.cpp": 3,
+    "core/click_handler_types.cpp": 2,
+    "boxes/connection_box.cpp": 1,
+    "boxes/stickers_box.cpp": 2,
+    "boxes/choose_filter_box.cpp": 1,
+    "chat_helpers/message_field.cpp": 2,
+    "settings/sections/settings_information.cpp": 1,
+    # The names of invite links that upstream strips: links handed out
+    # before still show their hash. The admin log shows "t.me/+hash" for
+    # those as it shows "pluma.chat/+hash" for Pluma's.
+    "boxes/peers/edit_peer_invite_links.cpp": 2,
+    "boxes/filters/edit_filter_links.cpp": 2,
+    "history/admin_log/history_admin_log_item.cpp": 1,
+    # A mini app's web_app_open_tg_link: its path made a t.me link that opens
+    # inside and is never shown.
+    "ui/chat/attach/attach_bot_webview.cpp": 1,
+    # The experimental option of a favorite folder button: the links it takes.
+    "window/window_filters_favorite.cpp": 1,
+    # Telegram's own: the invoice of Premium, @premiumbot, @BotFather,
+    # @stickers, none of which Pluma has.
+    "settings/sections/settings_premium.cpp": 1,
+    "dialogs/suggestions/suggestion_premium_grace.cpp": 1,
+    "dialogs/ui/dialogs_suggestions.cpp": 1,
+    "boxes/peers/create_managed_bot_box.cpp": 1,
+    "boxes/sticker_set_box.cpp": 1,
+}
+LINK_TME = re.compile(r"(?<![\w-])t(?:\\*\.)me(?![\w-])")
+LINK_PLUMA = re.compile(r"(?<![\w-])pluma(?:\\*\.)chat(?![\w-])")
+
 # The default themes, palette "graphite and sage" (brand/palette-*.txt): the
 # night theme is a zip of its colours and a 1x1 background, which the patch
 # writes again; the background is the chat's, a shade below the window's.
@@ -1726,6 +1874,92 @@ def code_telegram(text):
     return count
 
 
+def link_literals(text, host):
+    """How many times the string literals of a source name a host (comments
+    aside)."""
+    count = 0
+    for m in CODE_STRING.finditer(text):
+        s = m.group(0)
+        if not s.startswith("/"):
+            count += len(host.findall(s))
+    return count
+
+
+def links(tree):
+    """pluma.chat links (task 026 of the server repository)."""
+    for rel, old, new in LINK_HOSTS:
+        tree.replace(rel, old, new)
+    for rel, old, count in LINK_BUILDERS:
+        tree.replace(rel, old, old.replace("t.me", LINK_HOST), count=count)
+
+
+def links_edited():
+    """The files links() edits."""
+    return tuple(dict.fromkeys(rel for rel, _, _ in LINK_HOSTS + LINK_BUILDERS))
+
+
+def verify_links(tree):
+    """Checks the links independently of how the edits were made: the t.me
+    left in the string literals of the sources is what LINKS_KEPT keeps, and
+    pluma.chat is in each file the edits name, as often as they put it."""
+    expected = {}
+    for rel, _, new in LINK_HOSTS:
+        if rel.startswith(SOURCES + "/"):
+            key = rel[len(SOURCES) + 1:]
+            expected[key] = expected.get(key, 0) + link_literals(new, LINK_PLUMA)
+    for rel, _, count in LINK_BUILDERS:
+        key = rel[len(SOURCES) + 1:]
+        expected[key] = expected.get(key, 0) + count
+    kept, pluma = {}, {}
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        key = rel[len(SOURCES) + 1:]
+        if LINK_TME.search(text):
+            count = link_literals(text, LINK_TME)
+            if count:
+                kept[key] = count
+        # The update prefix names pluma.chat too (patch_updates).
+        if key in expected:
+            pluma[key] = link_literals(text, LINK_PLUMA)
+    for found, table, what in ((kept, LINKS_KEPT, "t.me links that LINKS_KEPT keeps"),
+                               (pluma, expected, f"{LINK_HOST} links of LINK_HOSTS and LINK_BUILDERS")):
+        if found != table:
+            diff = sorted(k for k in set(found) | set(table) if found.get(k) != table.get(k))
+            raise PatchError(f"{SOURCES}: the links of {', '.join(diff[:5])} are not the {what}")
+    if tree.read(TEXT_ENTITY).count('addOne(QString::fromLatin1("chat"));') != 1:
+        raise PatchError(f"{TEXT_ENTITY}: the domain .chat is not there once; {LINK_HOST} without a scheme "
+                         "is not a link, or upstream takes it already (drop the edit)")
+    verify_site_links(tree)
+
+
+def verify_site_links(tree):
+    """The site's own pages stay out of the app: TryConvertUrlToLocal leaves
+    the root and SITE_PATHS of pluma.chat as they are before anything matches
+    pluma.chat as a username. The expression is read back from the patched
+    source and tried on links of each path."""
+    text = tree.read(LOCAL_URL_HANDLERS)
+    start = text.find("QString TryConvertUrlToLocal(QString url) {\n")
+    site = text.find("\tif (regex_match(u\"^(https?://)?pluma", start)
+    me = text.find("\tauto telegramMeMatch = regex_match(", start)
+    if (text.count("pluma\\\\.chat(/(") != 1 or not 0 <= start < site < me
+            or not text.startswith("\"_q, url, matchOptions)) {\n\t\treturn url;\n\t}\n", text.index('"_q', site))):
+        raise PatchError(f"{LOCAL_URL_HANDLERS}: the pages of {LINK_HOST} are not left to the browser "
+                         "once, before its links are taken as the app's")
+    literal = text[site:text.index('"_q', site)].split('u"', 1)[1]
+    site_link = re.compile(literal.replace("\\\\", "\\"), re.I)
+    pages = ["pluma.chat", "https://pluma.chat/", "http://PLUMA.CHAT/?a=1", "https://pluma.chat#x"]
+    for path in SITE_PATHS:
+        pages += [f"https://pluma.chat/{path}", f"pluma.chat/{path.upper()}/x?y=1", f"https://pluma.chat/{path}#z"]
+    links = ["https://pluma.chat/durov", "https://pluma.chat/+AbC", "https://pluma.chat/c/1/2",
+             "https://pluma.chat/iphones", "https://pluma.chat/xapp", "https://pluma.chat/en_us",
+             "https://pluma.chat/favicon.svgx", "https://pluma.chat/faviconxsvg", "https://web.pluma.chat/",
+             "https://www.pluma.chat/iphone", "https://t.me/iphone", "https://pluma.chat.example.com/"]
+    wrong = [u for u in pages if not site_link.match(u)] + [u for u in links if site_link.match(u)]
+    if wrong:
+        raise PatchError(f"{LOCAL_URL_HANDLERS}: the expression of the pages of {LINK_HOST} takes these "
+                         f"wrongly: {', '.join(wrong[:5])}")
+
+
 def brand_edited():
     """The text files rebrand() edits."""
     return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN,
@@ -1762,7 +1996,7 @@ def check_upstream(tree, c):
     # ci/sign-macos.sh signs with upstream's entitlements, which it copies.
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
-    for rel in EDITED + brand_edited():
+    for rel in EDITED + brand_edited() + links_edited():
         tree.lf_only(rel)
 
 
@@ -1926,6 +2160,9 @@ def patch(tree, c):
     for rel, old, new in SAVED_TAGS:
         tree.replace(rel, old, new)
 
+    # pluma.chat links beside t.me's (LINK_HOSTS, LINK_BUILDERS).
+    links(tree)
+
     rebrand(tree, c)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
@@ -2056,6 +2293,7 @@ def verify(tree, c):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):
         raise PatchError(f"{LINUX}: the application ID is not {c.app_id}")
+    verify_links(tree)
     verify_brand(tree)
 
 
