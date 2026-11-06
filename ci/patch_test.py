@@ -364,6 +364,13 @@ class BrandTest(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(a)) as z:
             self.assertEqual(z.read(patch.NIGHT_BACKGROUND)[:8], b"\x89PNG\r\n\x1a\n")
 
+    def test_link_literals(self):
+        text = ('// t.me/x\nauto a = u"https://t.me/x"_q; auto b = u"^(www\\.)?(t\\.me)$"_q;\n'
+                r'auto c = R"((?:t\.me|pluma\.chat)\/)"; auto d = "part.messages"; auto e = "at.me"; /* t.me */' '\n'
+                'auto f = u"pluma.chat/+"_q; auto g = "web.pluma.chat"; auto h = "pluma.chatroom";\n')
+        self.assertEqual(patch.link_literals(text, patch.LINK_TME), 3)
+        self.assertEqual(patch.link_literals(text, patch.LINK_PLUMA), 3)
+
     def test_code_telegram(self):
         text = ('// Telegram\n#include "telegram.h"\nauto a = u"Telegram Desktop"_q; auto b = "TelegramWebviewProxy";\n'
                 'auto c = "https://desktop.telegram.org"; auto d = \'"\'; auto e = R"(Telegram)";\n')
@@ -443,6 +450,20 @@ DAMAGE = (
     (S + "/core/sandbox.cpp", "namespace {\n", 'namespace {\nconst auto kLink = "tg://resolve";\n'),
     (patch.TEXT_ENTITY, 'addOne(QString::fromLatin1("tg")); // local urls', 'addOne(QString::fromLatin1("tg")); // local'),
     (patch.QTHELP_URL, '|| equals(qstr("tg"))', '|| equals(qstr("tg")) || equals(qstr("tg2"))'),
+    # pluma.chat links: the hosts recognised, the links built, a new t.me
+    # link or one gone, and an upstream that takes .chat as a domain itself.
+    (patch.LOCAL_URL_HANDLERS, r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.+)$"_q',
+     r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.*)$"_q'),
+    (patch.CLICK_HANDLER_TYPES, r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",', r'"(^|\\.)(telegram\\.(me|dog|org)|t\\.me)$",'),
+    (patch.CLICK_HANDLER_TYPES, r'"|telesco\\.pe"' '\n', r'"|telesco\\.pe"' '\n\t\t' r'"|tdesktop\\.com"' '\n'),
+    (S + "/boxes/connection_box.cpp", "(?:www\\.)?(?:t\\.me|telegram\\.me|telegram\\.dog)", "(?:www\\.)?(?:t\\.me|telegram\\.me)"),
+    (S + "/boxes/peers/edit_peer_invite_links.cpp", '\t\tu"t.me/joinchat/"_q,\n', '\t\tu"telegram.me/joinchat/"_q,\n'),
+    (S + "/mtproto/mtproto_config.h", 'internalLinksDomain = u"https://t.me/"_q;', 'internalLinksDomain = u"https://telegram.me/"_q;'),
+    (S + "/history/history_item.cpp", 'u"https://t.me/c/%1/%2"_q', 'u"https://t.me/c/%1/%2/"_q'),
+    (S + "/core/sandbox.cpp", "namespace {\n", 'namespace {\nconst auto kLink = "https://t.me/durov";\n'),
+    (S + "/boxes/sticker_set_box.cpp", 'u"https://t.me/stickers"_q', 'u"https://telegram.me/stickers"_q'),
+    (patch.TEXT_ENTITY, '\taddOne(QString::fromLatin1("cat"));\n',
+     '\taddOne(QString::fromLatin1("cat"));\n\taddOne(QString::fromLatin1("chat"));\n'),
     # The colours.
     (patch.PALETTE, "windowBgActive: #40a7e3;", "windowBgActive: #40a7e4;"),
     (patch.PALETTE, "// basic\n", "// basic\nnewAccentFg: #3390ec;\n"),
@@ -902,7 +923,11 @@ class UpstreamTest(unittest.TestCase):
         # and the text is upstream's otherwise.
         for rel, old, new in patch.SAVED_TAGS:
             with self.subTest(rel=rel):
-                self.assertEqual(tree.read(rel), self.files[rel].decode("utf-8").replace(old, new))
+                expected = self.files[rel].decode("utf-8").replace(old, new)
+                for link_rel, link, _ in patch.LINK_BUILDERS:  # a topic link of VIEW_ELEMENT
+                    if link_rel == rel:
+                        expected = expected.replace(link, link.replace("t.me", patch.LINK_HOST))
+                self.assertEqual(tree.read(rel), expected)
         # The rest stays upstream's: the server's limit of tags on a message
         # for a user without Premium, no custom emoji among the tags.
         reactions = tree.read(patch.DATA_REACTIONS)
@@ -911,6 +936,130 @@ class UpstreamTest(unittest.TestCase):
         # No new text: the hint is a key the built-in English has.
         lang = {m["key"].split("#")[0]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
         self.assertEqual(lang["lng_add_tag_about"], "Tag this message with an emoji for quick search.")
+
+    def test_links(self):
+        """pluma.chat links beside t.me's: the expressions the app matches
+        links with, read from the patched sources, and the links it builds."""
+        tree, _ = self.run_patch()
+
+        def literals(text):
+            # The string literals of a C++ fragment, as the compiler joins them.
+            return "".join(m.group(1).encode().decode("unicode_escape")
+                           for m in re.finditer(r'"((?:[^"\\\n]|\\.)*)"', text))
+
+        handlers = tree.read(patch.LOCAL_URL_HANDLERS)
+        line = handlers[handlers.index("\tauto telegramMeMatch = "):]
+        convert = re.compile(literals(line[:line.index("_q")]), re.I)
+        for url, path in (("https://pluma.chat/durov", "durov"), ("pluma.chat/+AbC-d_1", "+AbC-d_1"),
+                          ("HTTP://PLUMA.CHAT/c/1/2", "c/1/2"), ("https://pluma.chat/addstickers/set", "addstickers/set"),
+                          ("https://t.me/durov", "durov"), ("https://www.telegram.me/durov", "durov"),
+                          ("telegram.dog/+123", "+123")):
+            m = convert.search(url)
+            self.assertIsNotNone(m, url)
+            self.assertEqual(m.group(5), path, url)
+        for url in ("https://web.pluma.chat/x", "https://www.pluma.chat/x", "https://notpluma.chat/x",
+                    "https://pluma.chat.example.com/x", "https://pluma.chat/", "https://example.com/pluma.chat/x"):
+            self.assertIsNone(convert.search(url), url)
+
+        # The site's own pages: the converter returns them before the line
+        # above, as they are, so they open in the browser.
+        start = handlers.index("QString TryConvertUrlToLocal(QString url) {\n")
+        site_at = handlers.index("\tif (regex_match(u\"^(https?://)?pluma", start)
+        self.assertLess(site_at, handlers.index("\tauto telegramMeMatch = ", start))
+        self.assertEqual(handlers[site_at:].split("\n")[1:3], ["\t\treturn url;", "\t}"])
+        site = re.compile(literals(handlers[site_at:handlers.index("_q", site_at)]), re.I)
+        self.assertEqual(len(patch.SITE_PATHS), 21)
+        for url in ("https://pluma.chat", "pluma.chat", "https://pluma.chat/", "https://pluma.chat/?utm=1",
+                    "https://pluma.chat#top", "https://pluma.chat/iphone", "HTTPS://PLUMA.CHAT/Android/",
+                    "https://pluma.chat/windows?ref=x", "https://pluma.chat/en", "https://pluma.chat/en/iphone",
+                    "https://pluma.chat/dl/desktop/x.zip", "https://pluma.chat/_l/abc", "https://pluma.chat/assets/a.css",
+                    "https://pluma.chat/.well-known/apple-app-site-association", "https://pluma.chat/favicon.svg",
+                    "https://pluma.chat/og.png", "https://pluma.chat/apple-touch-icon.png", "https://pluma.chat/404.html",
+                    "https://pluma.chat/progress.json?t=1", "https://pluma.chat/collect", "https://pluma.chat/pero#a",
+                    "http://pluma.chat/ipad", "pluma.chat/mac", "pluma.chat/linux", "pluma.chat/web", "pluma.chat/app",
+                    "pluma.chat/ios"):
+            self.assertIsNotNone(site.search(url), url)
+        for url in ("https://pluma.chat/durov", "https://pluma.chat/+AbC-d_1", "https://pluma.chat/c/1/2",
+                    "https://pluma.chat/addstickers/set", "https://pluma.chat/iphoneuser", "https://pluma.chat/myapp",
+                    "https://pluma.chat/en_x", "https://pluma.chat/og.pngx", "https://pluma.chat/ogxpng",
+                    "https://pluma.chat/joinchat/abc", "https://pluma.chat/proxy?server=a", "https://t.me/iphone",
+                    "https://www.pluma.chat/iphone", "https://web.pluma.chat/", "https://pluma.chat.example.com/",
+                    "https://example.com/pluma.chat/iphone"):
+            self.assertIsNone(site.search(url), url)
+
+        types = tree.read(patch.CLICK_HANDLER_TYPES)
+        start = types.index("bool IsTelegramShortLinkHost(")
+        short = re.compile(literals(types[start:types.index("url.host()", start)]), re.I)
+        start = types.index("bool UrlRequiresConfirmation(")
+        trusted = re.compile(literals(types[start:types.index("url.host()", start)]), re.I)
+        for host, is_short, is_trusted in (("pluma.chat", True, True), ("PLUMA.chat", True, True),
+                                           ("web.pluma.chat", False, False), ("evilpluma.chat", False, False),
+                                           ("pluma.chat.example.com", False, False), ("t.me", True, True),
+                                           ("user.t.me", True, True), ("telegram.org", False, True),
+                                           ("example.com", False, False)):
+            self.assertEqual(bool(short.search(host)), is_short, host)
+            self.assertEqual(bool(trusted.search(host)), is_trusted, host)
+
+        box = tree.read(S + "/boxes/connection_box.cpp")
+        raw = box[box.index('R"((?:https?:'):]
+        proxy = re.compile(raw[3:raw.index(')",')], re.I)
+        self.assertEqual(proxy.findall("pluma.chat/proxy?server=a&port=1 and www.t.me/socks?server=b"),
+                         ["pluma.chat/proxy?server=a&port=1", "www.t.me/socks?server=b"])
+
+        # The links the app builds, and the names of invite links.
+        for rel, text in ((S + "/mtproto/mtproto_config.h", 'QString internalLinksDomain = u"https://pluma.chat/"_q;\n'),
+                          (S + "/boxes/language_box.cpp", 'const auto link = u"https://pluma.chat/setlanguage/"_q + row->data.id;'),
+                          (S + "/history/history_item.cpp", 'u"https://pluma.chat/c/%1/%2"_q'),
+                          (S + "/settings/sections/settings_information.cpp", 'return empty ? "pluma.chat/username" : label;'),
+                          (S + "/boxes/peers/create_managed_bot_box.cpp", 'u"pluma.chat/"_q + full);'),
+                          (S + "/boxes/choose_filter_box.cpp", 'startsWith(u"https://pluma.chat/"_q)) { // pluma\n\t\t\ttext = text.mid(19);'),
+                          (S + "/boxes/peers/edit_peer_invite_links.cpp", '.replace(\n\t\tu"pluma.chat/+"_q, // pluma\n\t\tQString()\n\t);'),
+                          (patch.TEXT_ENTITY, 'addOne(QString::fromLatin1("chat")); // pluma')):
+            self.assertIn(text, tree.read(rel), rel)
+        self.assertEqual(len("https://pluma.chat/"), 19)
+        builders = {rel for rel, _, _ in patch.LINK_BUILDERS}
+        for rel in builders - {S + "/boxes/peers/create_managed_bot_box.cpp"}:
+            self.assertNotIn('"https://t.me/', tree.read(rel), rel)
+        # Each file differs from the pinned upstream by its edits alone (and
+        # by the other edits there: plm:// in place of tg://, the tags of
+        # Saved Messages, the colour of QR codes, the name).
+        for rel in patch.links_edited():
+            if rel == patch.TEXT_ENTITY:
+                continue  # its plm, which the brand's checks cover
+            text = self.files[rel].decode("utf-8")
+            edits = ([(o, n) for r, o, n in patch.LINK_HOSTS + patch.SAVED_TAGS + patch.QR_COLORS if r == rel]
+                     + [(o, n.replace("{name}", "Pluma")) for r, o, n, _ in patch.CODE_NAMES if r == rel]
+                     + [(o, o.replace("t.me", patch.LINK_HOST)) for r, o, _ in patch.LINK_BUILDERS if r == rel])
+            for old, new in edits:
+                text = text.replace(old, new)
+            self.assertEqual(tree.read(rel).replace("plm://", "tg://"), text, rel)
+        self.assertEqual(tree.read(patch.TEXT_ENTITY).count('addOne(QString::fromLatin1("chat"));'), 1)
+
+    def test_site_links_are_verified(self):
+        """verify() stops a converter that takes a page of the site as a
+        username, or a username as a page, however the edits were made."""
+        tree, c = self.run_patch()
+        rel = patch.LOCAL_URL_HANDLERS
+        patched = tree.read(rel)
+        for old, new in (("|collect|", "|"), ("|/?([?#].*)?)$", ")$"), ("([/?#].*)?|", "(.*)?|"),
+                         ("favicon\\\\.svg", "favicon.svg"), ("\t\treturn url;\n\t}\n\t// pluma: pluma.chat", "\t}\n\t// pluma: pluma.chat")):
+            with self.subTest(old=old):
+                self.assertEqual(patched.count(old), 1, old)
+                tree.write_bytes(rel, patched.replace(old, new).encode())
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn("local_url_handlers.cpp", str(e.exception))
+                tree.write_bytes(rel, patched.encode())
+        # The check sits after the converter's other edits too: moved below
+        # the line that takes pluma.chat as the app's, it stops the patch.
+        line = patched[patched.index("\t// pluma: the pages of the site"):patched.index("\t// pluma: pluma.chat links are internal")]
+        moved = patched.replace(line, "")
+        at = moved.index("\tif (telegramMeMatch) {\n")
+        tree.write_bytes(rel, (moved[:at] + line + moved[at:]).encode())
+        with self.assertRaises(patch.PatchError):
+            patch.verify(tree, c)
+        tree.write_bytes(rel, patched.encode())
+        patch.verify(tree, c)
 
     def test_changed_binary_files(self):
         """An icon or a zipped theme of another release stops the patch."""
