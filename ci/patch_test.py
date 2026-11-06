@@ -126,6 +126,17 @@ class ConfigTest(unittest.TestCase):
         c = config(server_ipv4=dev["PLUMA_SERVER_IPV4"], server_port=dev["PLUMA_SERVER_PORT"], rsa_pem=DEV_KEY)
         self.assertEqual((c.ipv4, c.port, c.fingerprint), ("127.0.0.1", 10443, 14037083214707814241))
 
+    def test_data_folder(self):
+        # A build for the real server keeps its data in the app's folder; a
+        # development build in one of its own, so that neither reads the
+        # other's (the server's address among it).
+        self.assertEqual(config().data_name, "Pluma")
+        dev = patch.load_env(ROOT / "config/dev/server.env")
+        self.assertEqual(config(app={"PLUMA_DATA_NAME": dev["PLUMA_DATA_NAME"]}).data_name, "PlumaDev")
+        for bad in ("pluma dev", "TelegramDev", "P"):
+            with self.subTest(name=bad), self.assertRaises(patch.PatchError):
+                config(app={"PLUMA_DATA_NAME": bad})
+
     def test_rejects(self):
         telegram_guid = "53F49750-6209-4FBF-9CA8-7A333C87D1ED"
         for over in (
