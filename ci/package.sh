@@ -100,6 +100,31 @@ if other:
 		--app-icon Icon --output-partial-info-plist "$work/icon/Info.plist" \
 		brand/Icon.icon >/dev/null
 	cp "$work/icon/Assets.car" "$work/icon/Icon.icns" "$resources/"
+	# The executables are stripped before the signature, as upstream's
+	# release script does (Telegram/build/build.sh:320-325 at a1e89e1f): the
+	# Release build keeps their symbols (COPY_PHASE_STRIP NO in
+	# Telegram/CMakeLists.txt). Unstripped the app was 1.5 GB, more than an
+	# update package may hold (1 GiB uncompressed: packer.cpp:312, :380;
+	# ci/pack_update.py). Crash reports are off: nothing needs the symbols.
+	exe="$bundle/Contents/MacOS/$(plist CFBundleExecutable)"
+	strip "$exe" "$bundle/Contents/Frameworks/Updater"
+	echo "package: the largest files of the app:"
+	find "$bundle" -type f -size +10M -exec du -h {} + | sort -h | tail -n 8 | sed "s|$work/||"
+	bytes=$($python -I -c '
+import os, sys
+total = 0
+for root, dirs, files in os.walk(sys.argv[1]):
+    for f in files:
+        p = os.path.join(root, f)
+        if not os.path.islink(p):
+            total += os.path.getsize(p)
+print(total)
+' "$bundle")
+	echo "package: the app holds $bytes bytes"
+	if [ "$bytes" -gt $((1 << 30)) ]; then
+		echo "package: the app holds more than the 1 GiB an update package may (ci/pack_update.py)" >&2
+		exit 1
+	fi
 	# No Developer ID: an ad hoc signature, which Apple Silicon requires to
 	# run the app at all. Gatekeeper asks the user once (README).
 	codesign --force --deep --sign - "$bundle"
