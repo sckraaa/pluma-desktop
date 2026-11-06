@@ -1,1 +1,1 @@
-Links to profiles, groups and messages now lead to pluma.chat and open right in Pluma. Opened in a browser, they show a page that starts Pluma in one click.
+Pluma for macOS now installs from a disk image: open it and drag Pluma to Applications.
