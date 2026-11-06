@@ -123,7 +123,7 @@ Without the server variables, every run builds for the development server: `127.
      xattr -dr com.apple.quarantine Pluma.app
      open Pluma.app
      ```
-   - **Windows** (10 and 11, x64). Unzip to a folder of its own and run `Pluma\Pluma.exe`. SmartScreen warns about an unsigned app: *More info → Run anyway*. The data lives in that folder (`tdata`), or in `%APPDATA%\Pluma` if the folder is not writable.
+   - **Windows** (10 and 11, x64). Unzip to a folder of its own and run `Pluma\Pluma.exe`. SmartScreen warns about an unsigned app: *More info → Run anyway*. The data lives in that folder (`tdata`), or in `%APPDATA%\PlumaDev` if the folder is not writable.
    - **Linux** (x86-64, glibc 2.28 or newer):
      ```sh
      tar -xJf pluma-desktop-*-linux-dev.tar.xz
@@ -132,6 +132,8 @@ Without the server variables, every run builds for the development server: `127.
      For a menu entry, put `Pluma` on the `PATH` (`~/.local/bin`) and `chat.pluma.desktop.desktop` into `~/.local/share/applications`.
 4. Sign in with the number. Get the code with `test/e2e/run.sh admin login-code +79990000001`.
 5. Take the stack down with `test/e2e/run.sh down`.
+
+A development build keeps its data in a folder of its own, `PlumaDev` (`PLUMA_DATA_NAME` of [`config/dev/server.env`](config/dev/server.env): `~/Library/Application Support/PlumaDev`, `%APPDATA%\PlumaDev`, `~/.local/share/PlumaDev`), not in the `Pluma` of a build for the real server: each would otherwise read the other's data, the server's address among it, and a build for the real server would knock at the development server.
 
 A second Pluma, say a second account, starts with its own data folder: `Pluma -workdir <folder>`.
 
@@ -179,6 +181,18 @@ The secrets of the environment `release`:
 - `PLUMA_AGE_IDENTITY`: the age key that decrypts the build.
 
 Without `PLUMA_DEVELOPER_ID_P12` the job signs nothing and says so. The step `sign` of `ci/sign-macos.sh` runs on a GitHub runner only: it puts a keychain of its own on the user's search list. The step `staple` needs only the API key, so it works on any Mac too. `ci/sign_test.py` runs both steps against fakes of the macOS tools, and `ci/publish_test.py` the publication of the DMG.
+
+### Crash reports (macOS)
+
+The released app is stripped, so a crash report of it names offsets only. `ci/package.sh` keeps the symbols first in a dSYM, and a build for the server leaves it as the artifact `pluma-desktop-macos-symbols` for 90 days, not encrypted (it holds no key). A report is read with it on a Mac: the report's image UUID is the dSYM's (`dwarfdump --uuid`), and `atos` names each frame of the report's `Telegram` image:
+
+```sh
+gh run download <run id> -R sckraaa/pluma-desktop -n pluma-desktop-macos-symbols
+tar -xJf pluma-desktop-*-macos.dSYM.tar.xz
+atos -o Telegram.dSYM/Contents/Resources/DWARF/Telegram -arch arm64 -l <load address of Telegram> <addresses>
+```
+
+The message of a failed assertion (`Assertion Failed! …` with the file and line) is in the log, `~/Library/Application Support/Pluma/log.txt`, until the app starts again.
 
 ## Releases
 
