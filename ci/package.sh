@@ -39,7 +39,7 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-rm -rf out
+rm -rf out symbols
 mkdir -p out
 
 case $os in
@@ -107,6 +107,15 @@ if other:
 	# update package may hold (1 GiB uncompressed: packer.cpp:312, :380;
 	# ci/pack_update.py). Crash reports are off: nothing needs the symbols.
 	exe="$bundle/Contents/MacOS/$(plist CFBundleExecutable)"
+	# The symbols go first into a dSYM, as upstream keeps its own
+	# (dump_syms before strip, Telegram/build/build.sh:290-317): with it a
+	# crash report of this build is read on a Mac (atos -o
+	# <dSYM>/Contents/Resources/DWARF/<exe> -l <load address> <addresses>;
+	# the report's UUID matches dwarfdump --uuid). symbols/ is not out/: the
+	# release takes every zip of out/ for an app.
+	mkdir -p symbols
+	xcrun dsymutil "$exe" -o "$work/$(basename "$exe").dSYM"
+	tar --options xz:threads=0 -C "$work" -cJf "symbols/$name.dSYM.tar.xz" "$(basename "$exe").dSYM"
 	strip "$exe" "$bundle/Contents/Frameworks/Updater"
 	echo "package: the largest files of the app:"
 	find "$bundle" -type f -size +10M -exec du -h {} + | sort -h | tail -n 8 | sed "s|$work/||"
