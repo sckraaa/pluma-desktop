@@ -1,7 +1,7 @@
-# Finishes the macOS app of a desktop run whose notarization outlasted the
+# Finishes the macOS DMG of a desktop run whose notarization outlasted the
 # job release: takes its artifact pluma-desktop-macos-notarizing (the
-# signed app and the id of Apple's submission), waits for Apple's answer and
-# staples the ticket to the app (ci/sign-macos.sh staple). The result is the
+# signed DMG and the id of Apple's submission), waits for Apple's answer and
+# staples the ticket to the DMG (ci/sign-macos.sh staple). The result is the
 # artifact pluma-desktop-macos-signed of this run; a build of main then goes
 # to the site and the apps' updater (ci/publish.sh), with the run number of
 # the desktop run it was built in. While Apple is still checking, the job
@@ -72,14 +72,14 @@ jobs:
           printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
           printf '%s' "$NOTARY_KEY_B64" | base64 -d >"$keys/notary.p8"
           export PLUMA_NOTARY_KEY=$keys/notary.p8
-          for f in build/*.zip.age; do
+          for f in build/*.dmg.age; do
             name=$(basename "$f" .age)
             age --decrypt --identity "$keys/age.key" --output "$keys/$name" "$f"
             (cd "$keys" && shasum -a 256 -c "$GITHUB_WORKSPACE/build/$name.sha256")
             rc=0
             ci/sign-macos.sh staple "$keys/$name" "$(cat "build/$name.notary-id")" signed || rc=$?
             if [ "$rc" = 75 ]; then
-              echo "::error::Apple is still checking the app; re-run this job later."
+              echo "::error::Apple is still checking the DMG; re-run this job later."
             fi
             if [ "$rc" != 0 ]; then
               exit "$rc"
@@ -111,12 +111,12 @@ jobs:
           printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
           printf '%s\n' "$PLUMA_UPDATE_KEY" >"$keys/update.pem"
           export PLUMA_UPDATE_KEY_FILE=$keys/update.pem
-          for f in signed/*.zip.age; do
-            zip=$keys/$(basename "$f" .age)
-            age --decrypt --identity "$keys/age.key" --output "$zip" "$f"
-            ci/publish.sh macos "$zip"
+          for f in signed/*.dmg.age; do
+            dmg=$keys/$(basename "$f" .age)
+            age --decrypt --identity "$keys/age.key" --output "$dmg" "$f"
+            ci/publish.sh macos "$dmg"
           done
-      - name: Upload the notarized app
+      - name: Upload the notarized DMG
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pluma-desktop-macos-signed

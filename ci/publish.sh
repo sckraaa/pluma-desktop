@@ -5,10 +5,10 @@
 #
 #   publish.sh macos|windows|linux <installer>
 #
-# The installer is what ci/package.sh made (and, for macOS, sign-macos.sh
-# signed and notarized): the site offers it for a first install. From it the
-# update package is packed (ci/pack_update.py) and signed with Pluma's key:
-# Pluma.app on macOS, universal; Telegram.exe and Updater.exe on Windows,
+# The installer is what ci/package.sh made (for macOS, the DMG sign-macos.sh
+# made, signed and notarized): the site offers it for a first install. From it
+# the update package is packed (ci/pack_update.py) and signed with Pluma's key:
+# Pluma.app of the DMG on macOS, universal; Telegram.exe and Updater.exe on Windows,
 # x64; Telegram and Updater on Linux, x64. The binary goes under upstream's
 # name, which the Updater renames to the installed one.
 #
@@ -25,7 +25,10 @@
 #   PLUMA_RELEASES_URL      the site, https://pluma.chat;
 #   RELEASES_UPLOAD_TOKEN   the releases service's upload token
 #                           (teamgramd/deploy/releases/put-token.sh of the
-#                           server repository sets it).
+#                           server repository sets it);
+#   PLUMA_UPDATE_PUBLIC_KEY the public key the package is checked against,
+#                           config/update_public.pem when unset (the tests
+#                           give their own).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
@@ -43,7 +46,8 @@ if [[ ! "$build" =~ ^[0-9]{1,5}$ ]]; then
 	echo "publish: BUILD_NUMBER $build is not a number" >&2
 	exit 1
 fi
-for f in "$installer" release/notes.en.txt release/notes.ru.txt config/update_public.pem; do
+public_key=${PLUMA_UPDATE_PUBLIC_KEY:-config/update_public.pem}
+for f in "$installer" release/notes.en.txt release/notes.ru.txt "$public_key"; do
 	[ -s "$f" ] || { echo "publish: $f is missing or empty" >&2; exit 1; }
 done
 build=$((10#$build))
@@ -56,7 +60,14 @@ if ! python3 -c '' 2>/dev/null; then
 fi
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pluma-publish.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+mounted=
+cleanup() {
+	if [ -n "$mounted" ]; then
+		hdiutil detach "$work/mnt" -force >/dev/null 2>&1 || true
+	fi
+	rm -rf "$work"
+}
+trap cleanup EXIT
 mkdir "$work/unpacked" "$work/package"
 case $os in
 linux)
@@ -79,8 +90,19 @@ macos)
 	# One universal app serves Intel and Apple processors (tmacupd serves
 	# the updater's keys mac and armac).
 	arch=universal
-	ditto -x -k "$installer" "$work/unpacked"
-	ditto "$work/unpacked/$app.app" "$work/package/$app.app"
+	if [[ "$installer" != *.dmg ]]; then
+		echo "publish: the macOS installer is the DMG of sign-macos.sh, not $installer" >&2
+		exit 2
+	fi
+	# Notarized and stapled, or the site would offer what Gatekeeper refuses.
+	codesign --verify --strict "$installer"
+	xcrun stapler validate "$installer"
+	mkdir "$work/mnt"
+	hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$work/mnt" "$installer" >/dev/null
+	mounted=1
+	ditto "$work/mnt/$app.app" "$work/package/$app.app"
+	hdiutil detach "$work/mnt" >/dev/null
+	mounted=
 	codesign --verify --deep --strict "$work/package/$app.app"
 	update=tmacupd$build
 	paths=("$work/package/$app.app")
@@ -91,7 +113,7 @@ macos)
 	;;
 esac
 $python -I ci/pack_update.py --os "$os" --version "$build" --key "$PLUMA_UPDATE_KEY_FILE" \
-	--public-key config/update_public.pem --out "$work/$update" "${paths[@]}"
+	--public-key "$public_key" --out "$work/$update" "${paths[@]}"
 
 # The token goes in a header file, not on the command line.
 umask 077

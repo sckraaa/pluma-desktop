@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- The background of the window of Pluma's DMG, 640x400 (ci/make-dmg.sh).
+     The icons of the app and of Applications are not drawn: Finder puts them
+     at the centres ci/dmg-settings.py gives, (170, 190) and (470, 190), and
+     the arrow runs between them. render.sh renders background.png and
+     background@2x.png from this page; the text is an image, in Russian and
+     in English, since a DMG window cannot follow the system's language.
+     Geologica: SIL Open Font License, OFL.txt. -->
+<html lang="ru"><head><meta charset="utf-8">
+<style>
+@font-face { font-family: Geologica; src: url(geologica-latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+2000-206F; }
+@font-face { font-family: Geologica; src: url(geologica-cyrillic.woff2) format('woff2'); unicode-range: U+0400-04FF; }
+html, body { margin: 0; width: 640px; height: 400px; overflow: hidden; }
+body { background: #f4f3ee; color: #111; font-family: Geologica, sans-serif; position: relative; }
+.mark { position: absolute; left: 50%; top: 40px; width: 92px; transform: translateX(-50%); color: #111; }
+.mark svg { width: 100%; display: block; }
+.arrow { position: absolute; left: 0; top: 0; }
+.hint { position: absolute; left: 0; right: 0; top: 318px; text-align: center; }
+.hint .ru { font-size: 15px; font-weight: 500; color: #111; letter-spacing: .1px; }
+.hint .en { font-size: 12.5px; color: #6b6f6b; margin-top: 5px; }
+</style></head>
+<body>
+<div class="mark" id="mark"></div>
+<svg class="arrow" width="640" height="400" viewBox="0 0 640 400">
+  <path d="M 262 196 C 300 160, 340 160, 378 196" fill="none" stroke="#5b7a5e" stroke-width="3" stroke-linecap="round" stroke-dasharray="1 9"/>
+  <path d="M 377.6 186.2 L 380 198 L 368.1 196.2" fill="none" stroke="#5b7a5e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+<div class="hint"><div class="ru">Перетащите Pluma в папку Applications</div><div class="en">Drag Pluma to Applications</div></div>
+<script>
+fetch('wordmark.svg').then(r => r.text()).then(t => { document.getElementById('mark').innerHTML = t; });
+</script>
+</body></html>

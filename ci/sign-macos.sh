@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Signs the macOS app of a build for a server with Pluma's Developer ID, has
-# Apple notarize it and staples the ticket to it, so Gatekeeper opens it
-# without a warning, offline too. Apple usually answers within minutes but
-# may take hours, and keeps checking after notarytool stops waiting, so the
-# work has two steps:
+# Signs the macOS app of a build for a server with Pluma's Developer ID, puts
+# it into Pluma's DMG (ci/make-dmg.sh), signs the DMG, has Apple notarize it
+# and staples the ticket to it, so Gatekeeper opens it without a warning.
+# Upstream notarizes its DMG the same way, once, with the app inside
+# (Telegram/build/build.sh:361-423 at a1e89e1f): Apple issues tickets for the
+# image and for what it holds. Apple usually answers within minutes but may
+# take hours, and keeps checking after notarytool stops waiting, so the work
+# has two steps:
 #   sign-macos.sh sign ZIP OUT
 #       ZIP is package.sh's pluma-desktop-<version>-macos.zip (signed ad
-#       hoc). Signs the app, submits it and waits half an hour. Accepted: OUT
-#       gets the notarized app under ZIP's name, with its SHA-256. Still
-#       checking: OUT gets the signed app under that name, its SHA-256 and
+#       hoc). Signs the app, makes the DMG, signs and submits it and waits
+#       half an hour. Accepted: OUT gets the notarized
+#       pluma-desktop-<version>-macos.dmg, with its SHA-256. Still checking:
+#       OUT gets the signed DMG under that name, its SHA-256 and
 #       <name>.notary-id, the submission, for the step staple.
-#   sign-macos.sh staple ZIP ID OUT
-#       ZIP is the signed app of sign, ID its submission. Waits ten minutes
-#       for Apple and staples the ticket; OUT gets the notarized app as
+#   sign-macos.sh staple DMG ID OUT
+#       DMG is the signed DMG of sign, ID its submission. Waits ten minutes
+#       for Apple and staples the ticket; OUT gets the notarized DMG as
 #       above. Exits 75 while Apple is still checking: run it again later.
-# The signature is upstream's (Telegram/build/build.sh): the hardened runtime,
+# The app's signature is upstream's (Telegram/build/build.sh): the hardened runtime,
 # a secure timestamp and the entitlements of Telegram.entitlements, which
 # ci/macos.entitlements copies (ci/patch.py checks it): the microphone, the
 # camera, the location. From the environment:
@@ -29,13 +33,13 @@
 # which on a Mac of a person would change their keychains.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-usage="usage: sign-macos.sh sign ZIP OUT | staple ZIP ID OUT"
+usage="usage: sign-macos.sh sign ZIP OUT | staple DMG ID OUT"
 step=${1:?$usage}
 vars=(PLUMA_NOTARY_KEY PLUMA_NOTARY_KEY_ID PLUMA_NOTARY_ISSUER_ID)
 case $step in
 sign)
 	[ $# = 3 ] || { echo "$usage" >&2; exit 2; }
-	zip=$2 out=$3 id=
+	input=$2 out=$3 id=
 	vars+=(PLUMA_DEVELOPER_ID_P12 PLUMA_DEVELOPER_ID_PASSWORD)
 	if [ "${GITHUB_ACTIONS:-}" != true ]; then
 		echo "sign-macos: sign runs on a GitHub runner only (it changes the keychain search list)" >&2
@@ -44,7 +48,11 @@ sign)
 	;;
 staple)
 	[ $# = 4 ] || { echo "$usage" >&2; exit 2; }
-	zip=$2 id=$3 out=$4
+	input=$2 id=$3 out=$4
+	if [[ "$input" != *.dmg ]]; then
+		echo "sign-macos: staple takes the DMG of sign, not $input" >&2
+		exit 2
+	fi
 	if [[ ! "$id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
 		echo "sign-macos: $id is not a submission id" >&2
 		exit 2
@@ -73,19 +81,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ditto -x -k "$zip" "$work/app"
-app=$work/app/$PLUMA_APP_NAME.app
-if [ ! -d "$app" ]; then
-	echo "sign-macos: no $PLUMA_APP_NAME.app in $zip" >&2
-	exit 1
-fi
-name=$(basename "$zip")
+name=$(basename "$input")
+name=${name%.zip}
+name=${name%.dmg}.dmg
+dmg=$work/$name
 keys=(--key "$PLUMA_NOTARY_KEY" --key-id "$PLUMA_NOTARY_KEY_ID" --issuer "$PLUMA_NOTARY_ISSUER_ID")
 
-# The app zipped into OUT under ZIP's name, with its SHA-256.
+# The DMG into OUT, with its SHA-256.
 deliver() {
 	mkdir -p "$out"
-	ditto -c -k --keepParent "$app" "$out/$name"
+	cp "$dmg" "$out/$name"
 	(cd "$out" && shasum -a 256 "$name" >"$name.sha256")
 }
 
@@ -129,6 +134,12 @@ rejected() {
 }
 
 if [ "$step" = sign ]; then
+	ditto -x -k "$input" "$work/app"
+	app=$work/app/$PLUMA_APP_NAME.app
+	if [ ! -d "$app" ]; then
+		echo "sign-macos: no $PLUMA_APP_NAME.app in $input" >&2
+		exit 1
+	fi
 	# A keychain of its own holds the identity, on the search list, and
 	# codesign may use its key without asking.
 	password=$(openssl rand -hex 16)
@@ -147,12 +158,17 @@ if [ "$step" = sign ]; then
 		--keychain "$keychain" --sign "$identity" "$app"
 	codesign --verify --deep --strict "$app"
 
-	# Apple checks the app and issues a ticket; stapled into the app, it
-	# lets Gatekeeper accept the app without asking Apple. The id of the
-	# submission comes right after the upload: whatever happens while
-	# waiting, the signed app is kept with it.
-	ditto -c -k --keepParent "$app" "$work/notarize.zip"
-	notary submit "$work/notarize.zip"
+	# The DMG holds the signed app, and is signed itself, with an identifier
+	# of its own.
+	ci/make-dmg.sh "$app" "$dmg"
+	codesign --force --timestamp --keychain "$keychain" --sign "$identity" -i "$PLUMA_APP_ID.dmg" "$dmg"
+	codesign --verify --strict "$dmg"
+
+	# Apple checks the DMG and what it holds and issues a ticket; stapled
+	# into the DMG, it lets Gatekeeper accept it without asking Apple. The
+	# id of the submission comes right after the upload: whatever happens
+	# while waiting, the signed DMG is kept with it.
+	notary submit "$dmg"
 	id=$(field id)
 	if [ -z "$id" ]; then
 		echo "sign-macos: the upload to Apple failed (exit code $rc):" >&2
@@ -171,6 +187,7 @@ if [ "$step" = sign ]; then
 		;;
 	esac
 else
+	cp "$input" "$dmg"
 	wait_for 10m
 	case $status in
 	Accepted) ;;
@@ -182,8 +199,8 @@ else
 	esac
 fi
 
-xcrun stapler staple "$app"
-xcrun stapler validate "$app"
-spctl --assess --type execute --verbose=2 "$app"
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+codesign --verify --strict "$dmg"
 deliver
 echo "sign-macos: $out/$name, notarized"
