@@ -29,6 +29,7 @@ dev)
 	# prefix of nowhere, and a key whose private half nobody keeps.
 	update_prefix=https://127.0.0.1/dl/desktop
 	update_key=config/dev/update_public.pem
+	data_name=$PLUMA_DATA_NAME
 	;;
 server)
 	# Half a configuration would build a client that cannot sign in.
@@ -54,5 +55,6 @@ esac
 $python -I ci/patch.py --source "$dir" --upstream upstream.env --app config/app.env \
 	--server-ipv4 "$SERVER_IPV4" --server-port "$SERVER_PORT" --server-ipv6 "${SERVER_IPV6:-}" \
 	--rsa-public-key "$tmp/key.pem" --update-public-key "$update_key" \
-	--build "${PLUMA_BUILD:-0}" ${update_prefix:+--update-prefix "$update_prefix"}
+	--build "${PLUMA_BUILD:-0}" ${update_prefix:+--update-prefix "$update_prefix"} \
+	${data_name:+--data-name "$data_name"}
 echo "configure: $target build"
