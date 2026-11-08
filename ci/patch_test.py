@@ -589,6 +589,12 @@ class RecordingTree(patch.Tree):
         super().write_bytes(rel, data)
 
 
+# Every premium sticker edit, damaged in the pinned upstream, stops the patch
+# with the file's name.
+DAMAGE += tuple((rel, old, old.replace("premium", "promium").replace("Premium", "Promium").replace("Bottom", "Top").replace("_lockIcon", "_icon"))
+                for rel, old, _, _ in patch.PREMIUM_STICKERS)
+
+
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
                  "no checkout of the pinned upstream (ci/fetch-upstream.sh sparse)")
 class UpstreamTest(unittest.TestCase):
@@ -889,6 +895,31 @@ class UpstreamTest(unittest.TestCase):
             self.assertIn(s, top)
         self.assertEqual(top.count("consumer.put_next_copy(state->wrap.get());"), 2)
 
+    def test_premium_stickers(self):
+        """Premium stickers work without Premium: the function stands at the
+        gates of premium stickers alone, and custom emoji keep their lock."""
+        tree, _ = self.run_patch()
+        self.assertIn("\t[[nodiscard]] bool premiumPossible() const;\n\t// pluma: premium stickers, which need Premium upstream.\n"
+                      "\t[[nodiscard]] bool premiumStickersAvailable() const;\n", tree.read(patch.MAIN_SESSION_H))
+        self.assertIn("\nbool Session::premiumStickersAvailable() const {\n\t// pluma: for every user, Premium or not; the "
+                      "server has no Premium.\n\treturn true;\n}\n", tree.read(patch.MAIN_SESSION))
+        self.assertIn("\t\t|| document->session().premium()\n\t\t|| document->session().premiumStickersAvailable()) {\n"
+                      "\t\treturn false;\n\t}\n\tShowStickerPreviewBox(std::move(show), document);\n", tree.read(patch.SECTION_WIDGET))
+        self.assertEqual(tree.read(patch.STICKERS_LIST_WIDGET).count("&& !session().premiumStickersAvailable();\n"), 6)
+        self.assertIn("\t\t_premium = premium || unlocked;\n", tree.read(patch.STICKER_SET_BOX))
+        # Emoji still show the lock.
+        self.assertIn(", _premiumMark(std::make_unique<StickerPremiumMark>(\n\t&session(),\n\tst::emojiPremiumLock))\n",
+                      tree.read(patch.SOURCES + "/chat_helpers/emoji_list_widget.cpp"))
+        self.assertNotIn("premiumStickersAvailable", tree.read(patch.SOURCES + "/chat_helpers/emoji_list_widget.cpp"))
+        # Only the gates ask it.
+        users = {rel for rel in tree.sources() if "premiumStickersAvailable" in tree.read(rel)}
+        expected = {rel for rel, _, new, _ in patch.PREMIUM_STICKERS if "premiumStickersAvailable" in new}
+        self.assertEqual(users, expected)
+        self.assertIn("premiumStickersAvailable", tree.read(patch.STICKER_SET_BOX))
+        for rel, old, _, count in patch.PREMIUM_STICKERS:
+            with self.subTest(rel=rel, old=old[:50]):
+                self.assertEqual(self.files[rel].decode("utf-8").count(old), count)
+
     def test_saved_tags(self):
         """The tags of Saved Messages work without Premium: savedTagsAvailable()
         takes the place of premium() at the tag gates alone, and the limit of
@@ -924,6 +955,9 @@ class UpstreamTest(unittest.TestCase):
         for rel, old, new in patch.SAVED_TAGS:
             with self.subTest(rel=rel):
                 expected = self.files[rel].decode("utf-8").replace(old, new)
+                for sticker_rel, sticker_old, sticker_new, _ in patch.PREMIUM_STICKERS:
+                    if sticker_rel == rel:
+                        expected = expected.replace(sticker_old, sticker_new)
                 for link_rel, link, _ in patch.LINK_BUILDERS:  # a topic link of VIEW_ELEMENT
                     if link_rel == rel:
                         expected = expected.replace(link, link.replace("t.me", patch.LINK_HOST))
@@ -1028,6 +1062,7 @@ class UpstreamTest(unittest.TestCase):
                 continue  # its plm, which the brand's checks cover
             text = self.files[rel].decode("utf-8")
             edits = ([(o, n) for r, o, n in patch.LINK_HOSTS + patch.SAVED_TAGS + patch.QR_COLORS if r == rel]
+                     + [(o, n) for r, o, n, _ in patch.PREMIUM_STICKERS if r == rel]
                      + [(o, n.replace("{name}", "Pluma")) for r, o, n, _ in patch.CODE_NAMES if r == rel]
                      + [(o, o.replace("t.me", patch.LINK_HOST)) for r, o, _ in patch.LINK_BUILDERS if r == rel])
             for old, new in edits:
