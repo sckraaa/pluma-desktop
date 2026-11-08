@@ -111,6 +111,7 @@ STICKERS_LIST_WIDGET = SOURCES + "/chat_helpers/stickers_list_widget.cpp"
 FIELD_AUTOCOMPLETE = SOURCES + "/chat_helpers/field_autocomplete.cpp"
 STICKER_SET_BOX = SOURCES + "/boxes/sticker_set_box.cpp"
 STICKER_SET_BOX_H = SOURCES + "/boxes/sticker_set_box.h"
+STICKERS_BOX = SOURCES + "/boxes/stickers_box.cpp"
 DATA_STICKERS = SOURCES + "/data/stickers/data_stickers.cpp"
 HISTORY_ITEM = SOURCES + "/history/history_item.cpp"
 DATA_MEDIA_TYPES = SOURCES + "/data/data_media_types.cpp"
@@ -1000,7 +1001,8 @@ SAVED_TAGS = (
 # section_widget.cpp 597, the one gate every send goes through: history,
 # scheduled, chat section, polls, stories), the lists that leave them out
 # while Premium cannot be bought (skipPremium, stickers_list_widget.cpp; the
-# set's window, sticker_set_box.cpp 1112), how search mixes them in
+# count of a set in the sets box, stickers_box.cpp 2455; the set's window,
+# sticker_set_box.cpp 1112), how search mixes them in
 # (data_stickers.cpp 1503) and the lock on them (StickerPremiumMark, which
 # draws Premium's star instead; only the sticker uses of it, emoji keep the
 # lock). The own copy of a sent or forwarded premium sticker plays its effect
@@ -1070,6 +1072,12 @@ PREMIUM_STICKERS = (
      "\tconst auto premiumPossible = _session->premiumPossible();\n",
      "\tconst auto premiumPossible = _session->premiumPossible()\n"
      "\t\t|| _session->premiumStickersAvailable();\n", 1),
+    (STICKERS_BOX,
+     "bool StickersBox::Inner::skipPremium() const {\n"
+     "\treturn !_session->premiumPossible();\n",
+     "bool StickersBox::Inner::skipPremium() const {\n"
+     "\treturn !_session->premiumPossible()\n"
+     "\t\t&& !_session->premiumStickersAvailable();\n", 1),
     (DATA_STICKERS,
      "\tif (session().premium()) {\n"
      "\t\tconst auto normalsPerPremium = appConfig->get<int>(\n",
