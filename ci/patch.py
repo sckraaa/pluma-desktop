@@ -147,6 +147,8 @@ ABOUT_BOX = SOURCES + "/boxes/about_box.cpp"
 BANNED_BOX = SOURCES + "/boxes/phone_banned_box.cpp"
 MAIN_MENU = SOURCES + "/window/window_main_menu.cpp"
 SETTINGS_MAIN = SOURCES + "/settings/sections/settings_main.cpp"
+DEEP_LINKS_SETTINGS = SOURCES + "/core/deep_links/deep_links_settings.cpp"
+LOCAL_URL_HANDLERS = SOURCES + "/core/local_url_handlers.cpp"
 DATA_PEER = SOURCES + "/data/data_peer.cpp"
 SETTINGS_INTRO = SOURCES + "/settings/settings_intro.cpp"
 # The other themes of Settings > Chat Settings (Day, Night), the bases of
@@ -1016,7 +1018,75 @@ BIRTHDAY_GIFTS = (
      "\t\t// pluma: the gift on the birthday only, and only while Premium can be\n"
      "\t\t// bought.\n"
      "\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n"),
+    # The links into the gift box and its recipient chooser.
+    (DEEP_LINKS_SETTINGS,
+     "\t\t\tUi::ChooseStarGiftRecipient(ctx.controller);\n",
+     "\t\t\t// pluma: no gift while Premium cannot be bought.\n"
+     "\t\t\tif (!ctx.controller->session().premiumCanBuy()) {\n"
+     "\t\t\t\treturn Result::Unsupported;\n"
+     "\t\t\t}\n"
+     "\t\t\tUi::ChooseStarGiftRecipient(ctx.controller);\n"),
+    (DEEP_LINKS_SETTINGS,
+     "\t\t\tUi::ShowStarGiftBox(ctx.controller, ctx.controller->session().user());\n",
+     "\t\t\t// pluma: no gift while Premium cannot be bought.\n"
+     "\t\t\tif (!ctx.controller->session().premiumCanBuy()) {\n"
+     "\t\t\t\treturn Result::Unsupported;\n"
+     "\t\t\t}\n"
+     "\t\t\tUi::ShowStarGiftBox(ctx.controller, ctx.controller->session().user());\n"),
+    (LOCAL_URL_HANDLERS,
+     "\tif (!controller) {\n\t\treturn false;\n\t}\n\tUi::ChooseStarGiftRecipient(controller);\n",
+     "\t// pluma: no gift while Premium cannot be bought.\n"
+     "\tif (!controller || !controller->session().premiumCanBuy()) {\n\t\treturn false;\n\t}\n"
+     "\tUi::ChooseStarGiftRecipient(controller);\n"),
 )
+
+# The links to what BuildHelpSection no longer shows (plm://settings/faq,
+# /ask-question, /features): without a route they get upstream's answer to
+# a link it does not know.
+HELP_ROUTES = (
+    ("Result ShowFaq(const Context &ctx) {\n"
+     "\t::Settings::OpenFaq(\n"
+     "\t\tctx.controller ? base::make_weak(ctx.controller) : nullptr);\n"
+     "\treturn Result::Handled;\n"
+     "}\n\n",
+     ""),
+    ('\trouter.add(u"settings"_q, {\n'
+     '\t\t.path = u"faq"_q,\n'
+     '\t\t.action = CodeBlock{ ShowFaq },\n'
+     '\t\t.requiresAuth = false,\n'
+     '\t});\n'
+     '\n'
+     '\trouter.add(u"settings"_q, {\n'
+     '\t\t.path = u"ask-question"_q,\n'
+     '\t\t.action = CodeBlock{ [](const Context &ctx) {\n'
+     '\t\t\tif (!ctx.controller) {\n'
+     '\t\t\t\treturn Result::NeedsAuth;\n'
+     '\t\t\t}\n'
+     '\t\t\t::Settings::OpenAskQuestionConfirm(ctx.controller);\n'
+     '\t\t\treturn Result::Handled;\n'
+     '\t\t}},\n'
+     '\t});\n'
+     '\n'
+     '\trouter.add(u"settings"_q, {\n'
+     '\t\t.path = u"features"_q,\n'
+     '\t\t.action = CodeBlock{ [](const Context &ctx) {\n'
+     '\t\t\t::Settings::OpenFeatures(\n'
+     '\t\t\t\tctx.controller ? base::make_weak(ctx.controller) : nullptr);\n'
+     '\t\t\treturn Result::Handled;\n'
+     '\t\t}},\n'
+     '\t\t.requiresAuth = false,\n'
+     '\t});\n'
+     '\n',
+     "\t// pluma: no FAQ, Ask a Question or Features: they lead to Telegram's\n"
+     "\t// pages and support.\n\n"),
+)
+
+# Who may open Telegram's help (its definitions and the declarations, and
+# OpenFaq inside OpenAskQuestionConfirm, which nothing calls), and the links
+# into the gift box.
+HELP_OPENERS = re.compile(r"\b(?:OpenFaq|OpenFeatures|OpenAskQuestionConfirm)\(")
+HELP_OPENERS_KEPT = {"settings/sections/settings_main.cpp": 4, "settings/sections/settings_main.h": 3}
+GIFT_OPENERS = re.compile(r"\bUi::(?:ChooseStarGiftRecipient|ShowStarGiftBox)\(")
 
 # The tags of Saved Messages, which Telegram gives to Premium alone, for
 # every user: Pluma has no Premium (the server sets premium_purchase_blocked).
@@ -1413,7 +1483,6 @@ SITE_PATHS = ("iphone", "ipad", "android", "mac", "windows", "linux", "web", "pe
 # fragment, and a site path followed by nothing, "/", a query or a fragment.
 SITE_LINK = (r"^(https?://)?pluma\.chat(/(" + "|".join(s.replace(".", r"\.") for s in SITE_PATHS)
              + r")([/?#].*)?|/?([?#].*)?)$")
-LOCAL_URL_HANDLERS = SOURCES + "/core/local_url_handlers.cpp"
 CLICK_HANDLER_TYPES = SOURCES + "/core/click_handler_types.cpp"
 # Where the app recognises t.me as its own: (file, the pinned upstream's
 # text, Pluma's).
@@ -2054,6 +2123,8 @@ def rebrand(tree, c):
                       "\tQ_UNUSED(builder);",
                       must_contain=("OpenFaq(controller);", "OpenFeatures(controller);",
                                     "OpenAskQuestionConfirm(controller);"))
+    for old, new in HELP_ROUTES:
+        tree.replace(DEEP_LINKS_SETTINGS, old, new)
     tree.replace(SETTINGS_INTRO, "\tUi::AddDivider(result);\n\tUi::AddSkip(result);\n\n"
                                  "\tAddButtonWithIcon(\n\t\tresult,\n\t\ttr::lng_settings_faq(),\n"
                                  "\t\tst::settingsButtonNoIcon\n\t)->addClickHandler([] {\n"
@@ -2096,6 +2167,24 @@ def resolve(values, key, seen=()):
     if value.startswith("#") or value in seen or value not in values:
         return value
     return resolve(values, value, seen + (key,))
+
+
+def verify_help_and_gifts(tree):
+    """Telegram's FAQ, Features and support are reached by nothing but the
+    code of Settings that nothing opens, and the gift box by no link while
+    Premium cannot be bought: each caller in the sources is one of these."""
+    found = {}
+    for rel in tree.sources():
+        count = len(HELP_OPENERS.findall(tree.scan(rel)))
+        if count:
+            found[rel[len(SOURCES) + 1:]] = count
+    if found != HELP_OPENERS_KEPT:
+        diff = sorted(k for k in set(found) | set(HELP_OPENERS_KEPT) if found.get(k) != HELP_OPENERS_KEPT.get(k))
+        raise PatchError(f"{SOURCES}: Telegram's FAQ or support is opened from {', '.join(diff[:5])}")
+    for rel, gifts, guards in ((DEEP_LINKS_SETTINGS, 2, 2), (LOCAL_URL_HANDLERS, 1, 1)):
+        text = tree.read(rel)
+        if len(GIFT_OPENERS.findall(text)) != gifts or text.count("session().premiumCanBuy()) {\n") != guards:
+            raise PatchError(f"{rel}: a link opens the gift box without asking whether Premium can be bought")
 
 
 def verify_brand(tree):
@@ -2299,7 +2388,7 @@ def verify_site_links(tree):
 
 def brand_edited():
     """The text files rebrand() edits."""
-    return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN,
+    return tuple(dict.fromkeys((LANG, PALETTE, TEXT_ENTITY, QTHELP_URL, EMBEDDED_THEMES, SETTINGS_MAIN, DEEP_LINKS_SETTINGS,
                                 SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX, DATA_PEER, EXPORT_CSS)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
                                + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
@@ -2648,6 +2737,7 @@ def verify(tree, c):
     verify_links(tree)
     verify_hosts(tree)
     verify_brand(tree)
+    verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
 
 

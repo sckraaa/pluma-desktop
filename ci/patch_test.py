@@ -1210,7 +1210,7 @@ class UpstreamTest(unittest.TestCase):
             if rel == patch.TEXT_ENTITY:
                 continue  # its plm, which the brand's checks cover
             text = self.files[rel].decode("utf-8")
-            edits = ([(o, n) for r, o, n in patch.LINK_HOSTS + patch.SAVED_TAGS + patch.QR_COLORS if r == rel]
+            edits = ([(o, n) for r, o, n in patch.LINK_HOSTS + patch.SAVED_TAGS + patch.QR_COLORS + patch.BIRTHDAY_GIFTS if r == rel]
                      + [(o, n) for r, o, n, _ in patch.PREMIUM_STICKERS if r == rel]
                      + [(o, n.replace("{name}", "Pluma")) for r, o, n, _ in patch.CODE_NAMES if r == rel]
                      + [(o, o.replace("t.me", patch.LINK_HOST)) for r, o, _ in patch.LINK_BUILDERS if r == rel])
@@ -1244,6 +1244,31 @@ class UpstreamTest(unittest.TestCase):
             patch.verify(tree, c)
         tree.write_bytes(rel, patched.encode())
         patch.verify(tree, c)
+
+    def test_help_and_gift_links(self):
+        """plm://settings/faq, /ask-question and /features have no route, and
+        the links to the gift box ask whether Premium can be bought; a new
+        way to either stops the patch."""
+        tree, c = self.run_patch()
+        text = tree.read(patch.DEEP_LINKS_SETTINGS)
+        for gone in ('u"faq"_q', 'u"ask-question"_q', 'u"features"_q', "ShowFaq", "OpenFaq(", "OpenFeatures(",
+                     "OpenAskQuestionConfirm("):
+            self.assertNotIn(gone, text)
+        self.assertEqual(len(re.findall(
+            r"if \(!ctx\.controller->session\(\)\.premiumCanBuy\(\)\) \{\n\t\t\t\treturn Result::Unsupported;\n\t\t\t\}\n"
+            r"\t\t\tUi::(?:ChooseStarGiftRecipient|ShowStarGiftBox)\(", text)), 2)
+        handlers = tree.read(patch.LOCAL_URL_HANDLERS)
+        self.assertIn("\tif (!controller || !controller->session().premiumCanBuy()) {\n\t\treturn false;\n\t}\n"
+                      "\tUi::ChooseStarGiftRecipient(controller);\n", handlers)
+        route = 'router.add(u"settings"_q, {\n\t\t.path = u"saved-messages"_q,\n'
+        self.assertIn(route, text)
+        for added, what in (("\t\t::Settings::OpenFaq(nullptr);\n", "FAQ"),
+                            ("\t\tUi::ShowStarGiftBox(ctx.controller, ctx.controller->session().user());\n", "gift")):
+            with self.subTest(what=what):
+                tree.write(patch.DEEP_LINKS_SETTINGS, text.replace("\t" + route, added + "\t" + route, 1))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn("deep_links_settings.cpp", str(e.exception))
 
     def test_telegram_plane_in_a_new_icon(self):
         """The plane of the 7.4 notice is Pluma's mark; another file drawing
