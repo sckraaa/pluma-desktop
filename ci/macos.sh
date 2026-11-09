@@ -109,7 +109,7 @@ trim)
 	# The upstream CI's "Free up some disk space" step.
 	find "$root/Libraries" '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' \
 		-o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' \
-		-o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+		-o -path '*/patches/*' -o -path '*/src/wallet_engine/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
 	# What each stage leaves, in MB, the largest last.
 	du -sm "$root"/Libraries/* "$root"/Libraries/local/* 2>/dev/null | sort -n | tail -n 12 || true
 	du -sh "$root/Libraries" "$root/ThirdParty"
