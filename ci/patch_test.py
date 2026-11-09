@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import base64
 import io
+import json
 import os
 import pathlib
 import re
@@ -12,6 +14,7 @@ import unittest.mock
 import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import ed25519  # noqa: E402
 import patch  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -53,15 +56,42 @@ vJey5IOJDKqmyFBURdP6+0IuF3RgEvhPrCXTLFLSWgGTIZOUGkGO/NOVyzzKP9I4
 cHpcIp/hW3HkD564M7f9BbGSkXItXbTwpiEWj0kXJ0b0I1OSFYxRAgMBAAE=
 -----END RSA PUBLIC KEY-----"""
 
-# Telegram's key of its update packages, which may stay in _other/packer.cpp
-# only (Pluma's takes its place in config.h).
+# Telegram's former key of its update packages, which may stay in
+# _other/packer.cpp only.
 UPDATE_KEY = """-----BEGIN RSA PUBLIC KEY-----
 MIGJAoGBAMA4ViQrjkPZ9xj0lrer3r23JvxOnrtE8nI69XLGSr+sRERz9YnUptnU
 BZpkIfKaRcl6XzNJiN28cVwO1Ui5JSa814UAiDHzWUqCaXUiUEQ6NmNTneiGx2sQ
 +9PKKlb8mmr3BB9A45ZNwLT6G9AK3+qkZLHojeSA+m84/a6GP4svAgMBAAE=
 -----END RSA PUBLIC KEY-----"""
 
+# Telegram's root key of its update packages (update system v2).
+TELEGRAM_UPDATE_ROOT = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEARgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR0=
+-----END PUBLIC KEY-----
+"""
+
 DEV_KEY = (ROOT / "config/dev/server_public.pem").read_text()
+
+# Pluma's update root key and manifest, of throwaway keys: (root, manifest,
+# signature) as bytes, and the same for a manifest made in the test.
+ROOT_SEED, RELEASE_SEED = bytes(range(1, 33)), bytes(range(33, 65))
+
+
+def update_manifest(**over):
+    x = base64.urlsafe_b64encode(ed25519.public_key(RELEASE_SEED)).rstrip(b"=").decode()
+    data = {"format": 1, "manifest_version": 1, "issued": 1762646400,
+            "keys": [{"id": "pluma-1", "alg": "Ed25519", "x": x}],
+            "channels": {"stable": [["pluma-1"]]}, "revoked": []}
+    data.update(over)
+    return json.dumps(data, separators=(",", ":")).encode()
+
+
+def update_keys(manifest=None, seed=ROOT_SEED):
+    manifest = manifest or update_manifest()
+    return (ed25519.public_pem(ed25519.public_key(seed)).encode(), manifest, ed25519.sign(seed, manifest))
+
+
+UPDATE_KEYS = update_keys()
 
 
 def fingerprint(pem):
@@ -108,7 +138,7 @@ def config(**over):
     app = patch.load_env(ROOT / "config/app.env")
     app.update(over.pop("app", {}))
     args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY,
-                update_key_pem=SHORT_KEY, build=57)
+                update_keys=UPDATE_KEYS, build=57)
     args.update(over)
     return patch.Config(upstream, app, **args)
 
@@ -116,7 +146,7 @@ def config(**over):
 class ConfigTest(unittest.TestCase):
     def test_repository_config(self):
         c = config(server_ipv6="2001:db8::1")
-        self.assertEqual((c.app_name, c.app_id, c.api_id, c.layer), ("Pluma", "chat.pluma.desktop", 10003, 228))
+        self.assertEqual((c.app_name, c.app_id, c.api_id, c.layer), ("Pluma", "chat.pluma.desktop", 10003, 233))
         self.assertEqual(c.ipv6, "2001:0db8:0000:0000:0000:0000:0000:0001")
         self.assertEqual(c.aumid, "Pluma.PlumaDesktop")
         self.assertEqual(len({c.app_guid, c.instance_guid, c.toast_clsid}), 3)
@@ -161,8 +191,19 @@ class ConfigTest(unittest.TestCase):
             {"app": {"PLUMA_INSTANCE_GUID": "87a94ab0-e370-4cde-98d3-acc110c5967d"}},
             {"app": {"PLUMA_TOAST_ACTIVATOR_CLSID": "not-a-guid"}},
             {"app": {"PLUMA_TOAST_ACTIVATOR_CLSID": "BB4EA67A-F90A-4B50-B202-49660CE32557"}},
-            {"update_key_pem": OTHER_KEY},
-            {"update_key_pem": UPDATE_KEY},
+            {"update_keys": (b"not a key",) + UPDATE_KEYS[1:]},
+            {"update_keys": (TELEGRAM_UPDATE_ROOT.encode(),) + UPDATE_KEYS[1:]},
+            {"update_keys": UPDATE_KEYS[:2] + (bytes(64),)},
+            {"update_keys": update_keys(b"not json")},
+            {"update_keys": update_keys(update_manifest(format=2))},
+            {"update_keys": update_keys(update_manifest(channels={"beta": [["pluma-1"]]}))},
+            {"update_keys": update_keys(update_manifest(channels={"stable": [["nobody"]]}))},
+            {"update_keys": update_keys(update_manifest(channels={"stable": [["pluma-1"]], "beta": [["pluma-1"]]}))},
+            {"update_keys": update_keys(update_manifest(revoked=["pluma-1"]))},
+            {"update_keys": update_keys(update_manifest(keys=[{"id": "pluma-1", "alg": "ES256", "crv": "P-256",
+                                                                "x": "A" * 43, "y": "A" * 43}]))},
+            {"update_keys": update_keys(update_manifest(keys=[{"id": "pluma-1", "alg": "Ed25519",
+                                                                "x": "C8sDZ7G_3-v5DPKBjqcU6hCNFJjC1z8ggFcCyoVLtC0"}]))},
             {"app": {"PLUMA_UPDATE_PREFIX": "http://pluma.chat/dl/desktop"}},
             {"app": {"PLUMA_UPDATE_PREFIX": "https://pluma.chat/dl/desktop/"}},
             {"app": {"PLUMA_UPDATE_PREFIX": "https://td.telegram.org"}},
@@ -398,24 +439,24 @@ BIRTHDAY = patch.BIRTHDAY_CONTACTS
 # pinned upstream, replacement): every one must stop the patch with an error
 # that names the file.
 DAMAGE = (
-    (patch.API_TL, "// LAYER 228\n", "// LAYER 229\n"),
-    (patch.VERSION_H, 'AppVersionStr = "7.0.9";', 'AppVersionStr = "7.0.10";'),
-    (patch.QT_VERSION_PY, "os.environ['QT'] = '6.11.1'", "os.environ['QT'] = '6.12.0'"),
+    (patch.API_TL, "// LAYER 233\n", "// LAYER 234\n"),
+    (patch.VERSION_H, 'AppVersionStr = "7.4.1";', 'AppVersionStr = "7.4.2";'),
+    (patch.QT_VERSION_PY, "os.environ['QT'] = '6.11.2'", "os.environ['QT'] = '6.12.0'"),
     (patch.BUILDING_WIN, "**10.0.26100.0** SDK version", "**10.0.26200.0** SDK version"),
     (patch.BUILDING_WIN, "-vcvars_ver=14.44", "-vcvars_ver=14.50"),
     (patch.LINUX_WORKFLOW, "/download/v4.13.6/ccache-4.13.6-", "/download/v4.14.0/ccache-4.14.0-"),
-    (patch.DOCKER_ENV + "/build.sh", 'cmake --build ../out --config "${CONFIG:-Release}"', "cmake --build ../out --config Release"),
+    (patch.DOCKER_ENV + "/build.sh", 'cmake --build ../out --config "${CONFIG:-Release}" ${KEEP_GOING:+-- -k 0}', "cmake --build ../out --config Release"),
+    (patch.DOCKER_ENV + "/build.sh", './configure.sh "$@"', './configure.sh'),
     (patch.DOCKER_ENV + "/gen_dockerfile.py", 'LTO=checkEnv("LTO", True),', 'LTO=checkEnv("ENABLE_LTO", True),'),
     (patch.PREPARE, "        elif arg == 'silent':\n", "        elif arg == 'quiet':\n"),
-    # The MSYS2 backport: a changed package list, and an upstream that has
-    # the fix already (the backport must go then).
-    (patch.PREPARE, "        mingw-w64-x86_64-gperf ^\n", "        mingw-w64-x86_64-gperf-git ^\n"),
-    (patch.PREPARE, "'ThirdParty\\\\msys64\\\\mingw64\\\\bin'", "'ThirdParty\\\\msys64\\\\ucrt64\\\\bin'"),
+    # Back to packages MSYS2 has removed.
+    (patch.PREPARE, "        mingw-w64-ucrt-x86_64-gperf ^\n", "        mingw-w64-x86_64-gperf ^\n"),
+    (patch.PREPARE, "optionsList = [\n    'qt5',\n", "optionsList = [\n"),
     (patch.PREPARE, "    gyp dump_syms.gyp --format=msvs\n", "    gyp dump_syms.gyp --format=msvs --depth=.\n"),
     # The macOS release variants: a Qt stage with another scope in between
     # (as a later upstream has), a tg_owt that joins its Debug builds otherwise.
-    (patch.PREPARE, "    CONFIGURATIONS=-debug-and-release\nmac:\n",
-     "    CONFIGURATIONS=-debug-and-release\nmac_asserts:\n    ASSERTS=-force-asserts\nmac:\n"),
+    (patch.PREPARE, "    CONFIGURATIONS=-debug-and-release\nmac_asserts:\n",
+     "    CONFIGURATIONS=-debug-and-release\nmac_qt:\n    QT_EXTRA=1\nmac_asserts:\n"),
     (patch.PREPARE, "    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a\n",
      "    lipo -create Debug.*/libtg_owt.a -output Debug/libtg_owt.a\n"),
     (patch.PREPARE, "stage('python', \"\"\"\n",
@@ -431,18 +472,30 @@ DAMAGE = (
     (INSTANCE, "\t\t_domainResolver = std::make_unique<DomainResolver>([=](\n", "\t\t_domainResolver.reset(new DomainResolver([=](\n"),
     (patch.SPECIAL_CONFIG, 'constexpr auto kPublicKey = "', 'constexpr auto kSpecialConfigKey = "'),
     (patch.PROXY_DATA, "return (type == Type::Socks5 || type == Type::Mtproto)", "return (type == Type::Mtproto)"),
+    # Updates: the keys, the file names of the feed, the universal package
+    # for armac, the version compared, the empty MTProto checker.
+    (patch.UPDATE_ROOT, "MCowBQYDK2VwAyEARgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR0=", "MCowBQYDK2VwAyEARgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR1="),
+    (patch.UPDATE_MANIFEST, '"manifest_version":2', '"manifest_version":3'),
+    (patch.UPDATE_CHECKER, "\t\t\tstd::make_unique<MtpChecker>(\n", "\t\t\tstd::make_unique<MtpUpdateChecker>(\n"),
+    (patch.UPDATE_CHECKER, '"^td-update-(win|mac|linux)-(x86|x64|arm)-\\\\d+"', '"^td-update-(win|mac|linux|freebsd)-(x86|x64|arm)-\\\\d+"'),
+    (patch.UPDATE_CHECKER, "\t\t: uint64(AppVersion);\n", "\t\t: uint64(CurrentBuild);\n"),
+    (patch.UPDATE_CHECKER, "\t\t} else if (versionNum <= AppVersion) {\n", "\t\t} else if (versionNum < AppVersion) {\n"),
+    (patch.UPDATE_CHANNEL, "\t\tquint32(AppVersion),\n", "\t\tquint32(AppVersion + 1),\n"),
+    (patch.UPDATE_UNPACK, "\t\t|| sourceSize != compressedSize\n", ""),
+    (patch.UPDATE_VERIFY, '\t} else if (key == "armac") {\n\t\treturn Target{ Os::Mac, Arch::Arm };\n', '\t} else if (key == "armac") {\n\t\treturn Target{ Os::Mac, Arch::X86 };\n'),
     (patch.CMAKE_OPTIONS, "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)\n",
      "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE=1)\n"),
     (patch.APPLICATION, "\t\tInvokeQueued(this, [] { RegisterUrlScheme(); });\n", "\t\tInvokeQueued(this, [] { RegisterUrlSchemes(); });\n"),
     (patch.APPLICATION, '\t\t.protocol = u"tg"_q,\n', '\t\t.protocol = u"telegram"_q,\n'),
     (patch.PLIST, "\t\t\t\t<string>tonsite</string>\n", ""),
+    (patch.PLIST, "\t\t\t\t<string>ton</string>\n", ""),
     (patch.VERSION_H, '"Telegram Desktop"_cs', '"Telegram"_cs'),
     (patch.CONFIG_H, "87A94AB0-E370-4cde-98D3-ACC110C5967D", "87A94AB0-E370-4CDE-98D3-ACC110C5967D"),
     (patch.LAUNCHER, 'setApplicationName(u"TelegramDesktop"_q)', 'setApplicationName(u"Telegram"_q)'),
     (LINUX, '\t\treturn u"org.telegram.desktop"_q;\n', '\t\treturn u"org.telegram.Desktop"_q;\n'),
     (LINUX, 'u"/.TelegramDesktop/"_q', 'u"/.telegram-desktop/"_q'),
     (patch.DESKTOP_FILE, "Name=Telegram\n", "Name=Telegram Desktop\n"),
-    (patch.DESKTOP_FILE, "MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;\n", "MimeType=x-scheme-handler/tg;\n"),
+    (patch.DESKTOP_FILE, "MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;x-scheme-handler/ton;\n", "MimeType=x-scheme-handler/tg;\n"),
     (WIN_APP_ID, 'L"Telegram.TelegramDesktop";', 'L"Telegram.Desktop";'),
     (WIN_APP_ID, '\tQString path = systemShortcutPath() + u"Telegram.lnk"_q;\n', '\tQString path = systemShortcutPath() + u"Telegram Desktop.lnk"_q;\n'),
     (patch.WIN_TOAST, '("F11932D3-6110-4BBC-9B02-B2EC07A1BD19")', '("F11932D3-6110-4BBC-9B02-B2EC07A1BD20")'),
@@ -466,7 +519,7 @@ DAMAGE = (
     (patch.LOCAL_URL_HANDLERS, r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.+)$"_q',
      r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.*)$"_q'),
     (patch.CLICK_HANDLER_TYPES, r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",', r'"(^|\\.)(telegram\\.(me|dog|org)|t\\.me)$",'),
-    (patch.CLICK_HANDLER_TYPES, r'"|telesco\\.pe"' '\n', r'"|telesco\\.pe"' '\n\t\t' r'"|tdesktop\\.com"' '\n'),
+    (patch.CLICK_HANDLER_TYPES, '\t\tu"fragment.com"_q,\n', '\t\tu"tdesktop.com"_q,\n'),
     (S + "/boxes/connection_box.cpp", "(?:www\\.)?(?:t\\.me|telegram\\.me|telegram\\.dog)", "(?:www\\.)?(?:t\\.me|telegram\\.me)"),
     (S + "/boxes/peers/edit_peer_invite_links.cpp", '\t\tu"t.me/joinchat/"_q,\n', '\t\tu"telegram.me/joinchat/"_q,\n'),
     (S + "/mtproto/mtproto_config.h", 'internalLinksDomain = u"https://t.me/"_q;', 'internalLinksDomain = u"https://telegram.me/"_q;'),
@@ -497,11 +550,6 @@ DAMAGE = (
     (BIRTHDAY, "\t\t\t\tUi::ChooseStarGiftRecipient(controller);\n", "\t\t\t\tUi::ChooseStarGiftRecipient(controller, users);\n"),
     (BIRTHDAY, "? tr::lng_dialogs_suggestions_birthday_contact_about(", "? tr::lng_dialogs_suggestions_birthday_gift_about("),
     (BIRTHDAY, "tr::lng_dialogs_suggestions_birthday_contact_dismiss(", "tr::lng_dialogs_suggestions_birthday_contacts_dismiss("),
-    # The hand-over of a suggestion that loads first.
-    (patch.TOP_BAR_SUGGESTION, "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n",
-     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion, true);\n"),
-    (patch.TOP_BAR_SUGGESTION, "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n",
-     "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n\t\t\t\t\t\t\tToggle{ true, anim::type::slow });\n"),
     # The gift of a chat and of a profile on a contact's birthday.
     (patch.HISTORY_WIDGET, "\t\t&& !user->isBot()\n\t\t&& ((disallowed & Type::SendHide)\n",
      "\t\t&& !user->isBot()\n\t\t&& !user->isInaccessible()\n\t\t&& ((disallowed & Type::SendHide)\n"),
@@ -559,7 +607,8 @@ def prepare_scopes(text, part):
 
     start = text.index(part)
     _, scope = scopes(text[text.rindex("stage(", 0, start):start].split("\n")[1:], "common")
-    return scopes(part.split("\n"), scope)[0]
+    # mac_asserts is a further condition on macOS, not another platform.
+    return {s[:-len("_asserts")] if s.endswith("_asserts") else s for s in scopes(part.split("\n"), scope)[0]}
 
 
 def upstream_files():
@@ -651,24 +700,61 @@ class UpstreamTest(unittest.TestCase):
         tree, c = self.run_patch()
         version = tree.read(patch.VERSION_H)
         # AppVersion stays upstream's; the updater compares the build number.
-        self.assertIn("constexpr auto AppVersion = 7000009;\n", version)
+        self.assertIn("constexpr auto AppVersion = 7004001;\n", version)
         self.assertIn("constexpr auto PlumaBuild = 57; // pluma: the build number, which the updater compares\n", version)
-        self.assertEqual(c.release_version, "7.0.9.00057")
+        self.assertEqual(c.release_version, "7.4.1.00057")
         self.assertIn('\treturn AutoupdatePrefix("https://pluma.chat/dl/desktop"); // pluma: the Pluma server\n',
                       tree.read(patch.LOCAL_STORAGE))
-        keys = patch.embedded_keys(tree.read(patch.CONFIG_H))
-        self.assertEqual([k[:2] for k in keys], [patch.parse_pkcs1_public_key(SHORT_KEY)] * 2)
+        self.assertEqual(tree.read_bytes(patch.UPDATE_ROOT), UPDATE_KEYS[0])
+        self.assertEqual(tree.read_bytes(patch.UPDATE_MANIFEST), UPDATE_KEYS[1])
+        self.assertEqual(tree.read_bytes(patch.UPDATE_MANIFEST_SIG), UPDATE_KEYS[2])
         checker = tree.read(patch.UPDATE_CHECKER)
         self.assertNotIn("MtpChecker>(", checker)
         self.assertIn("\t\tstartImplementation(&_mtpImplementation, nullptr);\n", checker)
         self.assertNotIn("<= AppVersion", checker)
-        self.assertEqual(checker.count("PlumaBuild"), 3)
+        self.assertNotIn(": uint64(AppVersion);", checker)
+        self.assertEqual(checker.count("PlumaBuild"), 2)
+        self.assertIn('"^(tx64upd|tmacupd|tlinuxupd)\\\\d+$|"', checker)
         self.assertIn('u"tupdates/temp/Pluma.app/Contents/Frameworks/Updater"_q', checker)
+        channel = tree.read(patch.UPDATE_CHANNEL)
+        self.assertIn("quint32(PlumaBuild), // pluma", channel)
+        self.assertNotIn("quint32(AppVersion)", channel)
+        self.assertIn('key == "armac") {\n\t\t// pluma: one universal package serves Intel and Apple processors.\n\t\treturn Target{ Os::Mac, Arch::X64 };\n',
+                      tree.read(patch.UPDATE_VERIFY))
         self.assertIn('NSString *appName = @"Pluma.app";', tree.read(patch.UPDATER_OSX))
         win = tree.read(patch.UPDATER_WIN)
         self.assertIn("Uninstall\\\\{BB4EA67A-F90A-4B50-B202-49660CE32557}_is1", win)
         self.assertIn('const WCHAR *appURL = L"https://pluma.chat";', win)
         self.assertNotIn('L"Telegram Desktop"', win)
+        self.assertIn('L"Failed to update Pluma :(', win)
+
+    def test_update_keys_are_verified(self):
+        """verify() looks at the keys on their own: Telegram's left in the
+        tree, a manifest edited after the patch."""
+        for rel, data in ((patch.UPDATE_ROOT, self.files[patch.UPDATE_ROOT]),
+                          (patch.UPDATE_MANIFEST, self.files[patch.UPDATE_MANIFEST]),
+                          (patch.UPDATE_MANIFEST_SIG, bytes(64))):
+            with self.subTest(rel=rel):
+                self.tearDown()
+                tree, c = self.run_patch()
+                tree.write_bytes(rel, data)
+                with self.assertRaisesRegex(patch.PatchError, "update"):
+                    patch.verify(tree, c)
+
+    def test_wallet_is_off(self):
+        tree, _ = self.run_patch()
+        self.assertIn('return get<bool>(u"wallet_available"_q, false);', tree.read(S + "/main/main_app_config.cpp"))
+
+    def test_new_hosts_stop_the_patch(self):
+        for literal in ('u"https://toncenter.com"_q', 'u"https://telegram.org/x"_q', 'u"https://tonviewer.com/x"_q',
+                        'u"https://x.fragment.com/"_q'):
+            with self.subTest(literal=literal):
+                self.tearDown()
+                tree, c = self.run_patch()
+                rel = S + "/core/sandbox.cpp"
+                tree.write(rel, f'const auto kUrl = {literal};\n' + tree.read(rel))
+                with self.assertRaisesRegex(patch.PatchError, "HOSTS_KEPT"):
+                    patch.verify(tree, c)
 
     def test_build_scripts_keep_the_updater(self):
         # The upstream's option defaults to ON without a special target
@@ -717,9 +803,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("xcodebuild -project dump_syms.xcodeproj", prepare)
         # macOS: Qt and tg_owt in their release variants alone; Windows
         # builds both, Qt with debug information, as before.
-        self.assertIn('release:\n    CONFIGURATIONS=-release\nmac:\n    rm -rf "$USED_PREFIX/Qt-$QT"\n'
+        self.assertIn('release:\n    CONFIGURATIONS=-release\nmac_asserts:\n    ASSERTS=-force-asserts\nmac:\n    rm -rf "$USED_PREFIX/Qt-$QT"\n'
                       '    ./configure -prefix "$USED_PREFIX/Qt-$QT" \\\n        $CONFIGURATIONS \\\n'
-                      '        -opensource \\\n', prepare)
+                      '        $ASSERTS \\\n        -opensource \\\n', prepare)
         self.assertNotIn("Debug.x86_64/libtg_owt.a", prepare)
         self.assertIn("lipo -create Release.arm64/libtg_owt.a Release.x86_64/libtg_owt.a", prepare)
         self.assertIn("    SET CONFIGURATIONS=-debug-and-release\n", prepare)
@@ -894,17 +980,10 @@ class UpstreamTest(unittest.TestCase):
                       tree.read(patch.HISTORY_WIDGET))
         self.assertIn("\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n",
                       tree.read(patch.PROFILE_ACTIONS))
-        # The banner shows although it loads the birthdays first: its wrap is
-        # handed to the chat list once, by done or by the merge.
-        top = tree.read(patch.TOP_BAR_SUGGESTION)
-        for s in ("\t\t\tbool processing = false;\n",
-                  "\t\t\t\t\t\tconst auto created = !state->wrap;\n\t\t\t\t\t\tif (!state->wrap) {\n",
-                  "\t\t\t\t\t\tif (created && !state->processing) {\n"
-                  "\t\t\t\t\t\t\tconsumer.put_next_copy(state->wrap.get());\n\t\t\t\t\t\t}\n",
-                  "\t\t\tstate->processing = true;\n\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n"
-                  "\t\t\tstate->processing = false;\n"):
-            self.assertIn(s, top)
-        self.assertEqual(top.count("consumer.put_next_copy(state->wrap.get());"), 2)
+        # The banner shows although it loads the birthdays first: upstream
+        # hands a wrap made late over itself since 7.4 (deliver() of
+        # TopBarSuggestionValue); the patch no longer does.
+        self.assertIn("\t\t\t\t\t\tdeliver();\n", tree.read(S + "/dialogs/dialogs_top_bar_suggestion.cpp"))
 
     def test_premium_stickers(self):
         """Premium stickers work without Premium: the function stands at the
@@ -1038,15 +1117,22 @@ class UpstreamTest(unittest.TestCase):
         types = tree.read(patch.CLICK_HANDLER_TYPES)
         start = types.index("bool IsTelegramShortLinkHost(")
         short = re.compile(literals(types[start:types.index("url.host()", start)]), re.I)
-        start = types.index("bool UrlRequiresConfirmation(")
-        trusted = re.compile(literals(types[start:types.index("url.host()", start)]), re.I)
+        start = types.index("DefaultWhitelistedDomains() {")
+        domains = re.findall(r'u"([a-z.]+)"_q', types[start:types.index("}", start)])
+        self.assertIn("pluma.chat", domains)
+
+        def trusted(host):
+            # HostInDomains: the domain itself or a name under it.
+            host = host.lower()
+            return any(host == d or host.endswith("." + d) for d in domains)
+
         for host, is_short, is_trusted in (("pluma.chat", True, True), ("PLUMA.chat", True, True),
-                                           ("web.pluma.chat", False, False), ("evilpluma.chat", False, False),
+                                           ("web.pluma.chat", False, True), ("evilpluma.chat", False, False),
                                            ("pluma.chat.example.com", False, False), ("t.me", True, True),
                                            ("user.t.me", True, True), ("telegram.org", False, True),
                                            ("example.com", False, False)):
             self.assertEqual(bool(short.search(host)), is_short, host)
-            self.assertEqual(bool(trusted.search(host)), is_trusted, host)
+            self.assertEqual(trusted(host), is_trusted, host)
 
         box = tree.read(S + "/boxes/connection_box.cpp")
         raw = box[box.index('R"((?:https?:'):]

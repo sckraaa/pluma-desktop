@@ -28,6 +28,7 @@ import base64
 import hashlib
 import io
 import ipaddress
+import json
 import pathlib
 import re
 import struct
@@ -35,6 +36,11 @@ import sys
 import uuid
 import zipfile
 import zlib
+
+# ed25519.py lies next to this script; the build scripts run it with -I,
+# which leaves the script's folder out of the path.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import ed25519  # noqa: E402
 
 # Telegram's own server keys (production, test) with the fingerprints the
 # server announces for them, and the key Telegram signs its "special config"
@@ -46,9 +52,8 @@ TELEGRAM_KEY_LINES = (
     "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCF",
 )
 
-# Telegram's 1024-bit keys of its update packages. Pluma's key replaces them
-# in config.h (task 054); they may stay only in Packer, which Pluma does not
-# build.
+# Telegram's former 1024-bit update keys, which may stay only in Packer, which
+# Pluma does not build.
 UPDATE_KEY_LINES = (
     "MIGJAoGBAMA4ViQrjkPZ9xj0lrer3r23JvxOnrtE8nI69XLGSr+sRERz9YnUptnU",
     "MIGJAoGBALWu9GGs0HED7KG7BM73CFZ6o0xufKBRQsdnq3lwA8nFQEvmdu+g/I1j",
@@ -92,6 +97,12 @@ CMAKE_OPTIONS = "Telegram/cmake/telegram_options.cmake"
 PLIST = "Telegram/Telegram.plist"
 ENTITLEMENTS = "Telegram/Telegram/Telegram.entitlements"
 DESKTOP_FILE = "lib/xdg/org.telegram.desktop.desktop"
+# Telegram's root key and manifest of its update packages (update system v2),
+# which Pluma's take the place of.
+UPDATE_RESOURCES = "Telegram/Resources/update"
+UPDATE_ROOT = UPDATE_RESOURCES + "/root-public.pem"
+UPDATE_MANIFEST = UPDATE_RESOURCES + "/manifest.min.json"
+UPDATE_MANIFEST_SIG = UPDATE_RESOURCES + "/manifest.sig"
 QT_VERSION_PY = "Telegram/build/qt_version.py"
 PREPARE = "Telegram/build/prepare/prepare.py"
 DOCKER_ENV = "Telegram/build/docker/centos_env"
@@ -102,8 +113,6 @@ BIRTHDAY_CONTACTS = SOURCES + "/dialogs/suggestions/suggestion_birthday_contacts
 # The gift button of a chat and the birthday row of a profile.
 HISTORY_WIDGET = SOURCES + "/history/history_widget.cpp"
 PROFILE_ACTIONS = SOURCES + "/info/profile/info_profile_actions.cpp"
-# The suggestions above the chat list, the birthday banner among them.
-TOP_BAR_SUGGESTION = SOURCES + "/dialogs/dialogs_top_bar_suggestion.cpp"
 # The tags of Saved Messages: the session, and where they check Premium.
 MAIN_SESSION_H = SOURCES + "/main/main_session.h"
 MAIN_SESSION = SOURCES + "/main/main_session.cpp"
@@ -232,7 +241,7 @@ MARKER = "pluma-patch.txt"
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse). verify() scans all the sources.
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTITLEMENTS, WIN_RC, DESKTOP_FILE,
-                  QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
+                  UPDATE_RESOURCES, QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
                   LANG, NIGHT_THEME, DAY_BLUE_THEME, NIGHT_GREEN_THEME, DAY_BASE_THEME, NIGHT_BASE_THEME, EXPORT_CSS,
                   SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
@@ -240,6 +249,10 @@ SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.
                    ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"))
 
 SOURCE_SUFFIXES = (".cpp", ".h", ".mm", ".m", ".c", ".cc", ".hpp")
+# What the scans of verify() leave out: upstream's own test harness and unit
+# tests, compiled out of a Release build (TDESKTOP_RELEASE_TEST_HARNESS is
+# off, test/test_agent.cpp), with sample links and names of their own.
+TEST_SOURCES = (SOURCES + "/test/", SOURCES + "/gram/tests/", SOURCES + "/tests/")
 
 
 class PatchError(Exception):
@@ -416,7 +429,9 @@ class Tree:
             raise PatchError(f"{SOURCES}: missing; not a full checkout of the sources")
         for p in sorted(base.rglob("*")):
             if p.suffix in SOURCE_SUFFIXES and p.is_file():
-                yield p.relative_to(self.root).as_posix()
+                rel = p.relative_to(self.root).as_posix()
+                if not rel.startswith(TEST_SOURCES):
+                    yield rel
 
 
 # --- configuration -----------------------------------------------------------
@@ -436,7 +451,7 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, update_key_pem, build=0):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, update_keys, build=0):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -490,18 +505,15 @@ class Config:
             raise PatchError("PLUMA_API_HASH must be 32 lowercase hex digits")
 
         # Updates (task 054): the prefix the updater asks before the first
-        # config, the site behind it, Pluma's key, the build number.
+        # config, the site behind it, Pluma's root key and manifest, the
+        # build number.
         self.update_prefix = need(app, "PLUMA_UPDATE_PREFIX")
         m = re.fullmatch(r"(https://[a-z0-9.-]+)(/[A-Za-z0-9/_-]*[A-Za-z0-9_-])", self.update_prefix)
         if not m or "telegram" in self.update_prefix:
             raise PatchError(f"PLUMA_UPDATE_PREFIX {self.update_prefix!r}: an https:// address of Pluma's, without / at the end")
         self.site = m.group(1)
-        self.update_n, self.update_e = parse_pkcs1_public_key(update_key_pem)
-        if len(self.update_n) * 8 != 1024:
-            raise PatchError(f"update key: {len(self.update_n) * 8} bits; the updater takes 1024 (RSA_size 128)")
-        self.update_key_pem = canonical_pem(self.update_n, self.update_e)
-        if any(line in UPDATE_KEY_LINES for line in self.update_key_pem):
-            raise PatchError("update key: this is Telegram's key")
+        self.update_root, self.update_manifest, self.update_manifest_sig = update_keys
+        check_update_keys(self.update_root, self.update_manifest, self.update_manifest_sig)
         if not isinstance(build, int) or not 0 <= build < 100000:
             raise PatchError(f"build number {build!r}: 0 to 99999")
         self.build = build
@@ -543,43 +555,78 @@ class Config:
 
 
 # --- updates -----------------------------------------------------------------
-# Task 054 and ADR 0035 of the server repository. The updater of tdesktop is
-# on, with Pluma's own packages: the app asks <prefix>/current4 of the Pluma
-# server (the prefix comes from help.getConfig, and before the first config
-# from the default here), downloads the package of its system, checks its
-# signature with Pluma's 1024-bit key (the format of tdesktop: RSA, SHA-1;
-# the owner's decision) and lets the Updater replace the files.
-# - The default prefix (localstorage.cpp 557) is the Pluma server's, not
+# Task 054, ADR 0035 of the server repository and task 074 (the update system
+# v2 of tdesktop 7.2 and later). The updater of tdesktop is on, with Pluma's own
+# packages: the app asks <prefix>/current4 of the Pluma server (the prefix comes
+# from help.getConfig, and before the first config from the default here),
+# downloads the package of its system and checks it as upstream does:
+# VerifyUpdate of core/update_verify.cpp reads the "TDUP" envelope and accepts
+# it only under Pluma's root key and the manifest that key signed (Ed25519).
+# - Pluma's root public key, manifest and its signature (config/update,
+#   ci/update-key.sh) take the place of Telegram's in Telegram/Resources/update:
+#   Telegram's keys verify nothing any more.
+# - The default prefix (localstorage.cpp 558) is the Pluma server's, not
 #   td.telegram.org.
-# - Pluma's public key takes both slots of config.h (UpdatesPublicKey,
-#   UpdatesPublicBetaKey): Telegram's keys verify nothing any more.
-# - No check over MTProto (update_checker.cpp 1509-1511): it reads Telegram's
-#   channel tdhbcfeed, which the Pluma server does not have.
+# - No check over MTProto (update_checker.cpp 1768-1772): it reads Telegram's
+#   channel tdhbcfeed, which the Pluma server does not have. The empty checker
+#   fails at once; LookupCanaryPrivateSession, used only there, stays for it.
+# - The packages keep the names of the Pluma server's feed (tx64upd<N>,
+#   tmacupd<N>, tlinuxupd<N>): the releases service and every installed app know
+#   them, and only FindUpdateFile (update_checker.cpp 351-357) knows upstream's
+#   td-update-<os>-<arch>-<N>.
+# - The macOS package is one universal app, as before: it is built for mac, and
+#   armac takes it too (update_verify.cpp, TargetFromPlatformKey).
+# - The Windows package is raw LZMA from liblzma (ci/pack_update.py), which ends
+#   with an end marker the SDK's LzmaUncompress leaves unread: the payload is
+#   authenticated before this, and the check of the bytes read goes
+#   (update_unpack.cpp 155-163).
 # - The macOS package and the Updater name the bundle Pluma.app
-#   (update_checker.cpp 1804, updater_osx.m 11), the name ci/package.sh
+#   (update_checker.cpp 2129, updater_osx.m 11), the name ci/package.sh
 #   gives it; the binary inside keeps upstream's name.
 # - The Windows Updater writes the uninstall entry of an installed app under
-#   Telegram's GUID with Telegram's names (updater_win.cpp 283, 310-322): next
-#   to an installed Telegram Desktop it would rewrite that entry. It gets
+#   Telegram's GUID with Telegram's names (updater_win.cpp 431-440): next to
+#   an installed Telegram Desktop it would rewrite that entry. It gets
 #   Pluma's GUID, name and site; Pluma has no installer, so the entry is not
-#   there. Its fallback folder (494) is Pluma's data folder.
+#   there. Its fallback folder (646) is Pluma's data folder.
 # - The updater compares Pluma's build number, PlumaBuild of version.h (the
 #   run number of CI), where upstream compares AppVersion: the version of a
-#   package in /current4 (update_checker.cpp 842-846), in the package
-#   (490-493) and in the downloaded update (1791-1794). AppVersion stays
-#   upstream's: tdesktop keys its local data (streamAppVersion gates of the
-#   serializers) and its settings migrations by it, and a Pluma version above
-#   a later upstream's would make the next upstream misread them. The
-#   release is 7.0.9.NNNNN, the package t*upd<N>.
+#   package in /current4 (update_checker.cpp 883), the running version of
+#   VerifyUpdate (RunningUpdateVersion, update_channel.h) and the downloaded
+#   update (update_checker.cpp 2116). AppVersion stays upstream's: tdesktop
+#   keys its local data (streamAppVersion gates of the serializers) and its
+#   settings migrations by it, and a Pluma version above a later upstream's
+#   would make the next upstream misread them. The release is 7.4.1.NNNNN, the
+#   package's version is <N> << 32, its inner version <N>.
 UPDATE_CHECKER = SOURCES + "/core/update_checker.cpp"
+UPDATE_CHANNEL = SOURCES + "/core/update_channel.h"
+UPDATE_VERIFY = SOURCES + "/core/update_verify.cpp"
+UPDATE_UNPACK = SOURCES + "/core/update_unpack.cpp"
 LOCAL_STORAGE = SOURCES + "/storage/localstorage.cpp"
 UPDATER_OSX = SOURCES + "/_other/updater_osx.m"
 UPDATER_WIN = SOURCES + "/_other/updater_win.cpp"
 TELEGRAM_APP_GUID = "53F49750-6209-4FBF-9CA8-7A333C87D1ED"
+# Telegram's files of Telegram/Resources/update, with the SHA-256 of the
+# pinned upstream's: the patch replaces them only while they are upstream's.
+UPDATE_RESOURCE_FILES = (
+    (UPDATE_ROOT, "root-public.pem", "fc60e0100b44343a13220467544abfff3659b93176fd65d9b9c26557898fe600"),
+    (UPDATE_MANIFEST, "manifest.min.json", "5153035ed1e4f9a5cb288c241cd52a1c700510a41e39ade614cf815bbf784cf2"),
+    (UPDATE_MANIFEST_SIG, "manifest.sig", "e158bf81e5cadd52e098753a41274ede5d661378a4b2519b8d39b0dfcd82bb0f"),
+)
+# Telegram's root and manifest keys of the pinned upstream, as the manifest
+# writes them (base64url): none may sign for Pluma.
+TELEGRAM_UPDATE_KEYS = (
+    "RgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR0",
+    "C8sDZ7G_3-v5DPKBjqcU6hCNFJjC1z8ggFcCyoVLtC0",
+    "STnSOvgTXqkfM-TelsKMG6UVPHIuoB23vf5ckVKu-JU",
+    "Nn5D71VdtoaXuCAdLBixdeMbLpy8ApzZMfp8iMtqE9Q",
+    "gsX8hFpkokAvvHqFhZ65D2cv0zLfDVpS60961hho6PM",
+)
 UPDATES_MTP_OLD = """\
 		startImplementation(
 			&_mtpImplementation,
-			std::make_unique<MtpChecker>(_session, _testing));
+			std::make_unique<MtpChecker>(
+				LookupCanaryPrivateSession(_session),
+				_testing));
 """
 UPDATES_MTP_NEW = """\
 		// pluma: no check over MTProto, which reads Telegram's channel
@@ -587,11 +634,26 @@ UPDATES_MTP_NEW = """\
 		// failure and timeout handling stays upstream's.
 		startImplementation(&_mtpImplementation, nullptr);
 """
-PUBLIC_KEY_SLOTS = ("UpdatesPublicKey", "UpdatesPublicBetaKey")
+UPDATES_LOOKUP_OLD = "[[nodiscard]] base::weak_ptr<Main::Session> LookupCanaryPrivateSession(\n"
+UPDATES_LOOKUP_NEW = "[[maybe_unused]] [[nodiscard]] base::weak_ptr<Main::Session> LookupCanaryPrivateSession(\n"
+UPDATE_FILE_OLD = '\t\t\t"^td-update-(win|mac|linux)-(x86|x64|arm)-\\\\d+"\n'
+UPDATE_FILE_NEW = ('\t\t\t// pluma: the packages keep the names of the Pluma server\'s feed.\n'
+                   '\t\t\t"^(tx64upd|tmacupd|tlinuxupd)\\\\d+$|"\n'
+                   '\t\t\t"^td-update-(win|mac|linux)-(x86|x64|arm)-\\\\d+"\n')
+UPDATE_TARGET_OLD = '\t} else if (key == "armac") {\n\t\treturn Target{ Os::Mac, Arch::Arm };\n'
+UPDATE_TARGET_NEW = ('\t} else if (key == "armac") {\n'
+                     '\t\t// pluma: one universal package serves Intel and Apple processors.\n'
+                     '\t\treturn Target{ Os::Mac, Arch::X64 };\n')
+UPDATE_LZMA_OLD = ("\tif (status != SZ_OK\n"
+                   "\t\t|| sourceSize != compressedSize\n"
+                   "\t\t|| resultSize != size_t(originalSize)) {\n")
+UPDATE_LZMA_NEW = ("\t// pluma: the package was verified before this; the end marker of\n"
+                   "\t// ci/pack_update.py's LZMA stays unread.\n"
+                   "\tif (status != SZ_OK || resultSize != size_t(originalSize)) {\n")
+UPDATE_RUNNING_OLD = "\t\tquint32(AppVersion),\n\t\tCanaryBuildCounter);\n"
+UPDATE_RUNNING_NEW = "\t\tquint32(PlumaBuild), // pluma: Pluma's build number\n\t\tCanaryBuildCounter);\n"
 # Where the updater compares versions: upstream's text, Pluma's.
 UPDATE_VERSION_EDITS = (
-    ("\t\t} else if (int32(version) <= AppVersion) {\n",
-     "\t\t} else if (int32(version) <= PlumaBuild) { // pluma: Pluma's build number\n"),
     ("\t\t: uint64(AppVersion);\n",
      "\t\t: uint64(PlumaBuild); // pluma: Pluma's build number\n"),
     ("\t\t} else if (versionNum <= AppVersion) {\n",
@@ -599,20 +661,66 @@ UPDATE_VERSION_EDITS = (
 )
 
 
-def key_literal(lines):
-    """A PEM (its lines) as config.h writes it: a C string with line continuations."""
-    return "\\\n" + "".join(line + "\\n\\\n" for line in lines[:-1]) + lines[-1] + "\\\n"
+def read_update_keys(folder):
+    """The root public key, the manifest and its signature of a folder
+    (config/update, config/dev/update), as bytes."""
+    keys = []
+    for _, name, _ in UPDATE_RESOURCE_FILES:
+        try:
+            keys.append((pathlib.Path(folder) / name).read_bytes())
+        except OSError as e:
+            raise PatchError(f"{folder}/{name}: {e.strerror}; ci/update-key.sh makes it")
+    return tuple(keys)
+
+
+def check_update_keys(root, manifest, signature):
+    """The key material is Pluma's and of the form the updater takes
+    (ParseVerifiedManifest): the root key signs the manifest, the manifest
+    is valid and authorizes the stable channel, the only one Pluma has."""
+    try:
+        root_key = ed25519.parse_public_pem(root.decode("ascii"))
+    except (ValueError, UnicodeDecodeError) as e:
+        raise PatchError(f"update root key: {e}")
+    if base64.urlsafe_b64encode(root_key).rstrip(b"=").decode() in TELEGRAM_UPDATE_KEYS:
+        raise PatchError("update root key: this is Telegram's key")
+    if not ed25519.verify(root_key, manifest, signature):
+        raise PatchError("update manifest: the root signature does not verify")
+    try:
+        data = json.loads(manifest)
+    except ValueError:
+        raise PatchError("update manifest: not JSON")
+    if (not isinstance(data, dict) or data.get("format") != 1
+            or not isinstance(data.get("manifest_version"), int) or data["manifest_version"] < 1
+            or not isinstance(data.get("keys"), list) or not isinstance(data.get("channels"), dict)
+            or not isinstance(data.get("revoked"), list)):
+        raise PatchError("update manifest: not of the format the updater reads")
+    keys = {}
+    for key in data["keys"]:
+        if not isinstance(key, dict) or key.get("alg") != "Ed25519" or not isinstance(key.get("id"), str) or not key["id"]:
+            raise PatchError("update manifest: a key that is not Ed25519, or without an id")
+        if key.get("x") in TELEGRAM_UPDATE_KEYS:
+            raise PatchError("update manifest: Telegram's key is in it")
+        keys[key["id"]] = key
+    stable = data["channels"].get("stable")
+    if (not isinstance(stable, list) or not stable
+            or any(not isinstance(g, list) or not g or any(i not in keys or i in data["revoked"] for i in g) for g in stable)
+            or set(data["channels"]) != {"stable"}):
+        raise PatchError("update manifest: the channel stable, alone, must name keys of the manifest")
 
 
 def patch_updates(tree, c):
     tree.replace(LOCAL_STORAGE, '\treturn AutoupdatePrefix("https://td.telegram.org");\n',
                  f'\treturn AutoupdatePrefix("{c.update_prefix}"); // pluma: the Pluma server\n')
-    for slot in PUBLIC_KEY_SLOTS:
-        tree.sub(CONFIG_H, r'static const char \*' + slot + r' = "\\\n-----BEGIN RSA PUBLIC KEY-----\\n\\\n'
-                 r'(?:[A-Za-z0-9+/=]+\\n\\\n)+-----END RSA PUBLIC KEY-----\\\n";\n',
-                 f'// pluma: the key of Pluma\'s update packages.\nstatic const char *{slot} = "'
-                 + key_literal(c.update_key_pem) + '";\n')
+    # Pluma's root key and manifest in place of Telegram's.
+    for (rel, _, sha256), data in zip(UPDATE_RESOURCE_FILES, (c.update_root, c.update_manifest, c.update_manifest_sig)):
+        if hashlib.sha256(tree.read_bytes(rel)).hexdigest() != sha256:
+            raise PatchError(f"{rel}: not the pinned upstream's file; upstream changed it")
+        tree.write_bytes(rel, data)
     tree.replace(UPDATE_CHECKER, UPDATES_MTP_OLD, UPDATES_MTP_NEW)
+    tree.replace(UPDATE_CHECKER, UPDATES_LOOKUP_OLD, UPDATES_LOOKUP_NEW)
+    tree.replace(UPDATE_CHECKER, UPDATE_FILE_OLD, UPDATE_FILE_NEW)
+    tree.replace(UPDATE_VERIFY, UPDATE_TARGET_OLD, UPDATE_TARGET_NEW)
+    tree.replace(UPDATE_UNPACK, UPDATE_LZMA_OLD, UPDATE_LZMA_NEW)
     tree.replace(UPDATE_CHECKER, 'u"tupdates/temp/Telegram.app/Contents/Frameworks/Updater"_q',
                  f'u"tupdates/temp/{c.app_name}.app/Contents/Frameworks/Updater"_q')
     tree.replace(UPDATER_OSX, 'NSString *appName = @"Telegram.app";\n',
@@ -629,6 +737,7 @@ def patch_updates(tree, c):
     tree.replace(VERSION_H, f"constexpr auto AppVersion = {c.upstream_app_version};\n",
                  f"constexpr auto AppVersion = {c.upstream_app_version};\n"
                  f"constexpr auto PlumaBuild = {c.build}; // pluma: the build number, which the updater compares\n")
+    tree.replace(UPDATE_CHANNEL, UPDATE_RUNNING_OLD, UPDATE_RUNNING_NEW)
     for old, new in UPDATE_VERSION_EDITS:
         tree.replace(UPDATE_CHECKER, old, new)
 
@@ -636,12 +745,19 @@ def patch_updates(tree, c):
 def verify_updates(tree, c):
     if f'AutoupdatePrefix("{c.update_prefix}")' not in tree.read(LOCAL_STORAGE) or "td.telegram.org" in tree.read(LOCAL_STORAGE):
         raise PatchError(f"{LOCAL_STORAGE}: the default update prefix is not the Pluma server")
-    keys = embedded_keys(tree.read(CONFIG_H))
-    if len(keys) != 2 or any((n, e) != (c.update_n, c.update_e) for n, e, _ in keys):
-        raise PatchError(f"{CONFIG_H}: the update keys are not Pluma's alone")
+    files = [tree.read_bytes(rel) for rel, _, _ in UPDATE_RESOURCE_FILES]
+    if files != [c.update_root, c.update_manifest, c.update_manifest_sig]:
+        raise PatchError(f"{UPDATE_RESOURCES}: the update keys are not Pluma's")
+    check_update_keys(*files)
     checker = tree.read(UPDATE_CHECKER)
     if "std::make_unique<MtpChecker>" in checker or "Telegram.app" in checker:
         raise PatchError(f"{UPDATE_CHECKER}: the check over MTProto or the name Telegram.app is still there")
+    if UPDATE_FILE_NEW not in checker:
+        raise PatchError(f"{UPDATE_CHECKER}: the names of the Pluma server's packages are not taken")
+    if UPDATE_TARGET_NEW not in tree.read(UPDATE_VERIFY):
+        raise PatchError(f"{UPDATE_VERIFY}: armac does not take the universal package")
+    if UPDATE_LZMA_NEW not in tree.read(UPDATE_UNPACK):
+        raise PatchError(f"{UPDATE_UNPACK}: the LZMA of ci/pack_update.py is not taken")
     if '@"Telegram.app"' in tree.read(UPDATER_OSX):
         raise PatchError(f"{UPDATER_OSX}: the Updater still looks for Telegram.app")
     win = tree.read(UPDATER_WIN)
@@ -652,6 +768,9 @@ def verify_updates(tree, c):
     if (f"constexpr auto AppVersion = {c.upstream_app_version};\n" not in version
             or f"constexpr auto PlumaBuild = {c.build};" not in version):
         raise PatchError(f"{VERSION_H}: AppVersion is not upstream's or PlumaBuild is not {c.build}")
+    channel = tree.read(UPDATE_CHANNEL)
+    if channel.count(UPDATE_RUNNING_NEW) != 1 or "quint32(AppVersion)" in channel:
+        raise PatchError(f"{UPDATE_CHANNEL}: the running version is not PlumaBuild")
     for _, new in UPDATE_VERSION_EDITS:
         if checker.count(new) != 1:
             raise PatchError(f"{UPDATE_CHECKER}: the updater does not compare PlumaBuild ({new.strip()})")
@@ -691,32 +810,17 @@ CMAKE_DEFINITIONS = "target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABL
 EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY_DATA, APPLICATION, LAUNCHER,
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
           PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS,
-          TOP_BAR_SUGGESTION, MAIN_SESSION_H, MAIN_SESSION, SECTION_WIDGET, VIEW_ELEMENT, REACTIONS_SELECTOR,
-          SEARCH_TAGS, UPDATE_CHECKER, LOCAL_STORAGE, UPDATER_OSX, UPDATER_WIN, MAC_SPECIFIC_P)
+          MAIN_SESSION_H, MAIN_SESSION, SECTION_WIDGET, VIEW_ELEMENT, REACTIONS_SELECTOR,
+          SEARCH_TAGS, UPDATE_CHECKER, UPDATE_CHANNEL, UPDATE_VERIFY, UPDATE_UNPACK, LOCAL_STORAGE, UPDATER_OSX, UPDATER_WIN,
+          MAC_SPECIFIC_P)
 
 
 # Backports of upstream fixes to the build scripts, each as (file, the
 # pinned upstream's text, the fixed text), byte for byte as upstream wrote
 # them. Once upstream.env pins a release that has a fix, its edit no longer
-# matches and the patch stops: the backport goes then.
-BACKPORTS = (
-    # tdesktop b244f1b3 (2026-09-30, "Update msys2 and use ucrt versions of
-    # packages"): MSYS2 removed the msvcrt-based mingw-w64-x86_64-* packages,
-    # so prepare.py of 7.0.9 fails on Windows at its second stage.
-    (PREPARE, "    'ThirdParty\\\\msys64\\\\mingw64\\\\bin',\n", "    'ThirdParty\\\\msys64\\\\ucrt64\\\\bin',\n"),
-    (PREPARE, "releases/download/2025-08-30/msys2-base-x86_64-20250830.sfx.exe\"\n",
-     "releases/download/2026-09-27/msys2-base-x86_64-20260927.sfx.exe\"\n"),
-    (PREPARE, "        mingw-w64-x86_64-diffutils ^\n"
-              "        mingw-w64-x86_64-gperf ^\n"
-              "        mingw-w64-x86_64-nasm ^\n"
-              "        mingw-w64-x86_64-perl ^\n"
-              "        mingw-w64-x86_64-pkgconf\n",
-     "        mingw-w64-ucrt-x86_64-diffutils ^\n"
-     "        mingw-w64-ucrt-x86_64-gperf ^\n"
-     "        mingw-w64-ucrt-x86_64-nasm ^\n"
-     "        mingw-w64-ucrt-x86_64-perl ^\n"
-     "        mingw-w64-ucrt-x86_64-pkgconf\n"),
-)
+# matches and the patch stops: the backport goes then. None at the pinned
+# release: the MSYS2 packages of b244f1b3 are upstream's since 7.4.1.
+BACKPORTS = ()
 
 
 # Pluma's own edits of the build scripts, as (file, the pinned upstream's
@@ -743,19 +847,27 @@ BUILD_EDITS = (
     # files of a previous build would stay), and tg_owt without its Debug
     # builds. The Windows libraries stay as they are.
     (PREPARE, "    CONFIGURATIONS=-debug\n"
+              "    ASSERTS=\n"
               "release:\n"
               "    CONFIGURATIONS=-debug-and-release\n"
+              "mac_asserts:\n"
+              "    ASSERTS=-force-asserts\n"
               "mac:\n"
               "    ./configure -prefix \"$USED_PREFIX/Qt-$QT\" \\\n"
               "        $CONFIGURATIONS \\\n"
+              "        $ASSERTS \\\n"
               "        -force-debug-info \\\n",
      "    CONFIGURATIONS=-debug\n"
+     "    ASSERTS=\n"
      "release:\n"
      "    CONFIGURATIONS=-release\n"
+     "mac_asserts:\n"
+     "    ASSERTS=-force-asserts\n"
      "mac:\n"
      "    rm -rf \"$USED_PREFIX/Qt-$QT\"\n"
      "    ./configure -prefix \"$USED_PREFIX/Qt-$QT\" \\\n"
-     "        $CONFIGURATIONS \\\n"),
+     "        $CONFIGURATIONS \\\n"
+     "        $ASSERTS \\\n"),
     (PREPARE, "".join(f"    mkdir Debug.{arch}\n"
                       f"    cd Debug.{arch}\n"
                       "    cmake \\\n"
@@ -898,44 +1010,6 @@ BIRTHDAY_GIFTS = (
      "\t\t// pluma: the gift on the birthday only, and only while Premium can be\n"
      "\t\t// bought.\n"
      "\t\tconst auto disable = !today || !user->session().premiumCanBuy();\n"),
-)
-
-# The suggestion above the chat list that has to load first never showed.
-# TopBarSuggestionValue hands the consumer (the chat list) a new wrap only
-# when the suggestion makes it while the merge of promo, authorization and
-# Premium events runs; the birthday banner makes it after contacts.
-# getBirthdays answers, and nothing hands it over then: the banner stayed
-# hidden (seen on the dev build against a stand, 2026-10-31). The wrap made
-# later is handed over by the suggestion's done, once: the chat list takes
-# it into a unique_qptr, and handing the same wrap twice would delete it. As
-# (the pinned upstream's text, Pluma's) of TOP_BAR_SUGGESTION.
-TOP_BAR_WRAP = (
-    ("\t\t\tint activationId = 0;\n\t\t};\n",
-     "\t\t\tint activationId = 0;\n"
-     "\t\t\t// pluma: within processCurrentSuggestion of the merge below,\n"
-     "\t\t\t// which hands a new wrap to the consumer itself.\n"
-     "\t\t\tbool processing = false;\n"
-     "\t\t};\n"),
-    ("\t\t\t\t\t\tif (!state->wrap) {\n",
-     "\t\t\t\t\t\tconst auto created = !state->wrap;\n"
-     "\t\t\t\t\t\tif (!state->wrap) {\n"),
-    ("\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n"
-     "\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n"
-     "\t\t\t\t\t},\n",
-     "\t\t\t\t\t\tstate->desiredWrapToggle.force_assign(\n"
-     "\t\t\t\t\t\t\tToggle{ true, anim::type::normal });\n"
-     "\t\t\t\t\t\t// pluma: a wrap made after the merge below returned, when the\n"
-     "\t\t\t\t\t\t// suggestion had to load first, is handed over here.\n"
-     "\t\t\t\t\t\tif (created && !state->processing) {\n"
-     "\t\t\t\t\t\t\tconsumer.put_next_copy(state->wrap.get());\n"
-     "\t\t\t\t\t\t}\n"
-     "\t\t\t\t\t},\n"),
-    ("\t\t\tconst auto weak = base::make_weak(was);\n"
-     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n",
-     "\t\t\tconst auto weak = base::make_weak(was);\n"
-     "\t\t\tstate->processing = true;\n"
-     "\t\t\tprocessCurrentSuggestion(processCurrentSuggestion);\n"
-     "\t\t\tstate->processing = false;\n"),
 )
 
 # The tags of Saved Messages, which Telegram gives to Premium alone, for
@@ -1124,12 +1198,34 @@ CODE_NAMES = (
     (ABOUT_BOX, 'box->setTitle(u"Telegram Desktop"_q);', 'box->setTitle(u"{name}"_q);', 1),
     (SOURCES + "/window/main_window.cpp", '(user.isEmpty() ? u"Telegram"_q : user)',
      '(user.isEmpty() ? u"{name}"_q : user)', 1),
+    # The title of a window restored without a name, and of a saved window.
+    (SOURCES + "/window/window_restore_shell.cpp", 'title.isEmpty() ? u"Telegram"_q : title',
+     'title.isEmpty() ? u"{name}"_q : title', 1),
+    (SOURCES + "/window/window_saved_windows.cpp", '(user.isEmpty() ? u"Telegram"_q : user)',
+     '(user.isEmpty() ? u"{name}"_q : user)', 1),
     (SOURCES + "/window/notifications_manager_default.cpp", 'TextWithEntities{ u"Telegram Desktop"_q }',
      'TextWithEntities{ u"{name}"_q }', 1),
     (SOURCES + "/settings/sections/settings_notifications.cpp", 'elided(u"Telegram Desktop"_q, rectForName.width())',
      'elided(u"{name}"_q, rectForName.width())', 1),
     (SOURCES + "/platform/mac/window_title_mac.mm", 'p.drawText(titleRect, u"Telegram"_q, style::al_center);',
      'p.drawText(titleRect, u"{name}"_q, style::al_center);', 1),
+    (SOURCES + "/platform/mac/window_title_mac.mm", 'u"Telegram"_q,\n\t\t\tstyle::al_left);',
+     'u"{name}"_q,\n\t\t\tstyle::al_left);', 1),
+    # The bundle's name if Info.plist lost it, and the alert of a copy of the
+    # app that macOS moved to a read-only place.
+    (SOURCES + "/platform/mac/global_menu_mac.mm", '\t\t: u"Telegram"_q;\n', '\t\t: u"{name}"_q;\n', 1),
+    (SOURCES + "/platform/mac/specific_mac.mm", '@"Telegram Desktop can\'t start from here"', '@"{name} can\'t start from here"', 1),
+    (SOURCES + "/platform/mac/specific_mac.mm", '@"macOS started this copy of Telegram Desktop "', '@"macOS started this copy of {name} "', 1),
+    # What the updater and the relaunch show when they fail.
+    (UPDATER_WIN, 'L"Failed to update Telegram :(', 'L"Failed to update {name} :(', 1),
+    (SOURCES + "/platform/linux/launcher_linux.cpp", 'u"Could not relaunch Telegram: %1"_q', 'u"Could not relaunch {name}: %1"_q', 1),
+    # The page of a WEB proxy, which opens in the browser.
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "Telegram Web Proxy", "{name} Web Proxy", 2),
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "Connecting to Telegram Desktop", "Connecting to {name}", 1),
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "'Telegram Desktop disconnected.", "'{name} disconnected.", 1),
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "'Could not connect to Telegram Desktop.'", "'Could not connect to {name}.'", 1),
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "'Telegram Desktop is not consuming", "'{name} is not consuming", 1),
+    (SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp", "while using Telegram.", "while using {name}.", 1),
     (SOURCES + "/platform/mac/global_menu_mac.mm", '\t\t\tu"About Telegram"_q,\n', '\t\t\tu"About {name}"_q,\n', 1),
     (SOURCES + "/platform/mac/global_menu_mac.mm", '\t\tu"Show Telegram"_q,\n', '\t\tu"Show {name}"_q,\n', 1),
     (SOURCES + "/platform/mac/global_menu_mac.mm", '_menuBar->addMenu(u"Telegram"_q)', '_menuBar->addMenu(u"{name}"_q)', 1),
@@ -1144,8 +1240,8 @@ CODE_NAMES = (
     # The title of a bot web app's window on Linux, until the app sets one.
     (SOURCES + "/ui/chat/attach/attach_bot_webview_linux_shell.cpp", '"document.title = \'Telegram\';"',
      '"document.title = \'{name}\';"', 1),
-    (SHELL_PAGE, "document.title = (data && data.title) || 'Telegram';",
-     "document.title = (data && data.title) || '{name}';", 2),
+    (SHELL_PAGE, "document.title = (data && data.windowTitle) || 'Telegram';",
+     "document.title = (data && data.windowTitle) || '{name}';", 2),
     # The name of the service notifications account (777000) until the
     # server's arrives.
     (SOURCES + "/data/data_session.cpp", 'MTP_string("Telegram"),', 'MTP_string("{name}"),', 1),
@@ -1190,6 +1286,9 @@ CODE_TELEGRAM = {
     "_other/updater_linux.cpp": 4,
     "_other/updater_osx.m": 1,
     "_other/updater_win.cpp": 5,
+    # The protected update of an installation in a root-owned folder: the
+    # binary's name in the package and an error for the log.
+    "platform/linux/update_install_linux.cpp": 6,
     # Log lines.
     "api/api_updates.cpp": 1,
     "core/crash_reports.cpp": 1,
@@ -1205,11 +1304,10 @@ CODE_TELEGRAM = {
     # Telegram Desktop's own api_id in the list of sessions.
     "api/api_authorizations.cpp": 1,
     # Names in files and protocols nobody reads: the calendar file's PRODID,
-    # the generator of a rich message export, the test example of an export,
-    # the company name sent to Stripe, the resource file of the macOS bundle.
+    # the generator of a rich message export, the company name sent to Stripe,
+    # the resource file of the macOS bundle.
     "core/click_handler_types.cpp": 1,
     "iv/iv_rich_page.h": 1,
-    "export/output/export_output_abstract.cpp": 1,
     "payments/payments_form.cpp": 1,
     "platform/mac/launcher_mac.mm": 1,
 }
@@ -1227,21 +1325,22 @@ LANG_KEEP = {"lng_about_text1_api": "Telegram API"}
 # plm:// links in place of tg://, with how many "tg://" each file of the
 # sources holds: the app opens, recognises in texts and creates plm:// links
 # (the QR code of a sign-in among them), and registers plm:// with the
-# system. tg:// and tonsite:// stay with Telegram Desktop on the same computer.
+# system. tg://, tonsite:// and ton:// stay with Telegram Desktop on the same
+# computer.
 SCHEME_FILES = {
     "api/api_single_message_search.cpp": 3,
     "boxes/connection_box.cpp": 3,
-    "core/application.cpp": 3,
+    "core/application.cpp": 4,
     "core/click_handler_types.cpp": 2,
     "core/deep_links/deep_links_settings.cpp": 2,
-    "core/local_url_handlers.cpp": 30,
+    "core/local_url_handlers.cpp": 35,
     "core/ui_integration.cpp": 1,
     "data/data_cloud_themes.cpp": 1,
     "data/data_story.cpp": 1,
-    "history/history_drag_area.cpp": 2,
+    "history/history_drag_area.cpp": 3,
     "history/view/media/history_view_theme_document.cpp": 1,
     "history/view/media/history_view_userpic_suggestion.cpp": 1,
-    "inline_bots/bot_attach_web_view.cpp": 2,
+    "inline_bots/bot_attach_web_view.cpp": 3,
     "intro/intro_qr.cpp": 1,
     "iv/editor/iv_editor_clipboard_import.cpp": 1,
     "iv/iv_rich_message_html_export.cpp": 4,
@@ -1251,6 +1350,7 @@ SCHEME_FILES = {
     "settings/sections/settings_privacy_security.cpp": 1,
     "settings/settings_experimental.cpp": 1,
     "ui/boxes/about_cocoon_box.cpp": 1,
+    "wallet/wallet_content.cpp": 1,
     "window/window_filters_favorite.cpp": 3,
 }
 
@@ -1259,7 +1359,7 @@ REGISTER_URL_SCHEME = """\
 		? u"-workdir \\"%1\\""_q.arg(cWorkingDir())
 		: QString();
 
-	// pluma: plm:// links. The tg and tonsite schemes stay with Telegram
+	// pluma: plm:// links. The tg, tonsite and ton schemes stay with Telegram
 	// Desktop on the same computer.
 	base::Platform::RegisterUrlScheme(base::Platform::UrlSchemeDescriptor{
 		.executable = Platform::ExecutablePathForShortcuts(),
@@ -1321,11 +1421,12 @@ LINK_HOSTS = (
     (CLICK_HANDLER_TYPES,
      "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",' "\n",
      "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$|^pluma\\.chat$", // pluma' "\n"),
-    # The hosts whose links open without asking, and stay in a profile's
-    # bio without Premium (Info::Profile::StripExternalLinks).
+    # The hosts whose links open without asking
+    # (DefaultWhitelistedDomains), for a server that sends no
+    # whitelisted_domains; names under pluma.chat are the site's.
     (CLICK_HANDLER_TYPES,
-     "\t\t" r'"|telesco\\.pe"' "\n\t\t" '")$",\n',
-     "\t\t" r'"|telesco\\.pe"' "\n\t\t" '")$"\n\t\t' r'"|^pluma\\.chat$", // pluma' "\n"),
+     '\t\tu"fragment.com"_q,\n\t};\n',
+     '\t\tu"fragment.com"_q,\n\t\tu"pluma.chat"_q, // pluma\n\t};\n'),
     # Proxy links pasted into the proxy settings.
     (SOURCES + "/boxes/connection_box.cpp",
      "\t\t" r'R"((?:https?:\/\/[^\s]+|tg:\/\/[^\s]+|(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[^\s]+))",' "\n",
@@ -1390,7 +1491,7 @@ LINK_BUILDERS = (
 LINKS_KEPT = {
     # The hosts recognised as the app's own, beside pluma.chat (LINK_HOSTS),
     # and the user.t.me links, which become t.me/user ones inside.
-    "core/local_url_handlers.cpp": 3,
+    "core/local_url_handlers.cpp": 4,
     "core/click_handler_types.cpp": 2,
     "boxes/connection_box.cpp": 1,
     "boxes/stickers_box.cpp": 2,
@@ -1408,6 +1509,8 @@ LINKS_KEPT = {
     "ui/chat/attach/attach_bot_webview.cpp": 1,
     # The experimental option of a favorite folder button: the links it takes.
     "window/window_filters_favorite.cpp": 1,
+    # The result a bot's HTML widget gets: a word, not a link.
+    "tgw/tgw_bridge.cpp": 1,
     # Telegram's own: the invoice of Premium, @premiumbot, @BotFather,
     # @stickers, none of which Pluma has.
     "settings/sections/settings_premium.cpp": 1,
@@ -1415,6 +1518,41 @@ LINKS_KEPT = {
     "dialogs/ui/dialogs_suggestions.cpp": 1,
     "boxes/peers/create_managed_bot_box.cpp": 1,
     "boxes/sticker_set_box.cpp": 1,
+}
+# The hosts of Telegram and of the TON services in the string literals of the
+# sources, per file, t.me aside (LINKS_KEPT): a new one in an upstream update
+# stops the patch here. Reached through what the server does not serve (the
+# wallet, its gifts and collectibles, ads and bot widgets), or only texts that
+# never make a connection (the origin of the bot web view's shell, loaded
+# locally).
+EXTERNAL_HOSTS = re.compile(r"(?<![\w-])(?:[\w-]+\.)*(?:telegram\.org|telegram\.me|telegram\.dog|telegra\.ph"
+                            r"|fragment\.com|toncenter\.com|tonviewer\.com)(?![\w-])")
+HOSTS_KEPT = {
+    # The credit of the protocol; the FAQ link is gone (rebrand()).
+    "boxes/about_box.cpp": 2,
+    "boxes/about_sponsored_box.cpp": 1,
+    "boxes/peers/edit_peer_reactions.cpp": 1,
+    # The links a user can paste as a sticker set's, recognised as t.me's are.
+    "boxes/stickers_box.cpp": 4,
+    # The wallet (AppConfig::walletAvailable, off) and the gifts behind it.
+    "boxes/transfer_gift_box.cpp": 1,
+    "core/ton_explorer_url.cpp": 1,
+    "gram/api/gram_api_nft.cpp": 2,
+    "wallet/wallet_collectibles.cpp": 3,
+    "wallet/wallet_session.cpp": 2,
+    "wallet/wallet_ton_connect.cpp": 1,
+    # The domains the app treats as Telegram's own.
+    "core/click_handler_types.cpp": 7,
+    "core/crash_report_window.cpp": 1,
+    # The fallback link of UpdateApplication, for a build without the updater.
+    "core/update_checker.cpp": 1,
+    "data/data_passkey_deserialize.cpp": 1,
+    "export/output/export_output_html.cpp": 1,
+    "history/history_item_helpers.cpp": 1,
+    "iv/iv_instance.cpp": 2,
+    "menu/menu_sponsored.cpp": 2,
+    "ui/chat/attach/attach_bot_webview.cpp": 2,
+    "ui/chat/attach/attach_bot_webview_linux_shell.cpp": 1,
 }
 LINK_TME = re.compile(r"(?<![\w-])t(?:\\*\.)me(?![\w-])")
 LINK_PLUMA = re.compile(r"(?<![\w-])pluma(?:\\*\.)chat(?![\w-])")
@@ -1576,9 +1714,9 @@ IDENTITY_THEMES = {
 # of the pinned upstream's file: the patch writes their colours again and
 # keeps the rest of the zip as it is.
 TELEGRAM_THEMES = {
-    DAY_BLUE_THEME: "cef14bea54261604211dee578ddb03f3588517687d1f2be55d63de3ee4eea224",
-    NIGHT_GREEN_THEME: "ed9d02e0d20c0144d833ff10374ea8ccaa20fbda6e9746192f71692afda82e32",
-    DAY_BASE_THEME: "174eb399f66ba04143eb8cd3dfe2593f7e66ba16674e2bf5d334cd300bdd6952",
+    DAY_BLUE_THEME: "4ae75620a0aac54b79604e17ed4406556f90b4f15143bf1a099b74fac12e3bb3",
+    NIGHT_GREEN_THEME: "059752f44c98a2be714799a7d3aa89b17dc3a7587f5619ed502a73b988641d0d",
+    DAY_BASE_THEME: "3e32484edd81fbebfa1725847737709d7b4b288561aa466566d8069bc288829b",
     NIGHT_BASE_THEME: "ca675f580b40f8ecfb1d581f29ebd777c03eab4c27821251a369ed16f6f5cb5d",
 }
 # The HTML export draws a letter avatar in one colour, the class userpic1 to
@@ -1805,7 +1943,8 @@ def rebrand(tree, c):
         tree.replace(f"{SOURCES}/{rel}", "tg://", "plm://", count=count)
     tree.replace_body(APPLICATION, "void Application::RegisterUrlScheme() {\n", "\n}\n",
                       REGISTER_URL_SCHEME.replace("{name}", name),
-                      must_contain=('.protocol = u"tg"_q', '.protocol = u"tonsite"_q', 'u"Telegram Link"_q'))
+                      must_contain=('.protocol = u"tg"_q', '.protocol = u"tonsite"_q', '.protocol = u"ton"_q',
+                                    'u"Telegram Link"_q'))
     tree.replace(TEXT_ENTITY, '\taddOne(QString::fromLatin1("tg")); // local urls\n',
                  '\taddOne(QString::fromLatin1("plm")); // local urls (pluma)\n')
     tree.replace(QTHELP_URL, '\t\t|| equals(qstr("tg"))\n', '\t\t|| equals(qstr("plm")) // pluma\n')
@@ -1860,7 +1999,7 @@ def rebrand(tree, c):
                       "\t// pluma: no FAQ, Telegram Features or Ask a Question: they lead to\n"
                       "\t// Telegram's pages and support.\n"
                       "\tQ_UNUSED(builder);",
-                      must_contain=("OpenFaq(controller);", "lng_telegram_features_url",
+                      must_contain=("OpenFaq(controller);", "OpenFeatures(controller);",
                                     "OpenAskQuestionConfirm(controller);"))
     tree.replace(SETTINGS_INTRO, "\tUi::AddDivider(result);\n\tUi::AddSkip(result);\n\n"
                                  "\tAddButtonWithIcon(\n\t\tresult,\n\t\ttr::lng_settings_faq(),\n"
@@ -2014,6 +2153,21 @@ def links_edited():
     return tuple(dict.fromkeys(rel for rel, _, _ in LINK_HOSTS + LINK_BUILDERS))
 
 
+def verify_hosts(tree):
+    """Checks that no new literal names Telegram's or TON's hosts: what is
+    there is what HOSTS_KEPT keeps."""
+    found = {}
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        if EXTERNAL_HOSTS.search(text):
+            count = link_literals(text, EXTERNAL_HOSTS)
+            if count:
+                found[rel[len(SOURCES) + 1:]] = count
+    if found != HOSTS_KEPT:
+        diff = sorted(k for k in set(found) | set(HOSTS_KEPT) if found.get(k) != HOSTS_KEPT.get(k))
+        raise PatchError(f"{SOURCES}: the hosts in {', '.join(diff[:5])} are not what HOSTS_KEPT keeps")
+
+
 def verify_links(tree):
     """Checks the links independently of how the edits were made: the t.me
     left in the string literals of the sources is what LINKS_KEPT keeps, and
@@ -2099,12 +2253,13 @@ def check_upstream(tree, c):
     tree.expect_some(BUILDING_WIN, f"-vcvars_ver={c.msvc_toolset}")
     tree.expect_some(LINUX_WORKFLOW, f"/ccache/releases/download/v{c.ccache}/ccache-{c.ccache}-linux-x86_64-glibc.tar.xz")
     # ci/build-linux.sh: the image's build script and how its Dockerfile is made.
-    tree.expect(DOCKER_ENV + "/build.sh", 'cd Telegram\n./configure.sh "$@"\ncmake --build ../out --config "${CONFIG:-Release}"\n')
+    tree.expect(DOCKER_ENV + "/build.sh", 'cd Telegram\n./configure.sh "$@"\n')
+    tree.expect(DOCKER_ENV + "/build.sh", 'cmake --build ../out --config "${CONFIG:-Release}" ${KEEP_GOING:+-- -k 0}\n')
     tree.expect(DOCKER_ENV + "/gen_dockerfile.py", 'DEBUG=checkEnv("DEBUG", True),\n')
     tree.expect(DOCKER_ENV + "/gen_dockerfile.py", 'LTO=checkEnv("LTO", True),\n')
     # ci/windows.sh and ci/macos.sh: prepare.py builds the release libraries
     # without questions with "silent", Qt 6 on Windows with "qt6".
-    tree.expect(PREPARE, "optionsList = [\n    'qt6',\n")
+    tree.expect(PREPARE, "optionsList = [\n    'qt5',\n    'qt6',\n")
     tree.expect(PREPARE, "        elif arg == 'silent':\n            rebuildStale = True\n")
     # The options the build passes are still the upstream's.
     tree.expect(CMAKE_VARIABLES, 'option(DESKTOP_APP_DISABLE_AUTOUPDATE "Disable autoupdate."')
@@ -2190,11 +2345,11 @@ def patch(tree, c):
     tree.replace(CMAKE_OPTIONS, CMAKE_OPTIONS_OLD, CMAKE_OPTIONS_NEW)
     patch_updates(tree, c)
 
-    # plm:// links in place of tg:// and tonsite://, which stay with Telegram
+    # plm:// links in place of tg://, tonsite:// and ton://, which stay with Telegram
     # Desktop on the same computer: the app registers plm:// at its first
     # start (rebrand(), RegisterUrlScheme), and its macOS bundle and Linux
     # .desktop file declare plm:// alone.
-    tree.replace(PLIST, "\t\t\t\t<string>tg</string>\n\t\t\t\t<string>tonsite</string>\n",
+    tree.replace(PLIST, "\t\t\t\t<string>tg</string>\n\t\t\t\t<string>tonsite</string>\n\t\t\t\t<string>ton</string>\n",
                  "\t\t\t\t<string>plm</string>\n")
 
     # Identity: the name, and with it the data folder (%APPDATA%\Pluma, a
@@ -2231,8 +2386,8 @@ def patch(tree, c):
                ("Exec=Telegram -- %U\n", f"Exec={name} -- %U\n"),
                ("Icon=org.telegram.desktop\n", f"Icon={c.app_id}\n"),
                ("StartupWMClass=TelegramDesktop\n", f"StartupWMClass={name}\n"),
-               # plm:// links; tg:// and tonsite:// stay with Telegram Desktop.
-               ("MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;\n", "MimeType=x-scheme-handler/plm;\n"),
+               # plm:// links; tg://, tonsite:// and ton:// stay with Telegram Desktop.
+               ("MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;x-scheme-handler/ton;\n", "MimeType=x-scheme-handler/plm;\n"),
                ("Keywords=tg;chat;im;messaging;messenger;sms;tdesktop;\n", "Keywords=chat;im;messaging;messenger;\n"),
                # No D-Bus service file comes with the app.
                ("DBusActivatable=true\n", ""),
@@ -2272,9 +2427,6 @@ def patch(tree, c):
         tree.replace(BIRTHDAY_CONTACTS, old, new)
     for rel, old, new in BIRTHDAY_GIFTS:
         tree.replace(rel, old, new)
-    # A suggestion above the chat list that loads first shows (TOP_BAR_WRAP).
-    for old, new in TOP_BAR_WRAP:
-        tree.replace(TOP_BAR_SUGGESTION, old, new)
     # The tags of Saved Messages without Premium (SAVED_TAGS).
     for s in SAVED_TAGS_KEPT:
         tree.expect(DATA_REACTIONS, s)
@@ -2357,8 +2509,6 @@ def verify(tree, c):
             for n, e, first in found:
                 if (n, e) == (c.n, c.e):
                     server_keys += 1
-                elif (n, e) == (c.update_n, c.update_e) and rel == CONFIG_H:
-                    pass
                 elif first not in UPDATE_KEY_LINES or rel != SOURCES + "/_other/packer.cpp":
                     raise PatchError(f"{rel}: an RSA key other than the server's ({key_fingerprint(n, e):#018x})")
         if "SpecialConfigRequest" in text or "DomainResolver" in text:
@@ -2391,13 +2541,13 @@ def verify(tree, c):
                         (CONFIG_H, ("87A94AB0-E370-4cde-98D3-ACC110C5967D",)),
                         (LAUNCHER, ('u"TelegramDesktop"_q',)),
                         (LINUX, ('return u"org.telegram.desktop', "/.TelegramDesktop/")),
-                        (DESKTOP_FILE, ("Telegram", "x-scheme-handler/tg", "tonsite")),
+                        (DESKTOP_FILE, ("Telegram", "x-scheme-handler/tg", "tonsite", "x-scheme-handler/ton")),
                         (WIN_APP_ID, ('L"Telegram.TelegramDesktop";', "Telegram.lnk")),
                         (WIN_TOAST, ("F11932D3-6110-4BBC-9B02-B2EC07A1BD19",)),
                         (WIN_SPECIFIC, ("Telegram.lnk",)),
                         (WIN_RC, ("Telegram FZ-LLC", "Telegram Desktop")),
                         (CMAKE_APP, ("com.tdesktop.Telegram",)),
-                        (PLIST, ("<string>tg</string>", "<string>tonsite</string>", "Telegram Desktop"))):
+                        (PLIST, ("<string>tg</string>", "<string>tonsite</string>", "<string>ton</string>", "Telegram Desktop"))):
         text = tree.read(rel)
         for s in traces:
             if s in text:
@@ -2428,6 +2578,7 @@ def verify(tree, c):
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):
         raise PatchError(f"{LINUX}: the application ID is not {c.app_id}")
     verify_links(tree)
+    verify_hosts(tree)
     verify_brand(tree)
     verify_premium_for_everyone(tree)
 
@@ -2439,6 +2590,12 @@ def verify(tree, c):
 # would make wrong is edited: the star by every name, the purchase rows that
 # show for anyone with Premium, and what the server does not serve.
 PREMIUM_FOR_EVERYONE_EDITS = (
+    # The wallet (Money, tdesktop 7.3) talks to toncenter.com and fragment.com
+    # and to the server's wallet service, which does not exist. Upstream's
+    # default is on; only a server that says wallet_available would turn it on.
+    ("Telegram/SourceFiles/main/main_app_config.cpp",
+     "\treturn get<bool>(u\"wallet_available\"_q, true);\n",
+     "\t// pluma: the server has no wallet service (TON, Money).\n\treturn get<bool>(u\"wallet_available\"_q, false);\n"),
     ("Telegram/SourceFiles/main/main_session.cpp",
      "bool Session::premiumBadgesShown() const {\n\treturn supportMode() || premiumPossible();\n}\n",
      "bool Session::premiumBadgesShown() const {\n\t// pluma: no star by a name: everybody has Premium (ADR 0041).\n\treturn supportMode();\n}\n"),
@@ -2514,7 +2671,7 @@ def main(argv=None):
     ap.add_argument("--server-port", required=True)
     ap.add_argument("--server-ipv6", default="")
     ap.add_argument("--rsa-public-key", required=True, help="PKCS#1 PEM of the server key")
-    ap.add_argument("--update-public-key", required=True, help="PKCS#1 PEM of Pluma's update key (config/update_public.pem)")
+    ap.add_argument("--update-keys", required=True, help="the folder of Pluma's update root key and manifest (config/update)")
     ap.add_argument("--build", type=int, default=0, help="the build number, added to AppVersion")
     ap.add_argument("--update-prefix", default="", help="the update prefix instead of PLUMA_UPDATE_PREFIX (a development build)")
     ap.add_argument("--data-name", default="", help="the name of the data folder instead of the app's (a development build)")
@@ -2526,7 +2683,7 @@ def main(argv=None):
         if a.data_name:
             app["PLUMA_DATA_NAME"] = a.data_name
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
-                   pathlib.Path(a.rsa_public_key).read_text(), pathlib.Path(a.update_public_key).read_text(), a.build)
+                   pathlib.Path(a.rsa_public_key).read_text(), read_update_keys(a.update_keys), a.build)
         tree = Tree(a.source)
         if (tree.root / MARKER).exists():
             raise PatchError(f"{a.source} is patched already; fetch it again (ci/fetch-upstream.sh)")
