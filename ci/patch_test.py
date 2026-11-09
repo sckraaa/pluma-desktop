@@ -972,6 +972,9 @@ class UpstreamTest(unittest.TestCase):
                 for link_rel, link, _ in patch.LINK_BUILDERS:  # a topic link of VIEW_ELEMENT
                     if link_rel == rel:
                         expected = expected.replace(link, link.replace("t.me", patch.LINK_HOST))
+                for premium_rel, premium_old, premium_new in patch.PREMIUM_FOR_EVERYONE_EDITS:  # the star by a name
+                    if premium_rel == rel:
+                        expected = expected.replace(premium_old, premium_new)
                 self.assertEqual(tree.read(rel), expected)
         # The rest stays upstream's: the server's limit of tags on a message
         # for a user without Premium, no custom emoji among the tags.
@@ -1157,6 +1160,56 @@ class UpstreamTest(unittest.TestCase):
                 with self.assertRaises(patch.PatchError) as e:
                     self.run_patch()
                 self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+
+class PremiumForEveryoneTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.PREMIUM_FOR_EVERYONE_EDITS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {}
+        for edit in edits:
+            rel, old = edit[0], edit[1]
+            count = edit[3] if len(edit) > 3 else 1
+            files[rel] = files.get(rel, "") + (old + "x\n") * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the edit of task 071 is not there"):
+                patch.verify_premium_for_everyone(tree)
+            patch.premium_for_everyone(tree)
+            patch.verify_premium_for_everyone(tree)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.premium_for_everyone(tree)
+
+    def test_upstream_changed(self):
+        for i, edit in enumerate(patch.PREMIUM_FOR_EVERYONE_EDITS):
+            changed = edit[1][:-2] + "~" + edit[1][-1]
+            edits = [e if j != i else (edit[0], changed) + tuple(edit[2:]) for j, e in enumerate(patch.PREMIUM_FOR_EVERYONE_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.premium_for_everyone(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.premium_for_everyone(tree)
+            for edit in patch.PREMIUM_FOR_EVERYONE_EDITS:
+                rel, old, new = edit[0], edit[1], edit[2]
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(file=rel), self.assertRaisesRegex(patch.PatchError, "the edit of task 071 is not there"):
+                    patch.verify_premium_for_everyone(tree)
+                tree.write(rel, patched)
+            patch.verify_premium_for_everyone(tree)
 
 
 if __name__ == "__main__":
