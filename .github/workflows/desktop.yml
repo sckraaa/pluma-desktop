@@ -652,6 +652,7 @@ jobs:
         env:
           PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
           PLUMA_UPDATE_KEY: ${{ secrets.PLUMA_UPDATE_KEY }}
+          PLUMA_UPDATE_KEY_V2: ${{ secrets.PLUMA_UPDATE_KEY_V2 }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
           BUILD_NUMBER: ${{ github.run_number }}
@@ -661,8 +662,8 @@ jobs:
           BUILT_WINDOWS: ${{ needs.windows.result }}
           BUILT_MACOS: ${{ needs.macos.result }}
         run: |
-          if [ -z "$PLUMA_UPDATE_KEY" ] || [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$PLUMA_AGE_IDENTITY" ]; then
-            echo "::error::The release environment has no PLUMA_UPDATE_KEY, RELEASES_UPLOAD_TOKEN or PLUMA_AGE_IDENTITY (README, Releases)."
+          if [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$PLUMA_AGE_IDENTITY" ]; then
+            echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN or PLUMA_AGE_IDENTITY (README, Releases)."
             exit 1
           fi
           umask 077
@@ -671,7 +672,8 @@ jobs:
           trap 'rm -rf "$keys"' EXIT
           printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
           printf '%s\n' "$PLUMA_UPDATE_KEY" >"$keys/update.pem"
-          export PLUMA_UPDATE_KEY_FILE=$keys/update.pem
+          printf '%s\n' "$PLUMA_UPDATE_KEY_V2" >"$keys/update-v2.pem"
+          export PLUMA_UPDATE_KEY_FILE=$keys/update.pem PLUMA_UPDATE_KEY_V2_FILE=$keys/update-v2.pem
           one() { # one <the matches of a pattern>: exactly one file
             if [ $# != 1 ] || [ ! -e "$1" ]; then echo "::error::expected one file: $*" >&2; return 1; fi
             printf '%s' "$1"

@@ -2,7 +2,7 @@
 
 Builds of the official Telegram Desktop app ([telegramdesktop/tdesktop](https://github.com/telegramdesktop/tdesktop)) for Linux, Windows and macOS, for a [Pluma](https://github.com/sckraaa/pluma) server, a self-hosted Telegram-compatible server. This project is not affiliated with Telegram.
 
-The repository holds no copy of the app's code. CI fetches the upstream release pinned in [`upstream.env`](upstream.env) (tag `v7.0.9`, the last release of MTProto layer 228), patches it with [`ci/patch.py`](ci/patch.py) and builds it the way the upstream's own CI does. Every edit must match the upstream source exactly. If an update moves any of the edited places, the build fails; it never quietly produces a client that talks to Telegram.
+The repository holds no copy of the app's code. CI fetches the upstream release pinned in [`upstream.env`](upstream.env) (tag `v7.4.1`, of MTProto layer 233), patches it with [`ci/patch.py`](ci/patch.py) and builds it the way the upstream's own CI does. Every edit must match the upstream source exactly. If an update moves any of the edited places, the build fails; it never quietly produces a client that talks to Telegram.
 
 ## What the patch changes
 
@@ -27,18 +27,19 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 - **Birthdays of contacts.** Pluma has no Premium and no gifts (the server sets `premium_purchase_blocked`).
   - The banner at the top of the chat list that a contact has a birthday today (`BIRTHDAY_BANNER` in `ci/patch.py`) shows without Premium; upstream shows it only to those who can buy Premium and opens the gift box from it. A click opens the chat with the contact or, for several, a box "Birthdays" with them, where a click opens the chat; its search filters them by name and asks the server nothing. The banner says "Send message" in place of "Send them a Gift.", and closing it, which dismisses it as before, no longer says that a gift can be sent later.
   - The chat it opens and the contact's profile offer no gift either (`BIRTHDAY_GIFTS`): upstream shows the gift button at the message field on a contact's birthday whatever Premium, and the birthday row of a profile opens the gift box on any day while Premium cannot be bought. Both now offer a gift only while Premium can be bought, as the gift button of a profile's top bar does.
-  - The banner shows although it loads the birthdays first (`TOP_BAR_WRAP`): upstream hands the chat list a suggestion only when it is ready at once, and the banner, which waits for `contacts.getBirthdays`, stayed hidden.
   - The server provides `contacts.getBirthdays`, whose users carry the `contact` flag: the box lists the contacts the app knows. `BIRTHDAY_CONTACTS_TODAY` need not be among the pending suggestions of `help.getPromoData`.
 - **Tags of Saved Messages.** Telegram gives them to Premium alone; in Pluma every user tags messages of Saved Messages, searches by a tag and renames it, as upstream lets Premium do (`SAVED_TAGS`). `Main::Session::savedTagsAvailable()`, always true, stands for `premium()` where a tag is added or removed (`Window::ShowReactPremiumError`), where a click on a tag of a message searches by it, in the tags above a search of Saved Messages (a filter and the menu of a tag in place of the "Unlock" chip) and in the hint of the reactions selector. Nothing else of Premium opens: the tags take no custom emoji while Premium cannot be bought, and a message takes as many tags, and reactions, as the server's `reactions_user_max_default` (3 on Pluma), which upstream already reads for users without Premium.
-- **Updates from the Pluma server** (task 054 of the server repository; [Releases](#releases)). tdesktop's own updater is on, with Pluma's packages: the app asks `https://pluma.chat/dl/desktop/current4` (the server gives the prefix in `help.getConfig`; the default is `PLUMA_UPDATE_PREFIX`), downloads the package of its system, checks it with Pluma's 1024-bit key (tdesktop's format: RSA, SHA-1) in both key slots of `config.h`, and the Updater replaces the files.
+- **Updates from the Pluma server** (tasks 054 and 074 of the server repository; [Releases](#releases)). tdesktop's own updater is on, with Pluma's packages, in the format of its update system v2: the app asks `https://pluma.chat/dl/desktop/current4` (the server gives the prefix in `help.getConfig`; the default is `PLUMA_UPDATE_PREFIX`), downloads the package of its system and accepts it only if it is signed under Pluma's root key: the patch replaces Telegram's root key, manifest and manifest signature in `Telegram/Resources/update` with [`config/update`](config/update), and `VerifyUpdate` of `core/update_verify.cpp` works as upstream's. Only the manifest's release key signs, Ed25519. Then the Updater replaces the files.
   - No check over MTProto: it reads Telegram's channel `tdhbcfeed`. An empty checker takes its place, so a failed or slow HTTP check is handled as upstream handles it.
+  - The packages keep the names of the Pluma server's feed (`tx64upd<N>`, `tmacupd<N>`, `tlinuxupd<N>`); the app's search for a downloaded package accepts those beside upstream's `td-update-*`.
+  - The macOS package is one universal app, for both processors (`TargetFromPlatformKey` answers `mac` for `armac`).
+  - The Windows package is raw LZMA from Python's `lzma`, which ends with an end marker the SDK's `LzmaUncompress` leaves unread: the app no longer insists that every byte is read (`core/update_unpack.cpp`); the payload is authenticated before this.
   - The Updater looks for `Pluma.app` on macOS, and on Windows writes the uninstall entry under Pluma's GUID and name, not Telegram's (next to an installed Telegram Desktop it would have rewritten that one).
-  - The updater compares Pluma's build number, `PlumaBuild` (the run number of CI), where upstream compares `AppVersion`: in `/current4`, in the package and in the downloaded update. `AppVersion` stays upstream's, which tdesktop keys its local data and settings migrations by. A release is `7.0.9.NNNNN`, its package `t*upd<N>`.
-  - A development build asks `https://127.0.0.1/dl/desktop` and carries a key whose private half nobody keeps ([`config/dev/update_public.pem`](config/dev/update_public.pem)): it never updates itself.
+  - The updater compares Pluma's build number, `PlumaBuild` (the run number of CI), where upstream compares `AppVersion`: in `/current4`, in `RunningUpdateVersion` and in the downloaded update. `AppVersion` stays upstream's, which tdesktop keys its local data and settings migrations by. A release is `7.4.1.NNNNN`, its package `t*upd<N>`.
+  - A development build asks `https://127.0.0.1/dl/desktop` and carries a root key whose private half nobody keeps ([`config/dev/update`](config/dev/update)): it never updates itself.
 - **Brand:** the name, the icons and the colours of Pluma ([Branding](#branding)).
 
-- **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later:
-  - tdesktop `b244f1b3`: `prepare.py` takes the UCRT packages of MSYS2 (`mingw-w64-ucrt-x86_64-*`) and a newer MSYS2 installer. MSYS2 removed the msvcrt-based `mingw-w64-x86_64-*` packages that 7.0.9 asks for, and the Windows libraries could not be built.
+- **Backports to the build scripts** (`BACKPORTS` in `ci/patch.py`), byte for byte as upstream made them later: none at the pinned release; the MSYS2 UCRT packages of tdesktop `b244f1b3` are upstream's since 7.4.1.
 - **Build script edits of Pluma's own** (`BUILD_EDITS`), each in the commands of one system, so the cached libraries of the other stay valid:
   - Windows: `prepare.py` does not build breakpad's `dump_syms`, which makes symbol files for Telegram's crash reports and needs ATL, missing from the image's MSVC 14.44 toolset. Pluma compiles crash reports out, and the upstream CI, building Debug only, never builds it either.
   - macOS: Qt and tg_owt (WebRTC) are built in their release variants alone, and Qt without `-force-debug-info`. The Release client links nothing else (cmake_helpers picks a library's variant by the configuration), and Qt's debug information serves symbol files for crash reports. These debug builds were the bulk of the 20 GB of macOS libraries (4.8 GB in the cache). Qt is installed into an emptied prefix, so a previous build leaves nothing behind there. The small debug builds of other stages stay as upstream has them.
@@ -51,12 +52,13 @@ After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - the identity of every platform;
 - the brand: no text that names Telegram but what `LANG_KEEP` and `CODE_TELEGRAM` keep, no `tg://` link, no `t.me` but what `LINKS_KEPT` keeps and `pluma.chat` wherever the edits put it, Pluma's icons, no Telegram blue in the default themes but what `KEPT_BLUE` keeps, people's blue and cyan Pluma's in every theme and in the export.
 
-The check also covers the layer (`api.tl` says `LAYER 228`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
+The check also covers the layer (`api.tl` says `LAYER 233`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
 
 What the patch leaves, and why:
 - **Links** to `t.me`, `telegram.org`, `fragment.com` and the like in the interface: the terms and the privacy policy, the Premium, Stars, ads and mini app pages, the source code and the changelog in the About box. Each opens only when clicked.
 - **Requests the user starts:** translation through a web provider, the address of a location being sent (Mapbox), payment forms (Stripe, Smartglocal), bot web apps and Instant View pages, files linked from messages. They reach the services the content names, as in any client.
-- **Telegram's 1024-bit update keys** in `_other/packer.cpp`, which Pluma does not build.
+- **Telegram's former 1024-bit update keys** in `_other/packer.cpp`, which Pluma does not build.
+- **The wallet** (Money, TON; tdesktop 7.3): off by default (`wallet_available` of `help.getAppConfig`): the Pluma server has no wallet service, and upstream turns it on when the server says nothing. The hosts of the wallet, its gifts and collectibles (`toncenter.com`, `fragment.com`, `tonviewer.com`) stay in the sources behind that switch; `HOSTS_KEPT` in `ci/patch.py` stops the patch at a new one.
 - **Connections made through MTProto** (emoji sets, spellchecker dictionaries, the language pack, calls) go to the Pluma server, which answers for them.
 
 ## Branding
@@ -196,14 +198,18 @@ The message of a failed assertion (`Assertion Failed! …` with the file and lin
 
 ## Releases
 
-The job `release` of a build of `main` (one approval) hands the builds of the systems that built to the releases service of the server after signing the macOS app (`ci/publish.sh`): the site offers the installers (the notarized DMG on macOS; the update package is packed from the app inside it), and the updater of installed apps takes the update packages, which `ci/pack_update.py` packs and signs in tdesktop's format (Pluma packs them in Python, signs with `openssl`, and reads each package back as the app does before it goes out). When Apple's notarization outlasts the job, `staple-macos` publishes the macOS build. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt).
+The job `release` of a build of `main` (one approval) hands the builds of the systems that built to the releases service of the server after signing the macOS app (`ci/publish.sh`): the site offers the installers (the notarized DMG on macOS; the update package is packed from the app inside it), and the updater of installed apps takes the update packages, which `ci/pack_update.py` packs and signs and reads each back as the app does before it goes out. When Apple's notarization outlasts the job, `staple-macos` publishes the macOS build. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt).
 
-Once, before the first build with the updater:
+The format of the packages is in [`release/update-format`](release/update-format), `v1` or `v2`:
+- `v2` is the format the updater of 7.4.1 and later reads: the "TDUP" envelope signed by the Ed25519 release key of `config/update` (the secret `PLUMA_UPDATE_KEY_V2`).
+- `v1` is the RSA format of the apps up to 7.0.9, which still read it (the secret `PLUMA_UPDATE_KEY`). The new app refuses it, so `v1` is for one release only: the first build of 7.4.1 reaches the installed 7.0.9 apps in it, as their last update of that format. Change the file to `v2` right after that release, or new builds will not reach the apps that took it. An app that did not update in between has to be installed once more from the site.
 
-1. The update key: `ci/update-key.sh` makes it in `~/pluma-secrets/desktop/update-key.pem` (back it up off-line; a new key locks every installed app out of updates), sets the secret `PLUMA_UPDATE_KEY` of the `release` environment and writes the public key to [`config/update_public.pem`](config/update_public.pem), which the patch builds in. Commit that file. Nothing secret is printed.
+Once, before the first build with the updater of 7.4.1:
+
+1. The update keys: `ci/update-key.sh` keeps the RSA key of format v1 in `~/pluma-secrets/desktop/update-key.pem`, makes the Ed25519 root and release keys there (`update-root.pem`, `update-release.pem`; back them up off-line; a new root key locks every installed app out of updates; the root key never goes to CI), sets the secrets `PLUMA_UPDATE_KEY` and `PLUMA_UPDATE_KEY_V2` of the `release` environment and writes the public root key, the manifest and its signature to [`config/update`](config/update), which the patch builds in. Commit that folder. Nothing secret is printed.
 2. The upload token: `teamgramd/deploy/releases/put-token.sh` of the server repository sets the secret `RELEASES_UPLOAD_TOKEN`.
 
-Not verified yet: the Windows package is raw LZMA from Python's `lzma` (liblzma, with an end marker), which the app decodes with the LZMA SDK's `LzmaUncompress` of a known size; the first update on Windows checks it.
+Not verified yet: the first update on Windows (raw LZMA of liblzma, read by the LZMA SDK).
 
 ## When it builds
 
@@ -223,8 +229,8 @@ The jobs, and what a build takes:
 | `check` | `ubuntu-24.04` | under a minute | under a minute |
 | `linux-env` | `ubuntu-24.04` | 2–4 h, once for each version of the upstream's `centos_env` | a minute: the image is in the registry |
 | `linux` | `ubuntu-24.04`, in that image | about 1.5 h | 10–15 min (ccache) |
-| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.1 | 4–6 h: the libraries, then the client (2 h) | about 15 min: the libraries and the client's compilations come from the caches |
-| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.1 | 4–6 h, possibly over two runs | about 10 min: the same; the app is universal (arm64, x86-64) |
+| `windows` | `windows-2025`, MSVC toolset 14.44, SDK 10.0.26100.0, Qt 6.11.2 | 4–6 h: the libraries, then the client (2 h) | about 15 min: the libraries and the client's compilations come from the caches |
+| `macos` | `macos-26`, Xcode 26.6, Qt 6.11.2 | 4–6 h, possibly over two runs | about 10 min: the same; the app is universal (arm64, x86-64) |
 
 Every build is in the Release configuration. The upstream's CI builds Debug, which is faster but not fit for users. The libraries are therefore built in their release variant too (`prepare.py` without `skip-release`); on macOS, Qt and tg_owt in that variant alone ([What the patch changes](#what-the-patch-changes)).
 

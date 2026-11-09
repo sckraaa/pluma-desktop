@@ -93,6 +93,7 @@ jobs:
           BUILD_NUMBER: ${{ steps.run.outputs.number }}
           PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
           PLUMA_UPDATE_KEY: ${{ secrets.PLUMA_UPDATE_KEY }}
+          PLUMA_UPDATE_KEY_V2: ${{ secrets.PLUMA_UPDATE_KEY_V2 }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
         run: |
@@ -100,8 +101,8 @@ jobs:
             echo "The desktop run built $BRANCH, not main: not published."
             exit 0
           fi
-          if [ -z "$PLUMA_UPDATE_KEY" ] || [ -z "$RELEASES_UPLOAD_TOKEN" ]; then
-            echo "::error::The release environment has no PLUMA_UPDATE_KEY or RELEASES_UPLOAD_TOKEN (README, Releases)."
+          if [ -z "$RELEASES_UPLOAD_TOKEN" ]; then
+            echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN (README, Releases)."
             exit 1
           fi
           umask 077
@@ -110,7 +111,8 @@ jobs:
           trap 'rm -rf "$keys"' EXIT
           printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$keys/age.key"
           printf '%s\n' "$PLUMA_UPDATE_KEY" >"$keys/update.pem"
-          export PLUMA_UPDATE_KEY_FILE=$keys/update.pem
+          printf '%s\n' "$PLUMA_UPDATE_KEY_V2" >"$keys/update-v2.pem"
+          export PLUMA_UPDATE_KEY_FILE=$keys/update.pem PLUMA_UPDATE_KEY_V2_FILE=$keys/update-v2.pem
           for f in signed/*.dmg.age; do
             dmg=$keys/$(basename "$f" .age)
             age --decrypt --identity "$keys/age.key" --output "$dmg" "$f"

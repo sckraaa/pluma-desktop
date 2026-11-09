@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import base64
 import hashlib
+import json
 import os
 import pathlib
 import struct
@@ -9,6 +11,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import ed25519  # noqa: E402
 import pack_update  # noqa: E402
 
 
@@ -19,6 +22,80 @@ def keypair(d, bits=1024):
     subprocess.run(["openssl", "rsa", "-in", str(key), "-RSAPublicKey_out", "-out", str(public)],
                    check=True, capture_output=True)
     return key, public
+
+
+def update_keys_dir(folder, seeds=(bytes(range(1, 33)), bytes(range(33, 65)))):
+    """config/update of throwaway keys: the folder and the release key."""
+    root, release = seeds
+    folder.mkdir(parents=True, exist_ok=True)
+    x = base64.urlsafe_b64encode(ed25519.public_key(release)).rstrip(b"=").decode()
+    manifest = json.dumps({"format": 1, "manifest_version": 1, "issued": 1762646400,
+                           "keys": [{"id": "pluma-1", "alg": "Ed25519", "x": x}],
+                           "channels": {"stable": [["pluma-1"]]}, "revoked": []}, separators=(",", ":")).encode()
+    (folder / "root-public.pem").write_text(ed25519.public_pem(ed25519.public_key(root)))
+    (folder / "manifest.min.json").write_bytes(manifest)
+    (folder / "manifest.sig").write_bytes(ed25519.sign(root, manifest))
+    return folder, release
+
+
+class V2Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        cls.root = pathlib.Path(cls.dir.name)
+        cls.keys, cls.seed = update_keys_dir(cls.root / "keys")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def pack(self, os_name, version=41):
+        d = pathlib.Path(tempfile.mkdtemp(dir=self.dir.name))
+        (d / "Telegram").write_bytes(b"\x7fELF binary")
+        (d / "Updater").write_bytes(b"\x7fELF updater")
+        os.chmod(d / "Telegram", 0o755)
+        root, manifest, signature = pack_update.read_update_keys(self.keys)
+        return pack_update.pack_v2([d / "Telegram", d / "Updater"], version, os_name, self.seed, manifest, signature,
+                                   created=1762646400), root, manifest, signature
+
+    def test_envelope(self):
+        for os_name, os_code in (("windows", 0), ("macos", 1), ("linux", 2)):
+            with self.subTest(os=os_name):
+                package, root, manifest, signature = self.pack(os_name)
+                self.assertEqual(package[:4], b"TDUP")
+                self.assertEqual(struct.unpack("<IBBBQQ", package[4:4 + 23]), (2, 0, os_code, 1, 41 << 32, 1762646400))
+                version, files = pack_update.read_back_v2(package, os_name, root, manifest, signature)
+                self.assertEqual(version, 41)
+                self.assertEqual([f[0] for f in files], ["Telegram", "Updater"])
+
+    def test_tampering_and_other_keys(self):
+        package, root, manifest, signature = self.pack("linux")
+        broken = bytearray(package)
+        broken[-1] ^= 1
+        with self.assertRaisesRegex(pack_update.PackError, "verify"):
+            pack_update.read_back_v2(bytes(broken), "linux", root, manifest, signature)
+        with self.assertRaisesRegex(pack_update.PackError, "target"):
+            pack_update.read_back_v2(package, "windows", root, manifest, signature)
+        other_keys, _ = update_keys_dir(self.root / "other", (bytes(range(65, 97)), bytes(range(97, 129))))
+        other_root = (other_keys / "root-public.pem").read_bytes()
+        with self.assertRaisesRegex(pack_update.PackError, "verify"):
+            pack_update.read_back_v2(package, "linux", other_root, manifest, signature)
+        d = pathlib.Path(tempfile.mkdtemp(dir=self.dir.name)) / "Telegram"
+        d.write_bytes(b"x")
+        with self.assertRaisesRegex(pack_update.PackError, "does not sign"):
+            pack_update.pack_v2([d], 41, "linux", bytes(32), manifest, signature)
+
+    def test_main(self):
+        d = pathlib.Path(tempfile.mkdtemp(dir=self.dir.name))
+        (d / "Telegram").write_bytes(b"x")
+        key = self.root / "release.pem"
+        key.write_text(ed25519.private_pem(self.seed))
+        out = d / "tlinuxupd41"
+        self.assertEqual(pack_update.main(["--os", "linux", "--version", "41", "--key", str(key),
+                                           "--update-keys", str(self.keys), "--out", str(out), str(d / "Telegram")]), 0)
+        self.assertEqual(out.read_bytes()[:4], b"TDUP")
+        self.assertEqual(pack_update.main(["--os", "linux", "--version", "41", "--key", str(key),
+                                           "--out", str(out) + "x", str(d / "Telegram")]), 1)
 
 
 class PackTest(unittest.TestCase):
@@ -114,10 +191,10 @@ class PackTest(unittest.TestCase):
         d = self.files("main")
         (d / "Telegram").write_bytes(b"x")
         out = d.parent / "tlinuxupd7000066"
-        self.assertEqual(pack_update.main(["--os", "linux", "--version", "7000066", "--key", str(self.key),
+        self.assertEqual(pack_update.main(["--format", "v1", "--os", "linux", "--version", "7000066", "--key", str(self.key),
                                            "--public-key", str(self.public), "--out", str(out), str(d / "Telegram")]), 0)
         self.assertEqual(pack_update.read_back(out.read_bytes(), "linux", self.public)[0], 7000066)
-        self.assertEqual(pack_update.main(["--os", "linux", "--version", "7000066", "--key", str(self.key),
+        self.assertEqual(pack_update.main(["--format", "v1", "--os", "linux", "--version", "7000066", "--key", str(self.key),
                                            "--public-key", str(self.other_public), "--out", str(out) + "x",
                                            str(d / "Telegram")]), 1)
         self.assertFalse(pathlib.Path(str(out) + "x").exists())

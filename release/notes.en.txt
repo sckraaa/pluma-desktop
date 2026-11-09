@@ -1,1 +1,1 @@
-Pluma for macOS now installs from a disk image: open it and drag Pluma to Applications.
+A new version: welcome messages in groups and channels, buttons and files in rich messages, video avatars and a video editor. Every Premium feature is now available to everyone.

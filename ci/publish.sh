@@ -12,6 +12,10 @@
 # x64; Telegram and Updater on Linux, x64. The binary goes under upstream's
 # name, which the Updater renames to the installed one.
 #
+# The format of the package is in release/update-format: v1 (the RSA key of
+# the apps up to 7.0.9) for the one release that carries installed apps to the
+# updater of 7.4.1, then v2 (the Ed25519 release key and config/update).
+#
 # The release is <UPSTREAM_VERSION>.<build>, the build zero-padded to five
 # digits; the package carries the build number, which the updater compares
 # (PlumaBuild, ci/patch.py, updates), and is named by it. The notes are
@@ -20,15 +24,22 @@
 # Environment:
 #   BUILD_NUMBER            the number the build was patched with (the run
 #                           number of the desktop workflow);
-#   PLUMA_UPDATE_KEY_FILE   the private key of the packages (the secret
-#                           PLUMA_UPDATE_KEY; ci/update-key.sh);
+#   PLUMA_UPDATE_KEY_FILE   format v1: the RSA key of the packages (the
+#                           secret PLUMA_UPDATE_KEY; ci/update-key.sh);
+#   PLUMA_UPDATE_KEY_V2_FILE format v2: the Ed25519 release key (the secret
+#                           PLUMA_UPDATE_KEY_V2; ci/update-key.sh);
 #   PLUMA_RELEASES_URL      the site, https://pluma.chat;
 #   RELEASES_UPLOAD_TOKEN   the releases service's upload token
 #                           (teamgramd/deploy/releases/put-token.sh of the
 #                           server repository sets it);
-#   PLUMA_UPDATE_PUBLIC_KEY the public key the package is checked against,
+#   PLUMA_UPDATE_PUBLIC_KEY the public key a v1 package is checked against,
 #                           config/update_public.pem when unset (the tests
-#                           give their own).
+#                           give their own);
+#   PLUMA_UPDATE_KEYS       the folder of a v2 package's root key and
+#                           manifest, config/update when unset (the tests
+#                           give their own);
+#   PLUMA_UPDATE_FORMAT     the format, release/update-format when unset (the
+#                           tests give their own).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
@@ -36,8 +47,16 @@ cd "$(dirname "$0")/.."
 os=${1:?usage: publish.sh macos|windows|linux <installer>}
 installer=${2:?usage: publish.sh macos|windows|linux <installer>}
 build=${BUILD_NUMBER:?BUILD_NUMBER is not set}
-: "${PLUMA_UPDATE_KEY_FILE:?PLUMA_UPDATE_KEY_FILE is not set}"
 : "${RELEASES_UPLOAD_TOKEN:?RELEASES_UPLOAD_TOKEN is not set}"
+format=${PLUMA_UPDATE_FORMAT:-$(tr -d '[:space:]' <release/update-format)}
+case $format in
+v1) : "${PLUMA_UPDATE_KEY_FILE:?PLUMA_UPDATE_KEY_FILE is not set}" ;;
+v2) : "${PLUMA_UPDATE_KEY_V2_FILE:?PLUMA_UPDATE_KEY_V2_FILE is not set}" ;;
+*)
+	echo "publish: release/update-format is $format, not v1 or v2" >&2
+	exit 1
+	;;
+esac
 if [[ ! "${PLUMA_RELEASES_URL:-}" =~ ^https://[a-z0-9.-]+$ ]]; then
 	echo "publish: PLUMA_RELEASES_URL is not the site's https:// address" >&2
 	exit 1
@@ -47,7 +66,13 @@ if [[ ! "$build" =~ ^[0-9]{1,5}$ ]]; then
 	exit 1
 fi
 public_key=${PLUMA_UPDATE_PUBLIC_KEY:-config/update_public.pem}
-for f in "$installer" release/notes.en.txt release/notes.ru.txt "$public_key"; do
+update_keys=${PLUMA_UPDATE_KEYS:-config/update}
+if [ "$format" = v1 ]; then
+	key_material=$public_key
+else
+	key_material=$update_keys/manifest.min.json
+fi
+for f in "$installer" release/notes.en.txt release/notes.ru.txt "$key_material"; do
 	[ -s "$f" ] || { echo "publish: $f is missing or empty" >&2; exit 1; }
 done
 build=$((10#$build))
@@ -112,8 +137,13 @@ macos)
 	exit 2
 	;;
 esac
-$python -I ci/pack_update.py --os "$os" --version "$build" --key "$PLUMA_UPDATE_KEY_FILE" \
-	--public-key "$public_key" --out "$work/$update" "${paths[@]}"
+if [ "$format" = v1 ]; then
+	$python -I ci/pack_update.py --format v1 --os "$os" --version "$build" --key "$PLUMA_UPDATE_KEY_FILE" \
+		--public-key "$public_key" --out "$work/$update" "${paths[@]}"
+else
+	$python -I ci/pack_update.py --format v2 --os "$os" --version "$build" --key "$PLUMA_UPDATE_KEY_V2_FILE" \
+		--update-keys "$update_keys" --out "$work/$update" "${paths[@]}"
+fi
 
 # The token goes in a header file, not on the command line.
 umask 077

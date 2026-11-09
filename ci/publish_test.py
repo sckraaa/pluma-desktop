@@ -6,10 +6,13 @@ import tarfile
 import tempfile
 import unittest
 
-from pack_update_test import keypair
+import ed25519
+from pack_update_test import keypair, update_keys_dir
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "ci/publish.sh"
+VERSION = next(line.split("=", 1)[1] for line in (ROOT / "upstream.env").read_text().splitlines()
+               if line.startswith("UPSTREAM_VERSION="))
 
 # Fakes of the macOS tools and of curl that publish.sh calls, each logging
 # its arguments to $FAKE_LOG. The "DMG" is a tar, as sign_test.py's fake
@@ -43,6 +46,9 @@ class PublishMacosTest(unittest.TestCase):
     def setUpClass(cls):
         cls.keys = tempfile.TemporaryDirectory()
         cls.key, cls.public = keypair(pathlib.Path(cls.keys.name))
+        cls.update_keys, cls.release_seed = update_keys_dir(pathlib.Path(cls.keys.name) / "v2")
+        cls.release_pem = pathlib.Path(cls.keys.name) / "release.pem"
+        cls.release_pem.write_text(ed25519.private_pem(cls.release_seed))
 
     @classmethod
     def tearDownClass(cls):
@@ -60,7 +66,7 @@ class PublishMacosTest(unittest.TestCase):
         (stage / "Pluma.app/Contents/MacOS").mkdir(parents=True)
         (stage / "Pluma.app/Contents/MacOS/Telegram").write_text("binary")
         (stage / "Applications").symlink_to("/Applications")
-        self.dmg = self.d / "pluma-desktop-7.0.9-macos.dmg"
+        self.dmg = self.d / f"pluma-desktop-{VERSION}-macos.dmg"
         with tarfile.open(self.dmg, "w") as t:
             t.add(stage, arcname=".")
         self.log = self.d / "log"
@@ -87,7 +93,7 @@ class PublishMacosTest(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         calls = self.calls()
         curl = next(c for c in calls if c.startswith("curl "))
-        self.assertIn(f"installer.universal=@{self.dmg};filename=Pluma-7.0.9.00041-macos-universal.dmg", curl)
+        self.assertIn(f"installer.universal=@{self.dmg};filename=Pluma-{VERSION}.00041-macos-universal.dmg", curl)
         self.assertIn("update.universal=@", curl)
         self.assertIn(";filename=tmacupd41", curl)
         self.assertIn(f"xcrun stapler validate {self.dmg}", calls)
@@ -96,13 +102,30 @@ class PublishMacosTest(unittest.TestCase):
         self.assertLess(attach, detach)
         self.assertLess(detach, calls.index(curl))
 
+    def test_format_v2(self):
+        run = subprocess.run(["bash", str(SCRIPT), "macos", str(self.dmg)],
+                             env=dict(self.env, PLUMA_UPDATE_FORMAT="v2", PLUMA_UPDATE_KEY_FILE="",
+                                      PLUMA_UPDATE_KEY_V2_FILE=str(self.release_pem),
+                                      PLUMA_UPDATE_KEYS=str(self.update_keys)),
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        curl = next(c for c in self.calls() if c.startswith("curl "))
+        self.assertIn(";filename=tmacupd41", curl)
+
+    def test_update_format(self):
+        run = subprocess.run(["bash", str(SCRIPT), "macos", str(self.dmg)],
+                             env=dict(self.env, PLUMA_UPDATE_FORMAT="v3"), capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("is v3", run.stderr)
+        self.assertIn((ROOT / "release/update-format").read_text().strip(), ("v1", "v2"))
+
     def test_not_stapled(self):
         run = self.run_script(self.dmg, unstapled=1)
         self.assertNotEqual(run.returncode, 0)
         self.assertFalse(any(c.startswith(("curl", "hdiutil attach")) for c in self.calls()))
 
     def test_zip_refused(self):
-        z = self.d / "pluma-desktop-7.0.9-macos.zip"
+        z = self.d / f"pluma-desktop-{VERSION}-macos.zip"
         z.write_text("zip")
         run = self.run_script(z)
         self.assertEqual(run.returncode, 2)
