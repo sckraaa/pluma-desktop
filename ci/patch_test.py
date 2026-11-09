@@ -745,6 +745,30 @@ class UpstreamTest(unittest.TestCase):
         tree, _ = self.run_patch()
         self.assertIn('return get<bool>(u"wallet_available"_q, false);', tree.read(S + "/main/main_app_config.cpp"))
 
+    def test_no_star_store_or_transcription_on_new_surfaces(self):
+        tree, _ = self.run_patch()
+        message = tree.read(S + "/history/view/history_view_message.cpp")
+        self.assertIn("if ((from->isPremium() // pluma: no star by a name (ADR 0041)\n", message)
+        self.assertIn("if (false // pluma: the server has no transcription to offer\n\t\t&& _data->isVideoMessage()\n",
+                      tree.read(S + "/history/view/media/history_view_gif.cpp"))
+        self.assertIn("badge->showOn(rpl::single(session->premiumBadgesShown()));",
+                      tree.read(S + "/settings/sections/settings_privacy_security.cpp"))
+        self.assertIn("if (true // pluma: the server does not serve account.updateEmojiStatus\n",
+                      tree.read(S + "/menu/menu_emoji_status.cpp"))
+        self.assertIn("\t\t&& session().premiumCanBuy()\n\t\t&& ((disallowed & Type::SendHide)\n",
+                      tree.read(S + "/history/view/controls/history_view_compose_controls.cpp"))
+        self.assertIn("return rpl::single(controller->session().premiumCanBuy());",
+                      tree.read(S + "/info/profile/info_profile_qr_gifts.cpp"))
+
+    def test_scheme_lists_take_plm(self):
+        tree, c = self.run_patch()
+        for rel, _, new in patch.SCHEME_LISTS:
+            self.assertIn('u"plm"_q, // pluma\n', tree.read(rel))
+        rel = patch.SCHEME_LISTS[0][0]
+        tree.write(rel, tree.read(rel).replace('\t\tu"plm"_q, // pluma\n', ""))
+        with self.assertRaisesRegex(patch.PatchError, "does not take plm"):
+            patch.verify(tree, c)
+
     def test_new_hosts_stop_the_patch(self):
         for literal in ('u"https://toncenter.com"_q', 'u"https://telegram.org/x"_q', 'u"https://tonviewer.com/x"_q',
                         'u"https://x.fragment.com/"_q'):

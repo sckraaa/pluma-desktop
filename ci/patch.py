@@ -1354,6 +1354,19 @@ SCHEME_FILES = {
     "window/window_filters_favorite.cpp": 3,
 }
 
+# The lists of URL schemes a link may have (tdesktop 7.x), which name tg and so
+# would refuse plm:// in a Markdown article and in the HTML export, and take a
+# plm:// link in a text for one that needs a confirmation
+# (SchemeRequiresConfirmation, core/ui_integration.cpp).
+SCHEME_LISTS = (
+    (SOURCES + "/core/file_utilities.cpp", '\t\tu"tel"_q,\n\t\tu"tg"_q,\n\t\tu"ton"_q,\n\t\tu"tonsite"_q,\n\t};\n',
+     '\t\tu"tel"_q,\n\t\tu"plm"_q, // pluma\n\t\tu"tg"_q,\n\t\tu"ton"_q,\n\t\tu"tonsite"_q,\n\t};\n'),
+    (SOURCES + "/iv/markdown/iv_markdown_prepare_links.cpp", '\t\tu"tg"_q,\n\t\tu"ton"_q,\n\t\tu"tel"_q,\n\t};\n',
+     '\t\tu"plm"_q, // pluma\n\t\tu"tg"_q,\n\t\tu"ton"_q,\n\t\tu"tel"_q,\n\t};\n'),
+    (SOURCES + "/export/output/export_output_html.cpp", '\t\tu"tel"_q,\n\t\tu"tg"_q,\n\t};\n',
+     '\t\tu"tel"_q,\n\t\tu"plm"_q, // pluma\n\t\tu"tg"_q,\n\t};\n'),
+)
+
 REGISTER_URL_SCHEME = """\
 	const auto arguments = Launcher::Instance().customWorkingDir()
 		? u"-workdir \\"%1\\""_q.arg(cWorkingDir())
@@ -1948,6 +1961,8 @@ def rebrand(tree, c):
     tree.replace(TEXT_ENTITY, '\taddOne(QString::fromLatin1("tg")); // local urls\n',
                  '\taddOne(QString::fromLatin1("plm")); // local urls (pluma)\n')
     tree.replace(QTHELP_URL, '\t\t|| equals(qstr("tg"))\n', '\t\t|| equals(qstr("plm")) // pluma\n')
+    for rel, old, new in SCHEME_LISTS:
+        tree.replace(rel, old, new)
 
     # The icons.
     for rel, sha256 in ASSETS:
@@ -2078,6 +2093,9 @@ def verify_brand(tree):
             or 'fromLatin1("tg")); // local urls' in tree.read(TEXT_ENTITY)
             or 'qstr("tg")' in tree.read(QTHELP_URL)):
         raise PatchError(f"{TEXT_ENTITY}, {QTHELP_URL}: texts still link tg:// and not plm://")
+    for rel, _, new in SCHEME_LISTS:
+        if tree.read(rel).count(new) != 1:
+            raise PatchError(f"{rel}: the list of URL schemes does not take plm://")
 
     # Pluma's icons, and no Telegram blue in the default themes but what
     # KEPT_BLUE keeps.
@@ -2236,6 +2254,7 @@ def brand_edited():
                                 SETTINGS_INTRO, ABOUT_BOX, MAIN_MENU, BANNED_BOX, DATA_PEER, EXPORT_CSS)
                                + tuple(rel for rel, _, _, _ in CODE_NAMES)
                                + tuple(f"{SOURCES}/{rel}" for rel in SCHEME_FILES)
+                               + tuple(rel for rel, _, _ in SCHEME_LISTS)
                                + tuple(rel for rel, _, _ in QR_COLORS)))
 
 
@@ -2608,6 +2627,32 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/history/view/media/history_view_document.cpp",
      "\t\tif ((media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n",
      "\t\tif (true // pluma: the server has no transcription to offer\n\t\t\t|| (media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n"),
+    # The same button on a round video.
+    ("Telegram/SourceFiles/history/view/media/history_view_gif.cpp",
+     "\tif (_data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n\t\t&& !_parent->data()->isScheduled()\n",
+     "\tif (false // pluma: the server has no transcription to offer\n\t\t&& _data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n\t\t&& !_parent->data()->isScheduled()\n"),
+    # The star after a sender's name in a group: the slot for it stays only
+    # for an emoji status.
+    ("Telegram/SourceFiles/history/view/history_view_message.cpp",
+     "\tif (from->isPremium()\n\t\t|| (from->isChannel()\n\t\t\t&& from->emojiStatusId()\n\t\t\t&& from != history()->peer)) {\n",
+     "\tif ((from->isPremium() // pluma: no star by a name (ADR 0041)\n\t\t\t&& (from->session().premiumBadgesShown()\n\t\t\t\t|| fromNameStatusId(from)))\n\t\t|| (from->isChannel()\n\t\t\t&& from->emojiStatusId()\n\t\t\t&& from != history()->peer)) {\n"),
+    # The star on a privacy row of Premium users.
+    ("Telegram/SourceFiles/settings/sections/settings_privacy_security.cpp",
+     "\tbadge->showOn(Data::AmPremiumValue(session));\n",
+     "\t// pluma: no star: everybody has Premium (ADR 0041).\n\tbadge->showOn(rpl::single(session->premiumBadgesShown()));\n"),
+    # "Set as status" in the menu of a custom emoji (tdesktop 7.x).
+    ("Telegram/SourceFiles/menu/menu_emoji_status.cpp",
+     "\tif (!session->premium()\n\t\t|| !sticker\n\t\t|| sticker->setType != Data::StickersType::Emoji) {\n",
+     "\tif (true // pluma: the server does not serve account.updateEmojiStatus\n\t\t|| !session->premium()\n\t\t|| !sticker\n\t\t|| sticker->setType != Data::StickersType::Emoji) {\n"),
+    # What leads to the gift store, as D-049 and D-050 close the older ones:
+    # the button at the message field of a chat section, and the tile of the
+    # QR code's gifts on one's own profile (tdesktop 7.3).
+    ("Telegram/SourceFiles/history/view/controls/history_view_compose_controls.cpp",
+     "\t\t&& !user->isBot()\n\t\t&& ((disallowed & Type::SendHide)\n",
+     "\t\t&& !user->isBot()\n\t\t// pluma: no gift while Premium cannot be bought.\n\t\t&& session().premiumCanBuy()\n\t\t&& ((disallowed & Type::SendHide)\n"),
+    ("Telegram/SourceFiles/info/profile/info_profile_qr_gifts.cpp",
+     "\t} else if (peer->isSelf()) {\n\t\treturn rpl::single(true);\n\t} else if (const auto channel = peer->asBroadcast()) {\n",
+     "\t} else if (peer->isSelf()) {\n\t\t// pluma: no gift store while Premium cannot be bought.\n\t\treturn rpl::single(controller->session().premiumCanBuy());\n\t} else if (const auto channel = peer->asBroadcast()) {\n"),
     # Boosts do not exist here: nothing waits for a level of a channel, no
     # screen, prompt or link offers one.
     ("Telegram/SourceFiles/boxes/peers/edit_peer_info_box.cpp",

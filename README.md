@@ -52,7 +52,7 @@ After the edits, the result is checked again over all of `Telegram/SourceFiles`:
 - the identity of every platform;
 - the brand: no text that names Telegram but what `LANG_KEEP` and `CODE_TELEGRAM` keep, no `tg://` link, no `t.me` but what `LINKS_KEPT` keeps and `pluma.chat` wherever the edits put it, Pluma's icons, no Telegram blue in the default themes but what `KEPT_BLUE` keeps, people's blue and cyan Pluma's in every theme and in the export.
 
-The check also covers the layer (`api.tl` says `LAYER 228`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
+The check also covers the layer (`api.tl` says `LAYER 233`), the version, and the toolchain of `upstream.env` against the upstream's own build files.
 
 What the patch leaves, and why:
 - **Links** to `t.me`, `telegram.org`, `fragment.com` and the like in the interface: the terms and the privacy policy, the Premium, Stars, ads and mini app pages, the source code and the changelog in the About box. Each opens only when clicked.
