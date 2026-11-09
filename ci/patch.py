@@ -2471,6 +2471,9 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/boxes/peers/edit_peer_permissions_box.cpp",
      "\tstate->boostsUnrestrict = AddBoostsUnrestrictWrapped(\n\t\tinner,\n\t\tpeer,\n\t\tstate->hasSendRestrictions.value());\n",
      "\tstate->boostsUnrestrict = AddBoostsUnrestrictWrapped(\n\t\tinner,\n\t\tpeer,\n\t\trpl::single(false)); // pluma: boosts do not exist here (ADR 0041)\n"),
+    ("Telegram/SourceFiles/boxes/peers/edit_peer_color_box.cpp",
+     "\t\tif (group) {\n\t\t\tauto colorProducer = state->profileIndex.value(\n",
+     "\t\tif (false && group) { // pluma: boosts do not exist here (ADR 0041)\n\t\t\tauto colorProducer = state->profileIndex.value(\n"),
 )
 
 
