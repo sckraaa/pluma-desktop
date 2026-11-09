@@ -2288,6 +2288,7 @@ def patch(tree, c):
     links(tree)
 
     rebrand(tree, c)
+    premium_for_everyone(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2428,7 +2429,41 @@ def verify(tree, c):
         raise PatchError(f"{LINUX}: the application ID is not {c.app_id}")
     verify_links(tree)
     verify_brand(tree)
+    verify_premium_for_everyone(tree)
 
+
+
+# --- Premium for everyone -----------------------------------------------------
+# Task 071 (ADR 0041): every user has Premium and every boost-gated feature is
+# open, so the server sends the Premium flag for everybody. Only what the flag
+# would make wrong is edited: the star by every name, the purchase rows that
+# show for anyone with Premium, and what the server does not serve.
+PREMIUM_FOR_EVERYONE_EDITS = (
+    ("Telegram/SourceFiles/main/main_session.cpp",
+     "bool Session::premiumBadgesShown() const {\n\treturn supportMode() || premiumPossible();\n}\n",
+     "bool Session::premiumBadgesShown() const {\n\t// pluma: no star by a name: everybody has Premium (ADR 0041).\n\treturn supportMode();\n}\n"),
+    ("Telegram/SourceFiles/settings/sections/settings_main.cpp",
+     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\tif (!session->premiumPossible()) {\n",
+     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\t// pluma: the section is the purchase; everybody has Premium.\n\tif (!session->premiumCanBuy()) {\n"),
+    ("Telegram/SourceFiles/window/window_main_menu.cpp",
+     "void MainMenu::setupSetEmojiStatus() {\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n",
+     "void MainMenu::setupSetEmojiStatus() {\n\t// pluma: the server does not serve account.updateEmojiStatus.\n\t_setEmojiStatus->hide();\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n"),
+    ("Telegram/SourceFiles/history/view/media/history_view_document.cpp",
+     "\t\tif ((media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n",
+     "\t\tif (true // pluma: the server has no transcription to offer\n\t\t\t|| (media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n"),
+)
+
+
+def premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 071 is not there")
 
 def main(argv=None):
     args = argv if argv is not None else sys.argv[1:]
