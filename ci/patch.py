@@ -2451,6 +2451,26 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/history/view/media/history_view_document.cpp",
      "\t\tif ((media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n",
      "\t\tif (true // pluma: the server has no transcription to offer\n\t\t\t|| (media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n"),
+    # Boosts do not exist here: nothing waits for a level of a channel, no
+    # screen, prompt or link offers one.
+    ("Telegram/SourceFiles/boxes/peers/edit_peer_info_box.cpp",
+     "\t\t\t\t.allowedCustomReactions = counters.level,\n",
+     "\t\t\t\t// pluma: custom reactions need no boost level, only the limit.\n\t\t\t\t.allowedCustomReactions = Data::PremiumLimits(\n\t\t\t\t\t&_peer->session()).maxBoostLevel(),\n"),
+    ("Telegram/SourceFiles/window/window_peer_menu.cpp",
+     "void Filler::addBoostChat() {\n\tif (const auto channel = _peer->asChannel()) {\n\t\tif (channel->isMonoforum()) {\n",
+     "void Filler::addBoostChat() {\n\tif (const auto channel = _peer->asChannel()) {\n\t\tif (true || channel->isMonoforum()) { // pluma: boosts do not exist here (ADR 0041)\n"),
+    ("Telegram/SourceFiles/window/window_peer_menu.cpp",
+     "\t\tif (canGetStats\n\t\t\t|| channel->amCreator()\n\t\t\t|| channel->canPostStories()) {\n\t\t\t_addAction(tr::lng_boosts_title(tr::now), [=] {\n",
+     "\t\tif (false // pluma: boosts do not exist here (ADR 0041)\n\t\t\t&& (canGetStats\n\t\t\t|| channel->amCreator()\n\t\t\t|| channel->canPostStories())) {\n\t\t\t_addAction(tr::lng_boosts_title(tr::now), [=] {\n"),
+    ("Telegram/SourceFiles/window/window_session_controller.cpp",
+     "\t} else if (resolveType == ResolveType::Boost && peer->isChannel()) {\n\t\tresolveBoostState(peer->asChannel());\n",
+     "\t} else if (false // pluma: a boost link opens the channel\n\t\t&& resolveType == ResolveType::Boost && peer->isChannel()) {\n\t\tresolveBoostState(peer->asChannel());\n"),
+    ("Telegram/SourceFiles/api/api_peer_colors.cpp",
+     "\tif (Data::DecideColorIndex(channel) == index) {\n\t\treturn 0;\n\t}\n\tif (profile) {\n",
+     "\tif (true || Data::DecideColorIndex(channel) == index) { // pluma: no colour needs a boost level\n\t\treturn 0;\n\t}\n\tif (profile) {\n"),
+    ("Telegram/SourceFiles/boxes/peers/edit_peer_permissions_box.cpp",
+     "\tstate->boostsUnrestrict = AddBoostsUnrestrictWrapped(\n\t\tinner,\n\t\tpeer,\n\t\tstate->hasSendRestrictions.value());\n",
+     "\tstate->boostsUnrestrict = AddBoostsUnrestrictWrapped(\n\t\tinner,\n\t\tpeer,\n\t\trpl::single(false)); // pluma: boosts do not exist here (ADR 0041)\n"),
 )
 
 
