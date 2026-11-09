@@ -85,6 +85,7 @@ LINUX = SOURCES + "/platform/linux/specific_linux.cpp"
 WIN_APP_ID = SOURCES + "/platform/win/windows_app_user_model_id.cpp"
 WIN_TOAST = SOURCES + "/platform/win/windows_toast_activator.h"
 WIN_SPECIFIC = SOURCES + "/platform/win/specific_win.cpp"
+MAC_SPECIFIC_P = SOURCES + "/platform/mac/specific_mac_p.mm"
 WIN_RC = "Telegram/Resources/winrc/Telegram.rc"
 CMAKE_APP = "Telegram/CMakeLists.txt"
 CMAKE_OPTIONS = "Telegram/cmake/telegram_options.cmake"
@@ -461,6 +462,13 @@ class Config:
         if not re.fullmatch(r"[A-Z][A-Za-z0-9]{1,31}", self.app_name) or "telegram" in self.app_name.lower():
             raise PatchError(f"PLUMA_APP_NAME {self.app_name!r}: a name of Pluma's own, a capital letter "
                              "first, then letters and digits (it names the data folder and the shortcuts)")
+        # The data folder: the app's name, or a name of its own for a
+        # development build (config/dev/server.env), so that a build for the
+        # development server never reads the data, the server's address
+        # among them, of a build for the real one, or the other way round.
+        self.data_name = app.get("PLUMA_DATA_NAME") or self.app_name
+        if not re.fullmatch(r"[A-Z][A-Za-z0-9]{1,31}", self.data_name) or "telegram" in self.data_name.lower():
+            raise PatchError(f"PLUMA_DATA_NAME {self.data_name!r}: a capital letter first, then letters and digits")
         self.app_id = need(app, "PLUMA_APP_ID")
         if (not re.fullmatch(r"[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+", self.app_id)
                 or self.app_id.startswith(("org.telegram.", "com.tdesktop."))):
@@ -617,7 +625,7 @@ def patch_updates(tree, c):
     tree.replace(UPDATER_WIN, 'const WCHAR *appURL = L"https://desktop.telegram.org";',
                  f'const WCHAR *appURL = L"{c.site}";')
     tree.replace(UPDATER_WIN, 'static const WCHAR *_programName = L"Telegram Desktop"; // folder in APPDATA, if current path is unavailable for writing\n',
-                 f'static const WCHAR *_programName = L"{c.app_name}"; // pluma: the folder of AppName in APPDATA, if current path is unavailable for writing\n')
+                 f'static const WCHAR *_programName = L"{c.data_name}"; // pluma: the data folder in APPDATA, if current path is unavailable for writing\n')
     tree.replace(VERSION_H, f"constexpr auto AppVersion = {c.upstream_app_version};\n",
                  f"constexpr auto AppVersion = {c.upstream_app_version};\n"
                  f"constexpr auto PlumaBuild = {c.build}; // pluma: the build number, which the updater compares\n")
@@ -684,7 +692,7 @@ EDITED = (DC_OPTIONS, INSTANCE_H, INSTANCE, CONFIG_LOADER, SPECIAL_CONFIG, PROXY
           LINUX, WIN_APP_ID, WIN_TOAST, WIN_SPECIFIC, WIN_RC, VERSION_H, CONFIG_H, CMAKE_APP, CMAKE_OPTIONS,
           PLIST, DESKTOP_FILE, PREPARE, BIRTHDAY_CONTACTS, HISTORY_WIDGET, PROFILE_ACTIONS,
           TOP_BAR_SUGGESTION, MAIN_SESSION_H, MAIN_SESSION, SECTION_WIDGET, VIEW_ELEMENT, REACTIONS_SELECTOR,
-          SEARCH_TAGS, UPDATE_CHECKER, LOCAL_STORAGE, UPDATER_OSX, UPDATER_WIN)
+          SEARCH_TAGS, UPDATE_CHECKER, LOCAL_STORAGE, UPDATER_OSX, UPDATER_WIN, MAC_SPECIFIC_P)
 
 
 # Backports of upstream fixes to the build scripts, each as (file, the
@@ -2196,13 +2204,18 @@ def patch(tree, c):
     tree.sub(VERSION_H, r'constexpr auto AppId = "\{[0-9A-F-]{36}\}"_cs;',
              f'constexpr auto AppId = "{{{c.app_guid}}}"_cs; // pluma: Pluma\'s own')
     tree.replace(VERSION_H, 'constexpr auto AppNameOld = "Telegram Win (Unofficial)"_cs;\n',
-                 f'constexpr auto AppNameOld = "{name}"_cs; // pluma: no older folder to move data from\n')
+                 f'constexpr auto AppNameOld = "{c.data_name}"_cs; // pluma: no older folder to move data from\n')
     tree.replace(VERSION_H, 'constexpr auto AppName = "Telegram Desktop"_cs;\n', f'constexpr auto AppName = "{name}"_cs;\n')
     tree.replace(VERSION_H, 'constexpr auto AppFile = "Telegram"_cs;\n', f'constexpr auto AppFile = "{name}"_cs;\n')
     tree.replace(CONFIG_H, '\tstatic const char *gGuidStr = "{87A94AB0-E370-4cde-98D3-ACC110C5967D}";\n',
                  f'\tstatic const char *gGuidStr = "{{{c.instance_guid}}}"; // pluma: Pluma\'s own\n')
     tree.replace(LAUNCHER, '\tQApplication::setApplicationName(u"TelegramDesktop"_q);\n',
-                 f'\tQApplication::setApplicationName(u"{name}"_q); // pluma: the Linux data folder\n')
+                 f'\tQApplication::setApplicationName(u"{c.data_name}"_q); // pluma: the Linux data folder\n')
+    # The data folder of Windows and macOS, by the same name.
+    tree.replace(WIN_SPECIFIC, "\t\treturn appData.absolutePath() + '/' + AppName.utf16() + '/';\n",
+                 f"\t\treturn appData.absolutePath() + u\"/{c.data_name}/\"_q; // pluma: the data folder\n")
+    tree.replace(MAC_SPECIFIC_P, "\t\treturn QString::fromUtf8([[url path] fileSystemRepresentation]) + '/' + AppName.utf16() + '/';\n",
+                 f"\t\treturn QString::fromUtf8([[url path] fileSystemRepresentation]) + u\"/{c.data_name}/\"_q; // pluma: the data folder\n")
 
     # Linux: the application ID (Wayland app_id, the D-Bus name, the
     # .desktop file), and no look into ~/.TelegramDesktop for old data.
@@ -2402,6 +2415,15 @@ def verify(tree, c):
         raise PatchError(f"{PREPARE}: still builds the debug variants of Qt or tg_owt on macOS")
     if f'constexpr auto AppName = "{c.app_name}"_cs;' not in tree.read(VERSION_H):
         raise PatchError(f"{VERSION_H}: the app is not {c.app_name}")
+    # Every system keeps its data in the folder of data_name, and Windows
+    # moves no files from another one (logs.cpp MoveOldDataFiles).
+    for rel, text in ((WIN_SPECIFIC, f'u"/{c.data_name}/"_q; // pluma: the data folder'),
+                      (MAC_SPECIFIC_P, f'u"/{c.data_name}/"_q; // pluma: the data folder'),
+                      (LAUNCHER, f'setApplicationName(u"{c.data_name}"_q);'),
+                      (VERSION_H, f'constexpr auto AppNameOld = "{c.data_name}"_cs;'),
+                      (UPDATER_WIN, f'_programName = L"{c.data_name}";')):
+        if tree.read(rel).count(text) != 1:
+            raise PatchError(f"{rel}: the data folder is not {c.data_name}")
     if f'return u"{c.app_id}"_q;' not in tree.read(LINUX):
         raise PatchError(f"{LINUX}: the application ID is not {c.app_id}")
     verify_links(tree)
@@ -2437,11 +2459,14 @@ def main(argv=None):
     ap.add_argument("--update-public-key", required=True, help="PKCS#1 PEM of Pluma's update key (config/update_public.pem)")
     ap.add_argument("--build", type=int, default=0, help="the build number, added to AppVersion")
     ap.add_argument("--update-prefix", default="", help="the update prefix instead of PLUMA_UPDATE_PREFIX (a development build)")
+    ap.add_argument("--data-name", default="", help="the name of the data folder instead of the app's (a development build)")
     a = ap.parse_args(args)
     try:
         app = load_env(a.app)
         if a.update_prefix:
             app["PLUMA_UPDATE_PREFIX"] = a.update_prefix
+        if a.data_name:
+            app["PLUMA_DATA_NAME"] = a.data_name
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
                    pathlib.Path(a.rsa_public_key).read_text(), pathlib.Path(a.update_public_key).read_text(), a.build)
         tree = Tree(a.source)
