@@ -1220,6 +1220,20 @@ class UpstreamTest(unittest.TestCase):
         tree.write_bytes(rel, patched.encode())
         patch.verify(tree, c)
 
+    def test_telegram_plane_in_a_new_icon(self):
+        """The plane of the 7.4 notice is Pluma's mark; another file drawing
+        Telegram's stops the patch."""
+        tree, _ = self.run_patch()
+        rel = patch.ICONS + "/chat/unsupported_plane.svg"
+        self.assertNotIn(patch.TELEGRAM_PLANE, tree.read(rel))
+        self.assertEqual(tree.read_bytes(rel), (patch.BRAND / "tree" / rel).read_bytes())
+        self.assertIn(patch.TELEGRAM_PLANE, self.files[rel].decode("utf-8"))
+        new = patch.ICONS + "/chat/another_plane.svg"
+        tree.write_bytes(new, self.files[rel])
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, config())
+        self.assertIn("another_plane.svg", str(e.exception))
+
     def test_changed_binary_files(self):
         """An icon or a zipped theme of another release stops the patch."""
         for rel in (patch.ASSETS[0][0], patch.NIGHT_THEME, *patch.TELEGRAM_THEMES):

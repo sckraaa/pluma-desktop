@@ -88,6 +88,8 @@ cp svg/tray.svg "$icons/tray_monochrome.svg"
 cp svg/tray-attention.svg "$icons/tray_monochrome_attention.svg"
 cp svg/tray-mute.svg "$icons/tray_monochrome_mute.svg"
 cp svg/plane-white.svg "$icons/plane_white.svg"
+mkdir -p "$icons/chat"
+cp svg/unsupported-plane.svg "$icons/chat/unsupported_plane.svg"
 
 # Alpha masks at 1x, 2x and 3x, which the interface tints with palette
 # colours: the macOS menu bar icon, the mark in the login QR code, and the

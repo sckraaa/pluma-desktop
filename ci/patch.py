@@ -184,6 +184,7 @@ ASSETS = (
     ("Telegram/Resources/art/icon_round512@2x.png", "fe5ef7cc2d6de70c63db265c849af6f912b1c0792eae9e12bec627b4f8366234"),
     ("Telegram/Resources/art/logo_256.png", "3fb1400c7dc9bbc3b5cb3ffedcbf4a9b09c53e28b57a7ff33a8a6b9048864090"),
     ("Telegram/Resources/art/logo_256_no_margin.png", "44af9a76a532559ef8cb450b48096713be819103ab79a19d7e4abb9b32ff4cb7"),
+    ("Telegram/Resources/icons/chat/unsupported_plane.svg", "5042921c0547a54ba11f3d6c9fd46a55938f548982afab9920d9746cc5babcbc"),
     ("Telegram/Resources/icons/intro_plane_inner.png", "4a7592dd9a7436cc0f5cb9f1f5676e69d3d1f97831f521204ba2f1675b7c33ea"),
     ("Telegram/Resources/icons/intro_plane_inner@2x.png", "25b9ad6b0176fbb787aa63947229e4d7bfb2b3de54be402cc50936a8a953da3f"),
     ("Telegram/Resources/icons/intro_plane_inner@3x.png", "6b4af679260bdf4585b825342f7cbc62ea61794c21ee5caa3b55cf59283ba5e4"),
@@ -227,6 +228,11 @@ ASSETS = (
     ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_512x512.png", "d5f261f0e500cb9c553e515a59e7c802c6ad1c13d8a29dd306f65cbd7892a546"),
     ("Telegram/Telegram/Images.xcassets/Icon.iconset/icon_512x512@2x.png", "23cd0fb47b2a26eef1abf69e760dfb5deb02b1a60ce60f05c5f9d8c65f2f7b36"),
 )
+
+# The start of the outline of Telegram's paper plane, in any icon of the
+# release: a new file that draws it stops the patch, and goes to ASSETS.
+ICONS = "Telegram/Resources/icons"
+TELEGRAM_PLANE = "M226.328419,494.722069"
 
 # The classes whose network requests go to Google, Mozilla and Firebase for
 # Telegram's backup addresses and time: they may be constructed nowhere.
@@ -2102,6 +2108,9 @@ def verify_brand(tree):
     for rel, _ in ASSETS:
         if tree.read_bytes(rel) != (BRAND / "tree" / rel).read_bytes():
             raise PatchError(f"{rel}: not Pluma's (brand/tree)")
+    for p in sorted((tree.root / ICONS).rglob("*.svg")):
+        if TELEGRAM_PLANE in p.read_text(encoding="utf-8", errors="replace"):
+            raise PatchError(f"{p.relative_to(tree.root).as_posix()}: Telegram's paper plane; add the icon to ASSETS")
     day = palette_values(tree.read(PALETTE))
     night = {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))}
     for where, values in ((PALETTE, day), (NIGHT_THEME, night)):
