@@ -108,6 +108,14 @@ TOP_BAR_SUGGESTION = SOURCES + "/dialogs/dialogs_top_bar_suggestion.cpp"
 MAIN_SESSION_H = SOURCES + "/main/main_session.h"
 MAIN_SESSION = SOURCES + "/main/main_session.cpp"
 SECTION_WIDGET = SOURCES + "/window/section_widget.cpp"
+STICKERS_LIST_WIDGET = SOURCES + "/chat_helpers/stickers_list_widget.cpp"
+FIELD_AUTOCOMPLETE = SOURCES + "/chat_helpers/field_autocomplete.cpp"
+STICKER_SET_BOX = SOURCES + "/boxes/sticker_set_box.cpp"
+STICKER_SET_BOX_H = SOURCES + "/boxes/sticker_set_box.h"
+STICKERS_BOX = SOURCES + "/boxes/stickers_box.cpp"
+DATA_STICKERS = SOURCES + "/data/stickers/data_stickers.cpp"
+HISTORY_ITEM = SOURCES + "/history/history_item.cpp"
+DATA_MEDIA_TYPES = SOURCES + "/data/data_media_types.cpp"
 VIEW_ELEMENT = SOURCES + "/history/view/history_view_element.cpp"
 REACTIONS_SELECTOR = SOURCES + "/history/view/reactions/history_view_reactions_selector.cpp"
 SEARCH_TAGS = SOURCES + "/dialogs/dialogs_search_tags.cpp"
@@ -993,6 +1001,106 @@ SAVED_TAGS = (
      "\t\trpl::single(owner->session().savedTagsAvailable())\n"
      "\t) | rpl::on_next([=](\n"),
 )
+# Premium stickers (a document whose video thumbnail has type "f",
+# data_session.cpp 4003), which Telegram gives to Premium alone, for every
+# user (task 058): Pluma has no Premium to sell, and the owner reported the
+# gate as a defect. Main::Session::premiumStickersAvailable() stands in at the
+# places that keep them from a user: sending (ShowSendPremiumError,
+# section_widget.cpp 597, the one gate every send goes through: history,
+# scheduled, chat section, polls, stories), the lists that leave them out
+# while Premium cannot be bought (skipPremium, stickers_list_widget.cpp; the
+# count of a set in the sets box, stickers_box.cpp 2455; the set's window,
+# sticker_set_box.cpp 1112), how search mixes them in
+# (data_stickers.cpp 1503) and the lock on them (StickerPremiumMark, which
+# draws Premium's star instead; only the sticker uses of it, emoji keep the
+# lock). The own copy of a sent or forwarded premium sticker plays its effect
+# (history_item.cpp 788, data_media_types.cpp 1092), as for Premium. Custom
+# emoji stay behind Premium. As (file, the pinned upstream's text, Pluma's,
+# how many times upstream has it).
+PREMIUM_STICKERS = (
+    (MAIN_SESSION_H,
+     "\t[[nodiscard]] bool premiumPossible() const;\n",
+     "\t[[nodiscard]] bool premiumPossible() const;\n"
+     "\t// pluma: premium stickers, which need Premium upstream.\n"
+     "\t[[nodiscard]] bool premiumStickersAvailable() const;\n", 1),
+    (MAIN_SESSION,
+     "bool Session::premiumPossible() const {\n",
+     "bool Session::premiumStickersAvailable() const {\n"
+     "\t// pluma: for every user, Premium or not; the server has no Premium.\n"
+     "\treturn true;\n"
+     "}\n"
+     "\n"
+     "bool Session::premiumPossible() const {\n", 1),
+    (SECTION_WIDGET,
+     "\tif (!document->isPremiumSticker()\n"
+     "\t\t|| document->session().premium()) {\n",
+     "\t// pluma: premium stickers without Premium.\n"
+     "\tif (!document->isPremiumSticker()\n"
+     "\t\t|| document->session().premium()\n"
+     "\t\t|| document->session().premiumStickersAvailable()) {\n", 1),
+    (STICKERS_LIST_WIDGET,
+     "const auto skipPremium = !session().premiumPossible();\n",
+     "const auto skipPremium = !session().premiumPossible()\n"
+     "\t\t&& !session().premiumStickersAvailable();\n", 6),
+    (STICKERS_LIST_WIDGET,
+     "\t&session(),\n"
+     "\tst::stickersPremiumLock))\n",
+     "\t&session(),\n"
+     "\tst::stickersPremiumLock,\n"
+     "\tRectPart::Bottom,\n"
+     "\tsession().premiumStickersAvailable()))\n", 1),
+    (FIELD_AUTOCOMPLETE,
+     ", _premiumMark(_session, st::stickersPremiumLock)\n",
+     ", _premiumMark(\n"
+     "\t_session,\n"
+     "\tst::stickersPremiumLock,\n"
+     "\tRectPart::Bottom,\n"
+     "\t_session->premiumStickersAvailable())\n", 1),
+    (STICKER_SET_BOX_H,
+     "\t\tRectPart part = RectPart::Bottom);\n",
+     "\t\tRectPart part = RectPart::Bottom,\n"
+     "\t\tbool unlocked = false);\n", 1),
+    (STICKER_SET_BOX,
+     "\tRectPart part)\n"
+     ": _lockIcon(lockIcon)\n",
+     "\tRectPart part,\n"
+     "\tbool unlocked)\n"
+     ": _lockIcon(lockIcon)\n", 1),
+    (STICKER_SET_BOX,
+     "\t\t_premium = premium;\n",
+     "\t\t_premium = premium || unlocked;\n", 1),
+    (STICKER_SET_BOX,
+     ", _premiumMark(_session, st::stickersPremiumLock)\n",
+     ", _premiumMark(\n"
+     "\t_session,\n"
+     "\tst::stickersPremiumLock,\n"
+     "\tRectPart::Bottom,\n"
+     "\t_session->premiumStickersAvailable())\n", 1),
+    (STICKER_SET_BOX,
+     "\tconst auto premiumPossible = _session->premiumPossible();\n",
+     "\tconst auto premiumPossible = _session->premiumPossible()\n"
+     "\t\t|| _session->premiumStickersAvailable();\n", 1),
+    (STICKERS_BOX,
+     "bool StickersBox::Inner::skipPremium() const {\n"
+     "\treturn !_session->premiumPossible();\n",
+     "bool StickersBox::Inner::skipPremium() const {\n"
+     "\treturn !_session->premiumPossible()\n"
+     "\t\t&& !_session->premiumStickersAvailable();\n", 1),
+    (DATA_STICKERS,
+     "\tif (session().premium()) {\n"
+     "\t\tconst auto normalsPerPremium = appConfig->get<int>(\n",
+     "\tif (session().premium() || session().premiumStickersAvailable()) {\n"
+     "\t\tconst auto normalsPerPremium = appConfig->get<int>(\n", 1),
+    (HISTORY_ITEM,
+     "\t\t.skipPremiumEffect = !history->session().premium(),\n",
+     "\t\t.skipPremiumEffect = !history->session().premium()\n"
+     "\t\t\t&& !history->session().premiumStickersAvailable(),\n", 1),
+    (DATA_MEDIA_TYPES,
+     "\t\t.skipPremiumEffect = !_document->session().premium(),\n",
+     "\t\t.skipPremiumEffect = !_document->session().premium()\n"
+     "\t\t\t&& !_document->session().premiumStickersAvailable(),\n", 1),
+)
+
 # What SAVED_TAGS leaves to upstream, in DATA_REACTIONS: a user without
 # Premium puts as many reactions, and tags, on a message as the server's
 # reactions_user_max_default says, and the tags of the selector take no
@@ -2172,6 +2280,9 @@ def patch(tree, c):
         tree.expect(DATA_REACTIONS, s)
     for rel, old, new in SAVED_TAGS:
         tree.replace(rel, old, new)
+    # Premium stickers without Premium (PREMIUM_STICKERS).
+    for rel, old, new, count in PREMIUM_STICKERS:
+        tree.replace(rel, old, new, count)
 
     # pluma.chat links beside t.me's (LINK_HOSTS, LINK_BUILDERS).
     links(tree)
