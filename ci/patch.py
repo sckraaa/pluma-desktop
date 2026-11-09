@@ -1440,12 +1440,44 @@ LINK_HOSTS = (
     (CLICK_HANDLER_TYPES,
      "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",' "\n",
      "\t\t" r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$|^pluma\\.chat$", // pluma' "\n"),
-    # The hosts whose links open without asking
-    # (DefaultWhitelistedDomains), for a server that sends no
-    # whitelisted_domains; names under pluma.chat are the site's.
+    # The hosts whose links open without asking: the client's list
+    # (DefaultWhitelistedDomains) with pluma.chat in it, and the server's on
+    # top of it, not instead of it: the Pluma server names pluma.chat alone,
+    # and Telegram's hosts would start to ask and to be cut from bios.
     (CLICK_HANDLER_TYPES,
      '\t\tu"fragment.com"_q,\n\t};\n',
      '\t\tu"fragment.com"_q,\n\t\tu"pluma.chat"_q, // pluma\n\t};\n'),
+    (CLICK_HANDLER_TYPES,
+     '\treturn config.get<std::vector<QString>>(\n'
+     '\t\tu"whitelisted_domains"_q,\n'
+     '\t\tDefaultWhitelistedDomains());\n',
+     '\t// pluma: the server\'s list adds to the client\'s and does not replace it.\n'
+     '\tauto result = DefaultWhitelistedDomains();\n'
+     '\tconst auto server = config.get<std::vector<QString>>(\n'
+     '\t\tu"whitelisted_domains"_q,\n'
+     '\t\tstd::vector<QString>());\n'
+     '\tresult.insert(result.end(), server.begin(), server.end());\n'
+     '\treturn result;\n'),
+    # Of pluma.chat, the exact host opens without asking: the names under it
+    # are the site's. HostInAnyWhitelist stays wide: it strips the tokens of
+    # a foreign login, which web.pluma.chat would take.
+    (CLICK_HANDLER_TYPES,
+     '[[nodiscard]] bool HostInAnyWhitelist(const QString &host) {\n',
+     '// pluma: the names under pluma.chat are the site\'s and ask before opening.\n'
+     '[[nodiscard]] bool HostOpensWithoutAsking(\n'
+     '\t\tconst QString &host,\n'
+     '\t\tconst std::vector<QString> &domains) {\n'
+     '\treturn !host.endsWith(u".pluma.chat"_q, Qt::CaseInsensitive)\n'
+     '\t\t&& HostInDomains(host, domains);\n'
+     '}\n'
+     '\n'
+     '[[nodiscard]] bool HostInAnyWhitelist(const QString &host) {\n'),
+    (CLICK_HANDLER_TYPES,
+     '\t\t|| !HostInDomains(url.host(), WhitelistedDomains(my))\n',
+     '\t\t|| !HostOpensWithoutAsking(url.host(), WhitelistedDomains(my)) // pluma\n'),
+    (CLICK_HANDLER_TYPES,
+     '\treturn !HostInDomains(\n\t\turl.host(),\n\t\tWhitelistedDomains(session->appConfig()));\n',
+     '\treturn !HostOpensWithoutAsking( // pluma\n\t\turl.host(),\n\t\tWhitelistedDomains(session->appConfig()));\n'),
     # Proxy links pasted into the proxy settings.
     (SOURCES + "/boxes/connection_box.cpp",
      "\t\t" r'R"((?:https?:\/\/[^\s]+|tg:\/\/[^\s]+|(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[^\s]+))",' "\n",
@@ -2226,6 +2258,14 @@ def verify_links(tree):
     if tree.read(TEXT_ENTITY).count('addOne(QString::fromLatin1("chat"));') != 1:
         raise PatchError(f"{TEXT_ENTITY}: the domain .chat is not there once; {LINK_HOST} without a scheme "
                          "is not a link, or upstream takes it already (drop the edit)")
+    # Every check of a whitelist is known: a new one decides about the names
+    # under pluma.chat and the server's list.
+    types = tree.read(CLICK_HANDLER_TYPES)
+    if (types.count("HostOpensWithoutAsking(") != 3 or types.count("HostInDomains(") != 4
+            or types.count("WhitelistedDomains(") != 10 or "return config.get<std::vector<QString>>(" in types
+            or "result.insert(result.end(), server.begin(), server.end());" not in types):
+        raise PatchError(f"{CLICK_HANDLER_TYPES}: the hosts that open without asking are not the client's "
+                         f"list with the server's on top and {LINK_HOST} exact")
     verify_site_links(tree)
 
 

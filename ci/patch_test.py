@@ -520,6 +520,15 @@ DAMAGE = (
      r'u"^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.*)$"_q'),
     (patch.CLICK_HANDLER_TYPES, r'"(^|\\.)(telegram\\.(me|dog)|t\\.me)$",', r'"(^|\\.)(telegram\\.(me|dog|org)|t\\.me)$",'),
     (patch.CLICK_HANDLER_TYPES, '\t\tu"fragment.com"_q,\n', '\t\tu"tdesktop.com"_q,\n'),
+    (patch.CLICK_HANDLER_TYPES, '\t\tu"whitelisted_domains"_q,\n', '\t\tu"allowed_domains"_q,\n'),
+    (patch.CLICK_HANDLER_TYPES, '\t\t|| !HostInDomains(url.host(), WhitelistedDomains(my))\n',
+     '\t\t|| !HostInDomains(url.host().toLower(), WhitelistedDomains(my))\n'),
+    (patch.CLICK_HANDLER_TYPES, '[[nodiscard]] bool HostInAnyWhitelist(const QString &host) {\n',
+     '[[nodiscard]] bool HostInAnyList(const QString &host) {\n'),
+    # A check of the whitelist that the patch does not know.
+    (patch.CLICK_HANDLER_TYPES, 'bool UrlRequiresConfirmation(\n',
+     'bool UrlOnList(const QString &host) {\n\treturn HostInDomains(host, DefaultWhitelistedDomains());\n}\n\n'
+     'bool UrlRequiresConfirmation(\n'),
     (S + "/boxes/connection_box.cpp", "(?:www\\.)?(?:t\\.me|telegram\\.me|telegram\\.dog)", "(?:www\\.)?(?:t\\.me|telegram\\.me)"),
     (S + "/boxes/peers/edit_peer_invite_links.cpp", '\t\tu"t.me/joinchat/"_q,\n', '\t\tu"telegram.me/joinchat/"_q,\n'),
     (S + "/mtproto/mtproto_config.h", 'internalLinksDomain = u"https://t.me/"_q;', 'internalLinksDomain = u"https://telegram.me/"_q;'),
@@ -1145,18 +1154,34 @@ class UpstreamTest(unittest.TestCase):
         domains = re.findall(r'u"([a-z.]+)"_q', types[start:types.index("}", start)])
         self.assertIn("pluma.chat", domains)
 
-        def trusted(host):
+        start = types.index("bool HostOpensWithoutAsking(")
+        under = re.search(r'!host\.endsWith\(u"([a-z.]+)"_q, Qt::CaseInsensitive\)\n\t\t&& HostInDomains\(host, domains\);',
+                          types[start:]).group(1)
+
+        def in_list(host):
             # HostInDomains: the domain itself or a name under it.
             host = host.lower()
             return any(host == d or host.endswith("." + d) for d in domains)
 
+        def trusted(host):
+            return not host.lower().endswith(under) and in_list(host)
+
         for host, is_short, is_trusted in (("pluma.chat", True, True), ("PLUMA.chat", True, True),
-                                           ("web.pluma.chat", False, True), ("evilpluma.chat", False, False),
+                                           ("web.pluma.chat", False, False), ("WWW.Pluma.Chat", False, False),
+                                           ("evilpluma.chat", False, False),
                                            ("pluma.chat.example.com", False, False), ("t.me", True, True),
                                            ("user.t.me", True, True), ("telegram.org", False, True),
+                                           ("telegra.ph", False, True), ("fragment.com", False, True),
                                            ("example.com", False, False)):
             self.assertEqual(bool(short.search(host)), is_short, host)
             self.assertEqual(trusted(host), is_trusted, host)
+        # The tokens of a foreign login are stripped from the web client too.
+        self.assertTrue(in_list("web.pluma.chat"))
+        self.assertIn("return HostInDomains(host, DefaultWhitelistedDomains())\n", types)
+        # The server's list, which names pluma.chat alone, only adds.
+        self.assertIn("\tauto result = DefaultWhitelistedDomains();\n", types)
+        self.assertIn("\t\t|| !HostOpensWithoutAsking(url.host(), WhitelistedDomains(my)) // pluma\n", types)
+        self.assertIn("\treturn !HostOpensWithoutAsking( // pluma\n\t\turl.host(),\n", types)
 
         box = tree.read(S + "/boxes/connection_box.cpp")
         raw = box[box.index('R"((?:https?:'):]
