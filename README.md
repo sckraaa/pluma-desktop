@@ -255,11 +255,11 @@ The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads 
 
 | Entry | Cap | Size | |
 |---|---|---|---|
-| `linux-ccache-…` | 2000 MB | 0.9 GB | a full Release build |
-| `windows-ccache-…` | 2500 MB | 1.6 GB; a cap of 1500 MB evicted during a full build | the same |
-| `macos-ccache-…` | 2250 MB | 1.6 GB: two architectures | the same |
-| `windows-libs-…` | 1500 MB | 1.1 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
-| `macos-libs-…` | 750 MB | 0.45 GB; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
+| `linux-ccache-…` | 1300 MB | 0.9 GB | a full Release build |
+| `windows-ccache-…` | 2200 MB | 1.6 GB; a cap of 1500 MB evicted during a full build | the same |
+| `macos-ccache-…` | 2000 MB | 1.7 GB: two architectures | the same |
+| `windows-libs-…` | 2400 MB | 2.3 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
+| `macos-libs-…` | 1100 MB | 1.0 GB; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
 
 The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 9 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
 

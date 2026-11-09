@@ -36,11 +36,11 @@ reserve=1000
 # The cap of kind $1, in MB.
 cap_of() {
 	case $1 in
-	linux-ccache) echo 2000 ;;
-	windows-ccache) echo 2500 ;;
-	macos-ccache) echo 2250 ;;
-	windows-libs) echo 1500 ;;
-	macos-libs) echo 750 ;;
+	linux-ccache) echo 1300 ;;
+	windows-ccache) echo 2200 ;;
+	macos-ccache) echo 2000 ;;
+	windows-libs) echo 2400 ;;
+	macos-libs) echo 1100 ;;
 	*) return 1 ;;
 	esac
 }
