@@ -972,6 +972,9 @@ class UpstreamTest(unittest.TestCase):
                 for link_rel, link, _ in patch.LINK_BUILDERS:  # a topic link of VIEW_ELEMENT
                     if link_rel == rel:
                         expected = expected.replace(link, link.replace("t.me", patch.LINK_HOST))
+                for premium_rel, premium_old, premium_new in patch.PREMIUM_FOR_EVERYONE_EDITS:  # the star by a name
+                    if premium_rel == rel:
+                        expected = expected.replace(premium_old, premium_new)
                 self.assertEqual(tree.read(rel), expected)
         # The rest stays upstream's: the server's limit of tags on a message
         # for a user without Premium, no custom emoji among the tags.
