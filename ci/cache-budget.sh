@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # The budget of the repository's GitHub Actions cache (README, Caches). Above
-# 10 GB GitHub evicts the least recently used entries, whichever system's they
-# are, so each kind of entry has a cap, and the caps add up to 9000 MB. Only
-# runs on main save entries, and a job deletes the entries of its kind that a
-# new one supersedes before it saves that one: a kind never has two entries,
-# not even while one is being saved.
+# its limit of 40 GB GitHub evicts the least recently used entries, whichever
+# system's they are, so each kind of entry has a cap, and the caps add up to
+# 25000 MB; the rest is for the entries of pull requests and other branches.
+# A job deletes the entries of its kind and its branch that a new one
+# supersedes before it saves that one: a kind never has two entries on a
+# branch, not even while one is being saved.
 #   cache-budget.sh cap <kind>            the cap of a kind, in MB;
 #   cache-budget.sh room <kind> <path>... before an entry of the kind is saved:
 #                                         measures <path>... as actions/cache
@@ -16,7 +17,7 @@
 #                                         save=true to $GITHUB_OUTPUT,
 #                                         otherwise save=false.
 # An entry within its cap is saved. One over it is an error of the run, and is
-# saved only where the cache cannot pass 10 GB by it: in place of entries that
+# saved only where the cache cannot pass 40 GB by it: in place of entries that
 # take as much or more, or when its overrun and those of the other entries fit
 # in the reserve the caps leave. Entries of other branches count whole, being
 # outside the caps.
@@ -30,17 +31,17 @@ mode=${1:?$usage}
 kind=${2:?$usage}
 shift 2
 
-# 10 GB less the caps, in MB.
-reserve=1000
+# 40 GB less the caps, in MB.
+reserve=15000
 
 # The cap of kind $1, in MB.
 cap_of() {
 	case $1 in
-	linux-ccache) echo 1300 ;;
-	windows-ccache) echo 2200 ;;
-	macos-ccache) echo 2000 ;;
-	windows-libs) echo 2400 ;;
-	macos-libs) echo 1100 ;;
+	linux-ccache) echo 5000 ;;
+	windows-ccache) echo 7000 ;;
+	macos-ccache) echo 7000 ;;
+	windows-libs) echo 4000 ;;
+	macos-libs) echo 2000 ;;
 	*) return 1 ;;
 	esac
 }
@@ -108,9 +109,9 @@ if [ "$mb" -gt "$cap" ]; then
 	if [ "$mb" -le "$replaced" ]; then
 		echo "::error::The new $kind cache entry takes $mb MB, over its cap of $cap MB. It is saved in place of the $replaced MB it supersedes. $fix"
 	elif [ $((mb - cap + over)) -le "$reserve" ]; then
-		echo "::error::The new $kind cache entry takes $mb MB, over its cap of $cap MB. It is saved: with the $over MB the other entries take above their caps, the cache keeps within 10 GB. $fix"
+		echo "::error::The new $kind cache entry takes $mb MB, over its cap of $cap MB. It is saved: with the $over MB the other entries take above their caps, the cache keeps within 40 GB. $fix"
 	else
-		echo "::error::The new $kind cache entry takes $mb MB, over its cap of $cap MB, and is not saved: with the $over MB the other entries take above their caps, the cache could pass 10 GB. $fix"
+		echo "::error::The new $kind cache entry takes $mb MB, over its cap of $cap MB, and is not saved: with the $over MB the other entries take above their caps, the cache could pass 40 GB. $fix"
 		echo "save=false" >>"${GITHUB_OUTPUT:-/dev/null}"
 		exit 0
 	fi

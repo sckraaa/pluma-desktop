@@ -247,21 +247,21 @@ Since the repository is public, set *Settings → Actions → General → Fork p
 
 ## Caches
 
-The GitHub Actions cache of a repository holds 10 GB, and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above 10 GB GitHub evicts the entries read least recently, whichever system's they are, so the entries keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)) at every moment:
-- each kind of entry has a cap, and the caps add up to 9 GB;
-- before a job saves an entry, it measures it and deletes the entries of the kind that the new one supersedes, so a kind never has two entries, not even while one is saved. This takes `actions: write` in the build jobs; only that step gets the token;
-- a ccache never grows past its cap (`CCACHE_MAXSIZE`). An entry over its cap is an error of the run, and is saved only where the cache cannot pass 10 GB by it: in place of entries that take as much or more, or when its overrun and those of the other entries fit in the 1 GB the caps leave free (entries of other branches count whole);
-- only runs on `main` save entries. Pull requests and runs on other branches restore those of `main`.
+The GitHub Actions cache of this repository is limited to 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository), and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above the limit GitHub evicts the entries read least recently, whichever system's they are, so the entries keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)) at every moment:
+- each kind of entry has a cap, and the caps add up to 25 GB;
+- before a job saves an entry, it measures it and deletes the entries of the kind that the new one supersedes, so a kind never has two entries on a branch, not even while one is saved. This takes `actions: write` in the build jobs; only that step gets the token;
+- a ccache never grows past its cap (`CCACHE_MAXSIZE`). An entry over its cap is an error of the run, and is saved only where the cache cannot pass 40 GB by it: in place of entries that take as much or more, or when its overrun and those of the other entries fit in the 15 GB the caps leave free (entries of other branches count whole);
+- a compiler cache is saved by every run but those of forks, so the next push of a pull request finds what the last one compiled. A pull request reads its own entries and those of `main`. Libraries are saved on `main` only.
 
 | Entry | Cap | Size | |
 |---|---|---|---|
-| `linux-ccache-…` | 1300 MB | 0.9 GB | a full Release build |
-| `windows-ccache-…` | 2200 MB | 1.6 GB; a cap of 1500 MB evicted during a full build | the same |
-| `macos-ccache-…` | 2000 MB | 1.7 GB: two architectures | the same |
-| `windows-libs-…` | 2400 MB | 2.3 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
-| `macos-libs-…` | 1100 MB | 1.0 GB; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
+| `linux-ccache-…` | 5000 MB | 0.9 GB | a full Release build |
+| `windows-ccache-…` | 7000 MB | 1.6 GB; a cap of 1500 MB evicted during a full build | the same |
+| `macos-ccache-…` | 7000 MB | 1.7 GB: two architectures | the same |
+| `windows-libs-…` | 4000 MB | 2.3 GB | the libraries, Qt and the tools of `prepare.py`, release and debug variants, trimmed as upstream does |
+| `macos-libs-…` | 2000 MB | 1.0 GB; 4.8 GB with the debug builds of Qt and tg_owt | the same, universal, with Qt and tg_owt in their release variants alone |
 
-The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 9 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
+The `prune-caches` job deletes older entries of each kind on `main`, if any are left, and prints the usage, with a warning above 36 GB. The trim step of the libraries lists what each stage leaves. The image lives in the container registry, outside the cache.
 
 The compiler caches are ccache of `upstream.env`, the version of the upstream's Linux CI, on every system. The log of a build shows their statistics (hits, misses, size), the sources that missed (`ci/ccache-stats.sh`, from ccache's stats log of the build) and how long the client took.
 - Linux: the static build of that ccache, mounted in the image in place of the image's ccache 3.7.7 (EPEL 8). ccache 3 keeps each sixteenth of the cache within a sixteenth of the cap, so it evicted the precompiled headers as soon as it stored them, and 70% of the compilations of a rebuild missed; ccache 4.8 and newer clean by the size of the whole cache. Upstream's CI keeps the image's ccache, with the image's cap of 20 GB. The compiler is the image's, the same file in every run, so ccache's default check of it (its mtime and size) holds. About 70 compilations miss in every build: CMake's checks and the GObject introspection of the libraries compile in folders with random names. They take seconds, but every build saves the cache again (0.9 GB, under a minute).
@@ -270,7 +270,7 @@ The compiler caches are ccache of `upstream.env`, the version of the upstream's 
 
 The paths are the same in every run (`D:\TBuild`, `/Users/runner/TBuild`, the workspace on Linux), so ccache needs no base directory, and no compile line holds a date or the ID of a run.
 
-To give a kind more room, raise its cap and lower another's by as much, here and in `ci/cache-budget.sh` (a test compares the two). A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap that are not saved are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. Raising the repository's cache limit in *Settings → Actions → Caches* is paid above 10 GB (ADR 0010 of the server repository).
+To give a kind more room, raise its cap here and in `ci/cache-budget.sh` (a test compares the two), keeping the sum within 25 GB. A ccache too small for a full build evicts during the build, and the next one finds fewer hits; libraries over their cap that are not saved are built again in every run. An entry is gone if its save fails after the old one was deleted, and the next run builds it again. If the repository's limit goes back to 10 GB, the caps have to shrink with it.
 
 ## Local build
 
