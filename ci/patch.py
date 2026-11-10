@@ -2189,10 +2189,12 @@ def verify_help_and_gifts(tree):
 
 def verify_brand(tree):
     """Checks the brand independently of how the edits were made."""
-    # No Telegram in the built-in English but links and LANG_KEEP, nor in the
-    # string literals of the code but what CODE_TELEGRAM keeps.
+    # No Telegram in the built-in English but links, LANG_KEEP and the texts
+    # of the login code screens, which name the real one (LOGIN_CODE_STRINGS),
+    # nor in the string literals of the code but what CODE_TELEGRAM keeps.
     for m in lang_entries(tree.read(LANG)):
-        if "Teamgram" in m["value"] or (m["key"] not in LANG_KEEP and name_telegram(m["value"], "")[1]):
+        kept = m["key"] in LANG_KEEP or LOGIN_CODE_STRINGS.get(m["key"]) == m["value"]
+        if "Teamgram" in m["value"] or (not kept and name_telegram(m["value"], "")[1]):
             raise PatchError(f"{LANG}: {m['key']} still names Telegram")
     left = {}
     for rel in tree.sources():
@@ -2204,9 +2206,15 @@ def verify_brand(tree):
         raise PatchError(f"{SOURCES}: Telegram in the texts of {', '.join(diff[:5])} "
                          "is not what CODE_TELEGRAM keeps")
 
-    # plm:// alone.
+    # plm:// alone, but the link of the login code screens to Telegram's own
+    # settings (TELEGRAM_SETTINGS_LINK).
     for rel in tree.sources():
-        if "tg://" in tree.scan(rel):
+        text = tree.scan(rel)
+        if rel == INTRO_CODE:
+            if text.count(TELEGRAM_SETTINGS_LINK) != 1:
+                raise PatchError(f"{rel}: no link to Telegram's settings of the phone number")
+            text = text.replace(TELEGRAM_SETTINGS_LINK, "")
+        if "tg://" in text:
             raise PatchError(f"{rel}: still has tg:// links")
     application = tree.read(APPLICATION)
     if (application.count("base::Platform::RegisterUrlScheme(") != 1 or '.protocol = u"plm"_q' not in application
@@ -2424,7 +2432,7 @@ def check_upstream(tree, c):
     # ci/sign-macos.sh signs with upstream's entitlements, which it copies.
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
-    for rel in EDITED + brand_edited() + links_edited():
+    for rel in EDITED + brand_edited() + links_edited() + login_code_edited():
         tree.lf_only(rel)
 
 
@@ -2598,6 +2606,8 @@ def patch(tree, c):
 
     rebrand(tree, c)
     premium_for_everyone(tree)
+    # After rebrand(): the texts name the real Telegram.
+    login_code_screens(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2739,6 +2749,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
+    verify_login_code_screens(tree)
 
 
 
@@ -2828,6 +2839,647 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- The screens of the login code -------------------------------------------
+# Task 076 of the server repository. The server tells by the type of
+# auth.sentCode where the code went, so that the screen says the truth:
+# - sentCodeTypeApp: to the person's other Pluma session; the native screen,
+#   with "Didn't get the code?" in place of "Send code via SMS";
+# - sentCodeTypeFragmentSms: to the person's own Telegram, in a message from
+#   the server's account; url is tg://resolve of that account, or empty. The
+#   layout of upstream's Fragment screen (intro_code.cpp:52-57, :94-100,
+#   :365-371, :422-436) with Pluma's texts and no Fragment logo: Pluma has no
+#   Fragment numbers;
+# - sentCodeTypeSms: the code did not reach Telegram (Pluma sends no SMS).
+#   The same layout: the path in Telegram's privacy settings, a button to
+#   them, and "Send again" after the countdown of next_type and timeout.
+# "Didn't get the code?" calls auth.resendCode, on the same screen, which
+# then follows the new answer; upstream took every resent code for an SMS
+# (intro_code.cpp:469). With no next_type nothing more can be sent: a box
+# sends the person to the administrator; nothing leads to Telegram's support.
+# The buttons open the real Telegram with tg://, which Pluma does not handle
+# (SCHEME_FILES); Telegram Desktop routes tg://settings/phone_privacy to
+# Privacy > Phone Number (core/deep_links/deep_links_settings.cpp:2125-2128).
+# Whether an app handles tg:// is not known reliably on the desktop systems
+# (sandboxes of Flatpak and Snap, xdg-open succeeding without a handler), so
+# the buttons show always, as the task's design says for Desktop.
+# The texts name the real Telegram: they are added after rebrand(), and
+# verify_brand() keeps them by key and exact value. Other languages come from
+# the server's language pack of tdesktop.
+INTRO_CODE = SOURCES + "/intro/intro_code.cpp"
+INTRO_CODE_H = SOURCES + "/intro/intro_code.h"
+INTRO_STEP = SOURCES + "/intro/intro_step.cpp"
+INTRO_STEP_H = SOURCES + "/intro/intro_step.h"
+INTRO_WIDGET = SOURCES + "/intro/intro_widget.cpp"
+INTRO_WIDGET_H = SOURCES + "/intro/intro_widget.h"
+MAIN_WINDOW = SOURCES + "/window/main_window.cpp"
+MAIN_WINDOW_H = SOURCES + "/window/main_window.h"
+MAINWINDOW = SOURCES + "/mainwindow.cpp"
+MAINWINDOW_H = SOURCES + "/mainwindow.h"
+
+# The built-in English, as lang.strings writes it, after this entry.
+LOGIN_CODE_STRINGS_AFTER = '"lng_intro_fragment_button" = "Open Fragment";\n'
+LOGIN_CODE_STRINGS = {
+    "lng_pluma_code_telegram_title": "Check Telegram",
+    "lng_pluma_code_telegram_about": "We've sent the code for **{phone_number}** to your Telegram, "
+                                     "in a message from the Pluma account.",
+    "lng_pluma_code_telegram_button": "Open Telegram",
+    "lng_pluma_code_no_code": "Didn't get the code?",
+    "lng_pluma_code_failed_title": "Code didn't reach Telegram",
+    "lng_pluma_code_failed_about": "The code for **{phone_number}** didn't reach your Telegram. "
+                                   "Let Telegram find you by your number: **Settings → Privacy and Security "
+                                   "→ Phone Number → Who can find me by my number? → Everybody**."
+                                   "\\n\\nNo Telegram? Ask the administrator for the code and enter it here.",
+    "lng_pluma_code_failed_button": "Open Telegram settings",
+    "lng_pluma_code_resend_in": "Send again in {time}",
+    "lng_pluma_code_resend": "Send again",
+    "lng_pluma_code_sending": "Sending…",
+    "lng_pluma_code_admin_title": "Ask the administrator",
+    "lng_pluma_code_admin_text": "Ask the Pluma administrator for your code and enter it here.",
+}
+
+# The one tg:// link of the sources, which opens Telegram's own settings.
+TELEGRAM_SETTINGS_LINK = 'u"tg://settings/phone_privacy"_q'
+
+LOGIN_CODE_TITLE_OLD = """\
+\tsetTitleText(_isFragment.value(
+\t) | rpl::map([=](bool isFragment) {
+\t\treturn !isFragment
+\t\t\t? rpl::single(Ui::FormatPhone(getData()->phone))
+\t\t\t: tr::lng_intro_fragment_title();
+\t}) | rpl::flatten_latest());
+"""
+LOGIN_CODE_TITLE_NEW = """\
+\t// pluma: the code in the person's own Telegram, or not delivered there
+\t// (task 076); Pluma has no Fragment numbers.
+\tsetTitleText(_mode.value(
+\t) | rpl::map([=](Mode mode) {
+\t\treturn (mode == Mode::Telegram)
+\t\t\t? tr::lng_pluma_code_telegram_title()
+\t\t\t: (mode == Mode::Undelivered)
+\t\t\t? tr::lng_pluma_code_failed_title()
+\t\t\t: rpl::single(Ui::FormatPhone(getData()->phone));
+\t}) | rpl::flatten_latest());
+
+\t// pluma: on the screens of task 076 a description longer than the three
+\t// lines upstream lays out above the field moves the field, the row under
+\t// it and the button down by what it has more; the native screens keep
+\t// upstream's layout.
+\trpl::combine(
+\t\tdescriptionHeightValue(),
+\t\t_mode.value()
+\t) | rpl::on_next([=](int height, Mode mode) {
+\t\tconst auto room = st::introDescription.style.lineHeight * 3;
+\t\tsetContentShift((mode == Mode::Telegram || mode == Mode::Undelivered)
+\t\t\t? std::max(height - room, 0)
+\t\t\t: 0);
+\t}, lifetime());
+\tcontentShiftValue(
+\t) | rpl::on_next([=](int) {
+\t\tupdateControlsGeometry();
+\t}, lifetime());
+"""
+
+LOGIN_CODE_CALL_TEXT_OLD = "void CodeWidget::updateCallText() {\n\tauto text = ([this]() -> QString {\n"
+LOGIN_CODE_CALL_TEXT_NEW = """\
+void CodeWidget::updateCallText() {
+\t// pluma: the screens of task 076 have no call. The row under the field
+\t// holds the countdown to "Send again" (the server's timeout, or its
+\t// FLOOD_WAIT), the request being sent, or the link.
+\tconst auto mode = _mode.current();
+\tif (mode != Mode::Default) {
+\t\tconst auto resendAt = std::max(
+\t\t\t(mode == Mode::Undelivered)
+\t\t\t\t? getData()->codeResendAt
+\t\t\t\t: crl::time(0),
+\t\t\t_resendFloodUntil);
+\t\tconst auto left = int(std::max(
+\t\t\t(resendAt - crl::now() + 999) / 1000,
+\t\t\tcrl::time(0)));
+\t\tif (!left) {
+\t\t\t_resendTimer.cancel();
+\t\t} else if (!_resendTimer.isActive()) {
+\t\t\t_resendTimer.callEach(1000);
+\t\t}
+\t\tconst auto text = _noTelegramCodeRequestId
+\t\t\t? tr::lng_pluma_code_sending(tr::now)
+\t\t\t: left
+\t\t\t? tr::lng_pluma_code_resend_in(
+\t\t\t\ttr::now,
+\t\t\t\tlt_time,
+\t\t\t\tu"%1:%2"_q.arg(left / 60).arg(left % 60, 2, 10, QChar('0')))
+\t\t\t: QString();
+\t\t_noTelegramCode->setText(
+\t\t\t(mode == Mode::Undelivered && getData()->codeResendable)
+\t\t\t\t? tr::lng_pluma_code_resend(tr::now)
+\t\t\t\t: tr::lng_pluma_code_no_code(tr::now));
+\t\t_noTelegramCode->setVisible(text.isEmpty() && !animating());
+\t\t_callLabel->setText(text);
+\t\t_callLabel->setVisible(!text.isEmpty() && !animating());
+\t\treturn;
+\t}
+\tauto text = ([this]() -> QString {
+"""
+
+LOGIN_CODE_DESC_TEXT = """\
+\tconst auto byTelegram = getData()->codeByTelegram;
+\t// pluma: the code went to the person's own Telegram (FragmentSms), or
+\t// did not reach it (Sms: Pluma sends no SMS); task 076.
+\tconst auto mode = getData()->codeInTelegram
+\t\t? Mode::Telegram
+\t\t: getData()->codeUndelivered
+\t\t? Mode::Undelivered
+\t\t: byTelegram
+\t\t? Mode::App
+\t\t: Mode::Default;
+\t_mode.force_assign(mode);
+\tconst auto phone = [&] {
+\t\treturn rpl::single(
+\t\t\tTextWithEntities::Simple(Ui::FormatPhone(getData()->phone)));
+\t};
+\tconst auto emailPattern = !getData()->emailPatternSetup.isEmpty()
+\t\t? getData()->emailPatternSetup
+\t\t: getData()->emailPatternLogin;
+\tsetDescriptionText(!emailPattern.isEmpty()
+\t\t? tr::lng_intro_email_confirm_subtitle(
+\t\t\tlt_email,
+\t\t\trpl::single(Ui::Text::WrapEmailPattern(emailPattern)),
+\t\t\ttr::marked)
+\t\t: (mode == Mode::Telegram)
+\t\t? tr::lng_pluma_code_telegram_about(
+\t\t\tlt_phone_number,
+\t\t\tphone(),
+\t\t\ttr::rich)
+\t\t: (mode == Mode::Undelivered)
+\t\t? tr::lng_pluma_code_failed_about(
+\t\t\tlt_phone_number,
+\t\t\tphone(),
+\t\t\ttr::rich)
+\t\t: (byTelegram ? tr::lng_code_from_telegram : tr::lng_code_desc)(
+\t\t\ttr::rich));
+\tif (mode != Mode::Default) {
+\t\t_callTimer.cancel();
+\t} else {
+\t\t_noTelegramCode->hide();
+\t\t_callStatus = getData()->callStatus;
+\t\t_callTimeout = getData()->callTimeout;
+\t\tif (_callStatus == CallStatus::Waiting && !_callTimer.isActive()) {
+\t\t\t_callTimer.callEach(1000);
+\t\t}
+\t}
+\tupdateCallText();"""
+
+LOGIN_CODE_SUBMIT = """\
+\t// pluma: the buttons of task 076 open the real Telegram: the chat with
+\t// the code, or its privacy settings of the phone number.
+\tconst auto mode = _mode.current();
+\tif (mode == Mode::Undelivered) {
+\t\tFile::OpenUrl(""" + TELEGRAM_SETTINGS_LINK + """);
+\t} else if (mode == Mode::Telegram
+\t\t&& !getData()->codeByFragmentUrl.isEmpty()) {
+\t\tFile::OpenUrl(getData()->codeByFragmentUrl);
+\t} else {
+\t\t_code->requestCode();
+\t}"""
+
+LOGIN_CODE_NEXT_TEXT = """\
+\treturn _mode.value(
+\t) | rpl::map([=](Mode mode) {
+\t\t// pluma: no chat to open, no button (task 076).
+\t\treturn (mode == Mode::Telegram)
+\t\t\t? (getData()->codeByFragmentUrl.isEmpty()
+\t\t\t\t? rpl::single(QString())
+\t\t\t\t: tr::lng_pluma_code_telegram_button())
+\t\t\t: (mode == Mode::Undelivered)
+\t\t\t? tr::lng_pluma_code_failed_button()
+\t\t\t: Step::nextButtonText();
+\t}) | rpl::flatten_latest();"""
+
+LOGIN_CODE_NEXT_STYLE = """\
+\t// pluma: the step's own button, with no Fragment logo (task 076).
+\treturn rpl::single(static_cast<const style::RoundButton*>(nullptr));"""
+
+LOGIN_CODE_NO_CODE = """\
+\tif (_noTelegramCodeRequestId) {
+\t\treturn;
+\t}
+\t// pluma: with nothing more to send the code by, the administrator gives
+\t// it; no SMS and no Telegram support (task 076).
+\tif (!getData()->codeResendable) {
+\t\tshowAdministratorBox();
+\t\treturn;
+\t}
+\t_noTelegramCodeRequestId = api().request(MTPauth_ResendCode(
+\t\tMTP_flags(0),
+\t\tMTP_string(getData()->phone),
+\t\tMTP_bytes(getData()->phoneHash),
+\t\tMTPstring() // reason
+\t)).done([=](const MTPauth_SentCode &result) {
+\t\tnoTelegramCodeDone(result);
+\t}).fail([=](const MTP::Error &error) {
+\t\tnoTelegramCodeFail(error);
+\t}).handleFloodErrors().send();
+\tupdateCallText(); // pluma: "Sending..." in the row"""
+
+LOGIN_CODE_NO_CODE_FAIL = """\
+\t_noTelegramCodeRequestId = 0;
+\tconst auto &type = error.type();
+\tconst auto flood = MTP::IsFloodError(error);
+\tconst auto unavailable = (type == u"SEND_CODE_UNAVAILABLE"_q);
+\tif (flood) {
+\t\t// pluma: no "Send again" before the wait of FLOOD_WAIT_X is over.
+\t\tconst auto seconds = type.mid(type.lastIndexOf('_') + 1).toInt();
+\t\t_resendFloodUntil = crl::now() + seconds * crl::time(1000);
+\t} else if (unavailable) {
+\t\t// pluma: nothing more to send the code by (task 076).
+\t\tgetData()->codeResendable = false;
+\t}
+\tupdateCallText(); // pluma: the link or the countdown back in the row
+\tif (flood) {
+\t\tshowCodeError(tr::lng_flood_error());
+\t} else if (unavailable) {
+\t\tshowAdministratorBox(); // pluma
+\t} else if (type == u"PHONE_CODE_EXPIRED"_q) {
+\t\tgoBack(); // pluma: as codeSubmitFail, not the error's name
+\t} else if (!MTP::IgnoreError(error)) {
+\t\tshowCodeError(rpl::single(type));
+\t}"""
+
+LOGIN_CODE_ADMINISTRATOR_BOX = """\
+void CodeWidget::showAdministratorBox() {
+\t// pluma: with nothing more to send the code by, the administrator gives
+\t// it (task 076).
+\tUi::show(Ui::MakeInformBox({
+\t\t.text = tr::lng_pluma_code_admin_text(),
+\t\t.title = tr::lng_pluma_code_admin_title(),
+\t}));
+}
+"""
+
+# Whole functions of intro_code.cpp: (head, body, what the replaced one had).
+LOGIN_CODE_BODIES = (
+    ("void CodeWidget::updateDescText() {\n", LOGIN_CODE_DESC_TEXT,
+     ("_isFragment = isFragment;", "tr::lng_intro_fragment_about(", "_callTimer.callEach(1000);")),
+    ("void CodeWidget::submit() {\n", LOGIN_CODE_SUBMIT, ("File::OpenUrl(getData()->codeByFragmentUrl);",)),
+    ("rpl::producer<QString> CodeWidget::nextButtonText() const {\n", LOGIN_CODE_NEXT_TEXT,
+     ("tr::lng_intro_fragment_button()",)),
+    ("rpl::producer<const style::RoundButton*> CodeWidget::nextButtonStyle() const {\n", LOGIN_CODE_NEXT_STYLE,
+     ("&st::introFragmentButton",)),
+    ("void CodeWidget::noTelegramCode() {\n", LOGIN_CODE_NO_CODE, ("MTPauth_ResendCode(", "noTelegramCodeFail(error);")),
+    ("void CodeWidget::noTelegramCodeFail(const MTP::Error &error) {\n", LOGIN_CODE_NO_CODE_FAIL,
+     ('u"SEND_CODE_UNAVAILABLE"_q',)),
+)
+
+LOGIN_CODE_EDITS = (
+    # The data of the step: what the server answered (intro_step.cpp:359-372).
+    (INTRO_WIDGET_H, "\tQString codeByFragmentUrl;\n",
+     "\tQString codeByFragmentUrl;\n"
+     "\t// pluma: the code went to the person's own Telegram (FragmentSms) or\n"
+     "\t// did not reach it (Sms: Pluma sends no SMS), whether auth.resendCode\n"
+     "\t// has another way (next_type) and from when (timeout); task 076.\n"
+     "\tbool codeInTelegram = false;\n"
+     "\tbool codeUndelivered = false;\n"
+     "\tbool codeResendable = false;\n"
+     "\tcrl::time codeResendAt = 0;\n"),
+    (INTRO_STEP, "\tgetData()->codeByTelegram = false;\n\tgetData()->codeByFragmentUrl = QString();\n",
+     "\tgetData()->codeByTelegram = false;\n\tgetData()->codeByFragmentUrl = QString();\n"
+     "\t// pluma: task 076 (Data::codeInTelegram).\n"
+     "\tgetData()->codeInTelegram = false;\n"
+     "\tgetData()->codeUndelivered = false;\n"
+     "\tgetData()->codeResendable = data.vnext_type().has_value();\n"
+     "\tconst auto timeout = data.vtimeout().value_or(0);\n"
+     "\tgetData()->codeResendAt = (timeout > 0)\n"
+     "\t\t? (crl::now() + timeout * crl::time(1000))\n"
+     "\t\t: 0;\n"),
+    (INTRO_STEP, "\t}, [&](const MTPDauth_sentCodeTypeSms &data) {\n\t\tgetData()->codeLength = data.vlength().v;\n",
+     "\t}, [&](const MTPDauth_sentCodeTypeSms &data) {\n"
+     "\t\tgetData()->codeUndelivered = true; // pluma\n"
+     "\t\tgetData()->codeLength = data.vlength().v;\n"),
+    (INTRO_STEP, "\t\tgetData()->codeByFragmentUrl = qs(data.vurl());\n",
+     "\t\tgetData()->codeInTelegram = true; // pluma\n"
+     "\t\tgetData()->codeByFragmentUrl = qs(data.vurl());\n"),
+    # A step's description may move what is under it (the code step's texts):
+    # by contentShift, animated on the step on view. The content rises as
+    # far as the window needs to keep the next button and the language link
+    # under it in view, and the window keeps the height the step needs, as
+    # it does for its bars (Window::MainWindow::computeMinHeight()).
+    (INTRO_STEP_H, "\t[[nodiscard]] int contentTop() const;\n",
+     "\t[[nodiscard]] int contentTop() const;\n"
+     "\t// pluma: how far a longer description moves the content under it,\n"
+     "\t// the next button included, and the height the step then needs, or\n"
+     "\t// 0 when the window's own minimum is enough (task 076).\n"
+     "\t[[nodiscard]] int contentShift() const {\n"
+     "\t\treturn _contentShift.current();\n"
+     "\t}\n"
+     "\t[[nodiscard]] rpl::producer<int> contentShiftValue() const {\n"
+     "\t\treturn _contentShift.value();\n"
+     "\t}\n"
+     "\t[[nodiscard]] rpl::producer<int> requiredHeightValue() const {\n"
+     "\t\treturn _requiredHeight.value();\n"
+     "\t}\n"),
+    (INTRO_STEP_H, "\tvoid setDescriptionText(v::text::data &&descriptionText);\n",
+     "\tvoid setDescriptionText(v::text::data &&descriptionText);\n"
+     "\t[[nodiscard]] rpl::producer<int> descriptionHeightValue() const; // pluma\n"
+     "\tvoid setContentShift(int shift); // pluma\n"),
+    (INTRO_STEP_H, "\t[[nodiscard]] QPixmap prepareSlideAnimation();\n",
+     "\t[[nodiscard]] QPixmap prepareSlideAnimation( // pluma\n"
+     "\t\tint top,\n"
+     "\t\tint slideHeight);\n"
+     "\t[[nodiscard]] static int ContentBelowNextTop(); // pluma\n"),
+    (INTRO_STEP_H, "\tobject_ptr<Ui::FadeWrap<Ui::FlatLabel>> _description;\n",
+     "\tobject_ptr<Ui::FadeWrap<Ui::FlatLabel>> _description;\n"
+     "\t// pluma: task 076.\n"
+     "\trpl::variable<int> _contentShift = 0;\n"
+     "\tint _contentShiftTo = 0;\n"
+     "\tUi::Animations::Simple _contentShiftAnimation;\n"
+     "\trpl::variable<int> _requiredHeight = 0;\n"),
+    (INTRO_STEP_H, "\tstd::unique_ptr<Ui::SlideAnimation> _slideAnimation;\n",
+     "\tstd::unique_ptr<Ui::SlideAnimation> _slideAnimation;\n"
+     "\tint _slideTop = 0; // pluma: of both steps' snapshots\n"
+     "\tint _slideHeight = 0;\n"),
+    (INTRO_STEP, "\t_descriptionText = v::text::take_marked(std::move(descriptionText));\n}\n",
+     "\t_descriptionText = v::text::take_marked(std::move(descriptionText));\n}\n"
+     "\n"
+     "rpl::producer<int> Step::descriptionHeightValue() const { // pluma\n"
+     "\treturn _description->entity()->heightValue();\n"
+     "}\n"
+     "\n"
+     "int Step::ContentBelowNextTop() { // pluma\n"
+     "\t// The next button, the language link under it at its own height\n"
+     "\t// (Widget::updateControlsGeometry) and the margin of the bottom ones.\n"
+     "\treturn st::introNextButton.height\n"
+     "\t\t+ 2 * st::defaultLinkButton.font->height\n"
+     "\t\t+ st::introResetBottom;\n"
+     "}\n"
+     "\n"
+     "void Step::setContentShift(int shift) { // pluma\n"
+     "\tif (_contentShiftTo == shift) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_contentShiftTo = shift;\n"
+     "\t_requiredHeight = shift\n"
+     "\t\t? (st::introStepTopMin\n"
+     "\t\t\t+ st::introNextTop\n"
+     "\t\t\t+ shift\n"
+     "\t\t\t+ ContentBelowNextTop())\n"
+     "\t\t: 0;\n"
+     "\tconst auto apply = [=] {\n"
+     "\t\t_contentShift = int(base::SafeRound(\n"
+     "\t\t\t_contentShiftAnimation.value(_contentShiftTo)));\n"
+     "\t\tupdateLabelsPosition();\n"
+     "\t};\n"
+     "\t// The step on view moves with its next button; one yet to slide in,\n"
+     "\t// or sliding, is laid out at once.\n"
+     "\tif (isHidden() || animating()) {\n"
+     "\t\t_contentShiftAnimation.stop();\n"
+     "\t\tapply();\n"
+     "\t} else {\n"
+     "\t\t_contentShiftAnimation.start(\n"
+     "\t\t\tapply,\n"
+     "\t\t\t_contentShift.current(),\n"
+     "\t\t\tshift,\n"
+     "\t\t\tst::introSlideDuration);\n"
+     "\t}\n"
+     "}\n"),
+    (INTRO_STEP, "\tauto result = (height() - st::introHeight) / 2;\n\taccumulate_max(result, st::introStepTopMin);\n",
+     "\tauto result = (height() - st::introHeight) / 2;\n"
+     "\t// pluma: content moved down by a longer description rises as far as\n"
+     "\t// the next button and the language link need to stay in view.\n"
+     "\tif (const auto shift = contentShift()) {\n"
+     "\t\taccumulate_min(\n"
+     "\t\t\tresult,\n"
+     "\t\t\theight() - st::introNextTop - shift - ContentBelowNextTop());\n"
+     "\t}\n"
+     "\taccumulate_max(result, st::introStepTopMin);\n"),
+    (INTRO_STEP, "\t\tauto leftSnapshot = after->prepareSlideAnimation();\n"
+                 "\t\tauto rightSnapshot = prepareSlideAnimation();\n",
+     "\t\t// pluma: one rect for both steps, which a longer description may\n"
+     "\t\t// make taller or move (task 076).\n"
+     "\t\t_slideTop = std::min(contentTop(), after->contentTop());\n"
+     "\t\t_slideHeight = std::max(\n"
+     "\t\t\tcontentTop() + contentShift(),\n"
+     "\t\t\tafter->contentTop() + after->contentShift())\n"
+     "\t\t\t+ st::introStepHeight\n"
+     "\t\t\t- _slideTop;\n"
+     "\t\tauto leftSnapshot = after->prepareSlideAnimation(\n"
+     "\t\t\t_slideTop,\n"
+     "\t\t\t_slideHeight);\n"
+     "\t\tauto rightSnapshot = prepareSlideAnimation(_slideTop, _slideHeight);\n"),
+    (INTRO_STEP, "QPixmap Step::prepareSlideAnimation() {\n\tauto grabLeft = (width() - st::introStepWidth) / 2;\n"
+                 "\tauto grabTop = contentTop();\n\treturn Ui::GrabWidget(\n\t\tthis,\n"
+                 "\t\tQRect(grabLeft, grabTop, st::introStepWidth, st::introStepHeight));\n",
+     "QPixmap Step::prepareSlideAnimation(int top, int slideHeight) { // pluma\n"
+     "\tauto grabLeft = (width() - st::introStepWidth) / 2;\n"
+     "\treturn Ui::GrabWidget(\n"
+     "\t\tthis,\n"
+     "\t\tQRect(grabLeft, top, st::introStepWidth, slideHeight));\n"),
+    (INTRO_STEP, "\t\t_slideAnimation->paintFrame(p, (width() - st::introStepWidth) / 2, contentTop(), width());\n",
+     "\t\t_slideAnimation->paintFrame(\n"
+     "\t\t\tp,\n"
+     "\t\t\t(width() - st::introStepWidth) / 2,\n"
+     "\t\t\t_slideTop, // pluma\n"
+     "\t\t\twidth());\n"),
+    (INTRO_STEP, "\t\t\t[=] { update(0, contentTop(), width(), st::introStepHeight); },\n",
+     "\t\t\t[=] { update(0, _slideTop, width(), _slideHeight); }, // pluma\n"),
+    (INTRO_STEP, "\t\tif (!QRect(0, contentTop(), width(), st::introStepHeight).intersects(clip)) {\n",
+     "\t\tif (!QRect(\n"
+     "\t\t\t\t0,\n"
+     "\t\t\t\tcontentTop(),\n"
+     "\t\t\t\twidth(),\n"
+     "\t\t\t\tst::introStepHeight + contentShift() // pluma\n"
+     "\t\t\t).intersects(clip)) {\n"),
+    # The next button and the window follow the step on view.
+    (INTRO_WIDGET, "\tauto nextTopTo = getStep()->contentTop() + st::introNextTop;\n"
+                   "\tauto nextTop = anim::interpolate(_nextTopFrom, nextTopTo, shown);\n",
+     "\tauto nextTopTo = getStep()->contentTop()\n"
+     "\t\t+ st::introNextTop\n"
+     "\t\t+ getStep()->contentShift(); // pluma: under a longer description\n"
+     "\tauto nextTop = anim::interpolate(\n"
+     "\t\t_nextTopFrom,\n"
+     "\t\tnextTopTo,\n"
+     "\t\tshown * _nextMoveAnimation.value(1.)); // pluma\n"),
+    (INTRO_WIDGET, "\t\t\twasStep->hasCover() ? anim::linear : anim::easeOutCirc);\n\t}\n",
+     "\t\t\twasStep->hasCover() ? anim::linear : anim::easeOutCirc);\n"
+     "\t} else if (wasStep->contentTop() + wasStep->contentShift()\n"
+     "\t\t!= getStep()->contentTop() + getStep()->contentShift()) {\n"
+     "\t\t// pluma: under a longer description the button moves to its\n"
+     "\t\t// place with the slide (task 076).\n"
+     "\t\t_nextTopFrom = wasStep->contentTop()\n"
+     "\t\t\t+ st::introNextTop\n"
+     "\t\t\t+ wasStep->contentShift();\n"
+     "\t\t_nextMoveAnimation.start(\n"
+     "\t\t\t[this] { updateControlsGeometry(); },\n"
+     "\t\t\t0.,\n"
+     "\t\t\t1.,\n"
+     "\t\t\tst::introSlideDuration);\n"
+     "\t}\n"),
+    (INTRO_WIDGET, "\t}, getStep()->lifetime());\n\n\tgetStep()->nextButtonFocusRequests() | rpl::on_next([=] {\n",
+     "\t}, getStep()->lifetime());\n"
+     "\n"
+     "\t// pluma: the button follows the step's description, and the window\n"
+     "\t// keeps the height the step needs (task 076). A step left in the\n"
+     "\t// history is not on view.\n"
+     "\tconst auto step = getStep();\n"
+     "\tstep->contentShiftValue(\n"
+     "\t) | rpl::on_next([=](int) {\n"
+     "\t\tif (getStep() == step) {\n"
+     "\t\t\tupdateControlsGeometry();\n"
+     "\t\t}\n"
+     "\t}, step->lifetime());\n"
+     "\tstep->requiredHeightValue(\n"
+     "\t) | rpl::on_next([=](int height) {\n"
+     "\t\tif (getStep() == step) {\n"
+     "\t\t\t_requiredHeight = height;\n"
+     "\t\t}\n"
+     "\t}, step->lifetime());\n"
+     "\n"
+     "\tgetStep()->nextButtonFocusRequests() | rpl::on_next([=] {\n"),
+    (INTRO_WIDGET_H, "\t[[nodiscard]] rpl::producer<> showSettingsRequested() const;\n",
+     "\t[[nodiscard]] rpl::producer<> showSettingsRequested() const;\n"
+     "\n"
+     "\t// pluma: the height the step on view needs, or 0 when the window's\n"
+     "\t// own minimum is enough (task 076).\n"
+     "\t[[nodiscard]] int requiredHeight() const {\n"
+     "\t\treturn _requiredHeight.current();\n"
+     "\t}\n"
+     "\t[[nodiscard]] rpl::producer<int> requiredHeightValue() const {\n"
+     "\t\treturn _requiredHeight.value();\n"
+     "\t}\n"),
+    (INTRO_WIDGET_H, "\tint _controlsTopFrom = 0;\n",
+     "\tint _controlsTopFrom = 0;\n"
+     "\tUi::Animations::Simple _nextMoveAnimation; // pluma\n"
+     "\trpl::variable<int> _requiredHeight = 0; // pluma\n"),
+    (MAIN_WINDOW_H, "\tvirtual QRect computeDesktopRect() const;\n",
+     "\tvirtual QRect computeDesktopRect() const;\n"
+     "\n"
+     "\t// pluma: what the body's content needs above windowMinHeight\n"
+     "\t// (task 076).\n"
+     "\t[[nodiscard]] virtual int bodyMinHeightAdd() const {\n"
+     "\t\treturn 0;\n"
+     "\t}\n"),
+    (MAIN_WINDOW, "\treturn outdated + screenReader + st::windowMinHeight;\n",
+     "\treturn outdated\n"
+     "\t\t+ screenReader\n"
+     "\t\t+ st::windowMinHeight\n"
+     "\t\t+ bodyMinHeightAdd(); // pluma\n"),
+    (MAINWINDOW_H, "\tvoid clearWidgetsHook() override;\n",
+     "\tvoid clearWidgetsHook() override;\n"
+     "\t[[nodiscard]] int bodyMinHeightAdd() const override; // pluma\n"),
+    (MAINWINDOW, "\tclearWidgets();\n\t_intro = std::move(created);\n",
+     "\tclearWidgets();\n"
+     "\t_intro = std::move(created);\n"
+     "\t// pluma: the window keeps the height the login code screens need\n"
+     "\t// (task 076).\n"
+     "\t_intro->requiredHeightValue(\n"
+     "\t) | rpl::skip(1) | rpl::on_next([=](int) {\n"
+     "\t\trecountGeometryConstraints();\n"
+     "\t}, _intro->lifetime());\n"),
+    (MAINWINDOW, "\t_main.destroy();\n\t_intro.destroy();\n",
+     "\t_main.destroy();\n"
+     "\t// pluma: without the intro the window's own minimum height.\n"
+     "\tconst auto introHeight = _intro ? _intro->requiredHeight() : 0;\n"
+     "\t_intro.destroy();\n"
+     "\tif (introHeight) {\n"
+     "\t\tsetMinimumSize(QSize(computeMinWidth(), computeMinHeight()));\n"
+     "\t}\n"),
+    (MAINWINDOW, "QPixmap MainWindow::grabForSlideAnimation() {\n",
+     "int MainWindow::bodyMinHeightAdd() const { // pluma\n"
+     "\treturn _intro\n"
+     "\t\t? std::max(_intro->requiredHeight() - st::windowMinHeight, 0)\n"
+     "\t\t: 0;\n"
+     "}\n"
+     "\n"
+     "QPixmap MainWindow::grabForSlideAnimation() {\n"),
+    # The code step.
+    (INTRO_CODE_H, "\trpl::variable<bool> _isFragment = false;\n",
+     "\t// pluma: what the screen says of the code's delivery (task 076).\n"
+     "\tenum class Mode {\n"
+     "\t\tDefault,\n"
+     "\t\tApp,\n"
+     "\t\tTelegram,\n"
+     "\t\tUndelivered,\n"
+     "\t};\n"
+     "\trpl::variable<Mode> _mode = Mode::Default;\n"),
+    (INTRO_CODE_H, "\tbase::Timer _callTimer;\n",
+     "\tbase::Timer _callTimer;\n"
+     "\tbase::Timer _resendTimer; // pluma: the countdown to \"Send again\"\n"
+     "\tcrl::time _resendFloodUntil = 0; // pluma: and the server's FLOOD_WAIT\n"),
+    (INTRO_CODE_H, "\tvoid noTelegramCodeFail(const MTP::Error &result);\n",
+     "\tvoid noTelegramCodeFail(const MTP::Error &result);\n"
+     "\tvoid showAdministratorBox(); // pluma\n"),
+    (INTRO_CODE, "\n} // namespace details\n} // namespace Intro\n",
+     "\n" + LOGIN_CODE_ADMINISTRATOR_BOX + "\n} // namespace details\n} // namespace Intro\n"),
+    (INTRO_CODE, ", _callTimer([=] { sendCall(); })\n",
+     ", _callTimer([=] { sendCall(); })\n"
+     ", _resendTimer([=] { updateCallText(); }) // pluma\n"),
+    (INTRO_CODE, LOGIN_CODE_TITLE_OLD, LOGIN_CODE_TITLE_NEW),
+    (INTRO_CODE, "\treturn contentTop() + st::introErrorBelowLinkTop;\n",
+     "\treturn contentTop()\n"
+     "\t\t+ st::introErrorBelowLinkTop\n"
+     "\t\t+ contentShift(); // pluma: under a longer description\n"),
+    (INTRO_CODE, LOGIN_CODE_CALL_TEXT_OLD, LOGIN_CODE_CALL_TEXT_NEW),
+    (INTRO_CODE, "\t\tcontentTop() + st::introStepFieldTop + st::introPhoneTop * 3);\n",
+     "\t\tcontentTop()\n"
+     "\t\t\t+ st::introStepFieldTop\n"
+     "\t\t\t+ st::introPhoneTop * 3\n"
+     "\t\t\t+ contentShift()); // pluma: under a longer description\n"),
+    (INTRO_CODE, "\tif (getData()->codeByTelegram) {\n\t\t_noTelegramCode->show();\n\t} else {\n"
+                 "\t\t_callLabel->show();\n\t}\n\tsetInnerFocus();\n",
+     "\t// pluma: the row under the field of task 076's screens.\n"
+     "\tif (_mode.current() != Mode::Default) {\n"
+     "\t\tupdateCallText();\n"
+     "\t} else {\n"
+     "\t\t_callLabel->show();\n"
+     "\t}\n"
+     "\tsetInnerFocus();\n"),
+    (INTRO_CODE, "\t_callTimer.cancel();\n\tapiClear();\n",
+     "\t_callTimer.cancel();\n"
+     "\t_resendTimer.cancel(); // pluma\n"
+     "\tapiClear();\n"),
+    (INTRO_CODE, "\t\tgetData()->codeByTelegram = false;\n\t\tupdateDescText();\n",
+     "\t\t// pluma: the answer decides the screen (task 076); upstream took\n"
+     "\t\t// every resent code for an SMS.\n"
+     "\t\tupdateDescText();\n"),
+)
+
+
+def login_code_edited():
+    """The files login_code_screens() edits."""
+    return (LANG, INTRO_CODE, INTRO_CODE_H, INTRO_STEP, INTRO_STEP_H, INTRO_WIDGET, INTRO_WIDGET_H, MAIN_WINDOW,
+            MAIN_WINDOW_H, MAINWINDOW, MAINWINDOW_H)
+
+
+def login_code_strings():
+    return "".join(f'"{key}" = "{value}";\n' for key, value in LOGIN_CODE_STRINGS.items())
+
+
+def login_code_screens(tree):
+    """Runs after rebrand(): its texts name the real Telegram."""
+    tree.replace(LANG, LOGIN_CODE_STRINGS_AFTER, LOGIN_CODE_STRINGS_AFTER + login_code_strings())
+    for rel, old, new in LOGIN_CODE_EDITS:
+        tree.replace(rel, old, new)
+    for head, body, had in LOGIN_CODE_BODIES:
+        tree.replace_body(INTRO_CODE, head, "\n}\n", body, must_contain=had)
+
+
+def verify_login_code_screens(tree):
+    entries = [(m["key"], m["value"]) for m in lang_entries(tree.read(LANG))]
+    for key, value in LOGIN_CODE_STRINGS.items():
+        if entries.count((key, value)) != 1 or [k for k, _ in entries].count(key) != 1:
+            raise PatchError(f"{LANG}: {key} is not the text of the login code screens (task 076)")
+    for rel, old, new in LOGIN_CODE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the login code screens (task 076) is not there")
+    code = tree.read(INTRO_CODE)
+    for head, body, _ in LOGIN_CODE_BODIES:
+        if code.count(head + body + "\n}\n") != 1:
+            raise PatchError(f"{INTRO_CODE}: {head.strip()} is not the one of the login code screens (task 076)")
+    for rel in (INTRO_CODE, INTRO_CODE_H):
+        if "_isFragment" in tree.read(rel) or "introFragmentButton" in tree.read(rel):
+            raise PatchError(f"{rel}: the code step still shows Fragment's screen")
+
 
 def main(argv=None):
     args = argv if argv is not None else sys.argv[1:]
