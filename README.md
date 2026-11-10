@@ -247,11 +247,11 @@ Since the repository is public, set *Settings → Actions → General → Fork p
 
 ## Caches
 
-The GitHub Actions cache of this repository is limited to 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository), and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above the limit GitHub evicts the entries read least recently, whichever system's they are, so the entries keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)) at every moment:
+The GitHub Actions cache of this repository is limited to 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository), and an entry nobody reads for seven days is deleted. The weekly canary reads all of them. Above the limit GitHub evicts the entries read least recently, whichever system's they are, so the entries of `main` keep to a budget ([`ci/cache-budget.sh`](ci/cache-budget.sh)):
 - each kind of entry has a cap, and the caps add up to 25 GB;
 - before a job saves an entry, it measures it and deletes the entries of the kind that the new one supersedes, so a kind never has two entries on a branch, not even while one is saved. This takes `actions: write` in the build jobs; only that step gets the token;
 - a ccache never grows past its cap (`CCACHE_MAXSIZE`). An entry over its cap is an error of the run, and is saved only where the cache cannot pass 40 GB by it: in place of entries that take as much or more, or when its overrun and those of the other entries fit in the 15 GB the caps leave free (entries of other branches count whole);
-- a compiler cache is saved by every run but those of forks, so the next push of a pull request finds what the last one compiled. A pull request reads its own entries and those of `main`. Libraries are saved on `main` only.
+- a compiler cache is saved by every run but those of forks and Dependabot, so the next push of a pull request finds what the last one compiled; a pull request saves a finished build only. It reads its own entries and those of `main`, and `cache-cleanup` deletes its entries when it closes. Libraries are saved on `main` only.
 
 | Entry | Cap | Size | |
 |---|---|---|---|

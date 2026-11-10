@@ -168,8 +168,9 @@ jobs:
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      # A fork's token cannot delete the entry a new one supersedes.
-      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -223,13 +224,15 @@ jobs:
         run: ci/ccache-stats.sh
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled. Saved in place
-      # of the entry of the branch it supersedes (README, Caches).
+      # of the entry of the branch it supersedes (README, Caches). A pull
+      # request saves a finished build only: the trim would leave a stopped
+      # one little, and its next push would restore that, not main's.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -276,8 +279,9 @@ jobs:
     # variables that differ in case only (a TARGET next to libvpx's target).
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
-      # A fork's token cannot delete the entry a new one supersedes.
-      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
     steps:
@@ -389,11 +393,11 @@ jobs:
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -435,8 +439,9 @@ jobs:
       contents: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
-      # A fork's token cannot delete the entry a new one supersedes.
-      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
       # The paths of the libraries are part of their cache keys
@@ -535,11 +540,11 @@ jobs:
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
