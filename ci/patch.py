@@ -2432,7 +2432,7 @@ def check_upstream(tree, c):
     # ci/sign-macos.sh signs with upstream's entitlements, which it copies.
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
-    for rel in EDITED + brand_edited() + links_edited() + login_code_edited():
+    for rel in EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited():
         tree.lf_only(rel)
 
 
@@ -2606,6 +2606,7 @@ def patch(tree, c):
 
     rebrand(tree, c)
     premium_for_everyone(tree)
+    no_ai_editor(tree)
     # After rebrand(): the texts name the real Telegram.
     login_code_screens(tree)
 
@@ -2749,6 +2750,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
+    verify_no_ai_editor(tree)
     verify_login_code_screens(tree)
 
 
@@ -2839,6 +2841,69 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+# --- No AI message editor (task 079) ------------------------------------------
+# The AI editor rewrites, proofreads, restyles and translates a typed message
+# (ComposeAiBox, CreateAiBox: messages.composeMessageWithAI,
+# messages.composeRichMessageWithAI and the aicompose.* tones); Pluma runs no
+# language model to answer them (the owner's decision, 2026-11-11). Every AI
+# button of a compose field (the chat, the compose controls of other
+# sections, the captions of files, GIFs and edits) shows only while
+# Ui::HasEnoughLinesForAi says so, which upstream already makes false with
+# its "hide-ai-button" option or an empty tone list; it is false always now.
+# The rich editor's AI pill, upstream gated only by that option, is never
+# made, as with the option on. The Shortcuts settings no longer list the
+# shortcut that applies a tone bound in the editor.
+AI_BUTTON_FACTORY = SOURCES + "/ui/controls/compose_ai_button_factory.cpp"
+AI_IV_EDITOR = SOURCES + "/iv/editor/iv_editor_box.cpp"
+AI_SHORTCUTS = SOURCES + "/settings/sections/settings_shortcuts.cpp"
+NO_AI_EDITOR_EDITS = (
+    (AI_BUTTON_FACTORY,
+     "\tif (HideAiButtonOption.value()\n\t\t|| session->data().aiComposeTones().list().empty()) {\n\t\treturn false;\n\t}\n",
+     "\tif (true // pluma: no AI editor, Pluma runs no language model (task 079)\n"
+     "\t\t|| HideAiButtonOption.value()\n\t\t|| session->data().aiComposeTones().list().empty()) {\n\t\treturn false;\n\t}\n"),
+    (AI_IV_EDITOR,
+     "\tif (!base::options::value<bool>(Ui::kOptionHideAiButton)) {\n\t\tconst auto session = descriptor.session;\n\t\t_aiPill = ",
+     "\tif (false // pluma: no AI editor, Pluma runs no language model (task 079)\n"
+     "\t\t&& !base::options::value<bool>(Ui::kOptionHideAiButton)) {\n\t\tconst auto session = descriptor.session;\n\t\t_aiPill = "),
+    (AI_SHORTCUTS,
+     "\t\t{ C::ComposeAiApplyInPlace, tr::lng_shortcuts_ai_compose_apply() },\n",
+     "\t\t// pluma: no AI editor to bind a tone in (task 079).\n"),
+)
+# The other ways to the editor, each of which the edits above close: the
+# buttons that ask HasEnoughLinesForAi and the pill. Upstream adding one stops
+# the patch until it is read.
+NO_AI_EDITOR_GUARDS = (
+    (SOURCES + "/history/history_widget.cpp", "Ui::HasEnoughLinesForAi(", 1),
+    (SOURCES + "/history/view/controls/history_view_compose_controls.cpp", "Ui::HasEnoughLinesForAi(", 1),
+    (SOURCES + "/boxes/send_files_box.cpp", "Ui::HasEnoughLinesForAi(", 1),
+    (AI_BUTTON_FACTORY, "HasEnoughLinesForAi(session, field)", 1),
+    (AI_IV_EDITOR, "_aiPill = object_ptr<ToolbarPill>(", 1),
+    (AI_IV_EDITOR, "ShowComposeAiBox(", 2),
+    (AI_IV_EDITOR, "ShowCreateAiBox(", 1),
+)
+
+
+def no_ai_editor(tree):
+    for rel, old, new in NO_AI_EDITOR_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_no_ai_editor(tree):
+    for rel, old, new in NO_AI_EDITOR_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the AI editor is offered again")
+    for rel, s, count in NO_AI_EDITOR_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way into the AI editor")
+
+
+def no_ai_editor_edited():
+    """The files no_ai_editor() edits."""
+    return tuple(sorted({rel for rel, _, _ in NO_AI_EDITOR_EDITS}))
+
 
 
 # --- The screens of the login code -------------------------------------------
