@@ -662,6 +662,9 @@ class RecordingTree(patch.Tree):
 # with the file's name.
 DAMAGE += tuple((rel, old, old.replace("premium", "promium").replace("Premium", "Promium").replace("Bottom", "Top").replace("_lockIcon", "_icon"))
                 for rel, old, _, _ in patch.PREMIUM_STICKERS)
+# Every edit of the AI editor, damaged in the pinned upstream, stops the patch
+# with the file's name.
+DAMAGE += tuple((rel, old, old.replace("\t", "    ", 1)) for rel, old, _ in patch.NO_AI_EDITOR_EDITS)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -1601,6 +1604,75 @@ class LoginCodeScreensTest(unittest.TestCase):
                         patch.verify_login_code_screens(tree)
             tree.write(patch.LANG, lang)
             patch.verify_login_code_screens(tree)
+
+
+class NoAiEditorTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect and the ways to
+    # the editor the guards count.
+    def tree(self, root, edits=patch.NO_AI_EDITOR_EDITS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {}
+        for rel, s, count in patch.NO_AI_EDITOR_GUARDS:
+            files[rel] = files.get(rel, "") + (s + "\n") * count
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                patch.verify_no_ai_editor(tree)
+            patch.no_ai_editor(tree)
+            patch.verify_no_ai_editor(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.no_ai_editor(tree)
+
+    def test_buttons_never_show(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.no_ai_editor(tree)
+            self.assertIn("\tif (true // pluma:", tree.read(patch.AI_BUTTON_FACTORY))
+            self.assertIn("\tif (false // pluma:", tree.read(patch.AI_IV_EDITOR))
+            self.assertNotIn("ComposeAiApplyInPlace", tree.read(patch.AI_SHORTCUTS))
+
+    def test_upstream_changed(self):
+        for i, edit in enumerate(patch.NO_AI_EDITOR_EDITS):
+            changed = edit[1][:-2] + "~" + edit[1][-1]
+            edits = [e if j != i else (edit[0], changed) + tuple(edit[2:]) for j, e in enumerate(patch.NO_AI_EDITOR_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.no_ai_editor(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.no_ai_editor(tree)
+            for i, (rel, old, new) in enumerate(patch.NO_AI_EDITOR_EDITS):
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=i), self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                    patch.verify_no_ai_editor(tree)
+                tree.write(rel, patched)
+            patch.verify_no_ai_editor(tree)
+
+    def test_another_way_in(self):
+        for rel, s, _ in patch.NO_AI_EDITOR_GUARDS:
+            with self.subTest(file=rel, text=s), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.no_ai_editor(tree)
+                tree.write(rel, tree.read(rel) + s + "\n")
+                with self.assertRaisesRegex(patch.PatchError, "another way into the AI editor"):
+                    patch.verify_no_ai_editor(tree)
+
+    def test_lf_only_covers_the_edits(self):
+        self.assertEqual(set(patch.no_ai_editor_edited()), {rel for rel, _, _ in patch.NO_AI_EDITOR_EDITS})
 
 
 if __name__ == "__main__":
