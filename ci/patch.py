@@ -1859,6 +1859,32 @@ TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5
 # colours and the Premium, statistics and call palettes.
 KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
                        r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+|groupCall\w+")
+# The verified badge, Telegram's rosette with a check, in the default themes
+# (verify()): the rosette in the accent and the check in the colour of text on
+# it, as Telegram draws it in the accent of its theme (colors.palette refers
+# the keys to windowBgActive and windowFgActive); in the chosen row of the
+# chat list the rosette is white with the check in the row's colour. Every
+# place that draws it takes these keys: the chat list, the chat's top bar,
+# lists of people and search (dialogs.style, peer_list_box.cpp), the profile
+# and Settings (info.style, settings.style), the box of a bot's web app
+# (attach_bot_webview.cpp). Day, Night and the bases keep Telegram's accent,
+# and their badge follows it. As {key: (Classic, Tinted)}.
+VERIFIED_BADGE = {
+    "dialogsVerifiedIconBg": ("#5b7a5e", "#9dbb9f"),
+    "dialogsVerifiedIconFg": ("#ffffff", "#131513"),
+    "dialogsVerifiedIconBgOver": ("#5b7a5e", "#9dbb9f"),
+    "dialogsVerifiedIconFgOver": ("#ffffff", "#131513"),
+    "dialogsVerifiedIconBgActive": ("#ffffff", "#ffffff"),
+    "dialogsVerifiedIconFgActive": ("#5b7a5e", "#2c3a2d"),
+    "profileVerifiedCheckBg": ("#5b7a5e", "#9dbb9f"),
+    "profileVerifiedCheckFg": ("#ffffff", "#131513"),
+}
+# The icons of the badge in the styles of the sources, with their colour. A
+# profile with a colour of its own (a collectible, a profile colour) draws it
+# on that colour, white with the check in the profile's colour
+# (infoColoredPeerBadge, info_profile_top_bar.cpp), as Telegram does.
+VERIFIED_ICON = re.compile(r'"[\w/]*_verified_(?:star|check)"\s*,\s*([^\s,}]+)')
+VERIFIED_ON_COVER = ("groupCallMembersFg", SOURCES + "/info/profile/info_profile_top_bar.style")
 
 
 def load_table(path):
@@ -2187,6 +2213,26 @@ def verify_help_and_gifts(tree):
             raise PatchError(f"{rel}: a link opens the gift box without asking whether Premium can be bought")
 
 
+def verify_verified_badge(tree, day, night):
+    """The verified badge in Pluma's accent in Classic and Tinted
+    (VERIFIED_BADGE), and every icon of it in the styles drawn in those keys
+    but on a profile's own colour (VERIFIED_ON_COVER)."""
+    for i, (where, values) in enumerate(((PALETTE, day), (NIGHT_THEME, night))):
+        for key, colors in VERIFIED_BADGE.items():
+            color = resolve(values, key) if key in values else "missing"
+            if color.lower() != colors[i]:
+                raise PatchError(f"{where}: the verified badge's {key} is {color}, not {colors[i]}")
+    found = 0
+    for p in sorted((tree.root / SOURCES).rglob("*.style")):
+        rel = p.relative_to(tree.root).as_posix()
+        for color in VERIFIED_ICON.findall(tree.scan(rel)):
+            found += 1
+            if color not in VERIFIED_BADGE and (color, rel) != VERIFIED_ON_COVER:
+                raise PatchError(f"{rel}: the verified badge is drawn in {color}, not in a key of VERIFIED_BADGE")
+    if not found:
+        raise PatchError(f"{SOURCES}: no icon of the verified badge in the styles; upstream renamed them")
+
+
 def verify_brand(tree):
     """Checks the brand independently of how the edits were made."""
     # No Telegram in the built-in English but links, LANG_KEEP and the texts
@@ -2247,6 +2293,7 @@ def verify_brand(tree):
             color = resolve(values, key)
             if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
                 raise PatchError(f"{where}: {key} is Telegram's blue {color}")
+    verify_verified_badge(tree, day, night)
 
     # People's blue and cyan in every theme, the colours a theme leaves out
     # taken from the palette, and in the export: Pluma's colour as drawn, or
