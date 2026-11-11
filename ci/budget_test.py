@@ -9,10 +9,10 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "ci/cache-budget.sh"
 
-# The repository's GitHub Actions cache holds 10 GB; the caps leave 1 GB of
-# it free (README, Caches).
-LIMIT_MB = 10000
-BUDGET_MB = 9000
+# The repository's GitHub Actions cache holds 40 GB; the caps leave 15 GB of
+# it for the entries of branches (README, Caches).
+LIMIT_MB = 40000
+BUDGET_MB = 25000
 
 # Answers `gh cache list` with the lines of $FAKE_GH_ENTRIES (id, key, ref,
 # bytes, as the --jq of cache-budget.sh prints them) and logs the ids that
@@ -107,10 +107,9 @@ class AdmitTest(unittest.TestCase):
 
     def test_over_cap_in_place_of_a_larger_entry(self):
         # The old entry is over the cap itself: keeping it would let the
-        # cache pass 10 GB once the compiler caches are saved.
+        # cache pass its limit once the compiler caches are saved.
         mb = self.cap + self.reserve + 500
-        self.assertLess(mb, 4816)
-        save, deleted, out = self.admit("macos-libs", mb, self.entries())
+        save, deleted, out = self.admit("macos-libs", mb, self.entries(macos_libs=mb + 500))
         self.assertTrue(save)
         self.assertEqual(deleted, ["1"])
         self.assertIn("::error::", out)

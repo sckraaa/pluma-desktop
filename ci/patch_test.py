@@ -853,7 +853,10 @@ class UpstreamTest(unittest.TestCase):
                      '"lng_about_text1_api" = "Telegram API";\n', '"lng_auction_change_to_me" =  "Do you want'):
             self.assertIn(line, lang)
         self.assertEqual(patch.lang_counts(self.files[patch.LANG].decode("utf-8")), patch.load_strings())
-        self.assertEqual(patch.lang_counts(lang), {})
+        # Telegram is left in the texts of the login code screens alone,
+        # which name the real one (task 076).
+        self.assertEqual(patch.lang_counts(lang), {k: patch.name_telegram(v, "")[1]
+                                                   for k, v in patch.LOGIN_CODE_STRINGS.items() if "Telegram" in v})
         self.assertIn('box->setTitle(u"Pluma"_q);', tree.read(patch.ABOUT_BOX))
         self.assertIn('setTitleText(rpl::single(u"Pluma"_q));', tree.read(S + "/intro/intro_start.cpp"))
         # plm:// links.
@@ -1270,6 +1273,132 @@ class UpstreamTest(unittest.TestCase):
                     patch.verify(tree, c)
                 self.assertIn("deep_links_settings.cpp", str(e.exception))
 
+    def test_login_code_screens(self):
+        """The screens of the login code (task 076): Pluma's texts naming
+        the real Telegram, kept by key and exact value; one tg:// link, to
+        Telegram's settings; no Fragment screen. Each check stops a tree
+        that lacks what it checks."""
+        tree, c = self.run_patch()
+        lang = tree.read(patch.LANG)
+        self.assertIn('"lng_intro_fragment_button" = "Open Fragment";\n"lng_pluma_code_telegram_title" = "Check Telegram";\n',
+                      lang)
+        self.assertIn('"lng_pluma_code_failed_about" = "The code for **{phone_number}** didn\'t reach your Telegram. '
+                      'Let Telegram find you by your number: **Settings \u2192 Privacy and Security \u2192 Phone Number '
+                      '\u2192 Who can find me by my number? \u2192 Everybody**.\\n\\nNo Telegram? Ask the administrator '
+                      'for the code and enter it here.";\n', lang)
+        self.assertIn('"lng_pluma_code_resend_in" = "Send again in {time}";\n', lang)
+        code = tree.read(patch.INTRO_CODE)
+        self.assertEqual(code.count("tg://"), 1)
+        self.assertIn('\t\tFile::OpenUrl(u"tg://settings/phone_privacy"_q);\n', code)
+        self.assertNotIn("introFragmentButton", code)
+        self.assertNotIn("getData()->codeByTelegram = false;", code)
+        self.assertIn("\t\tgetData()->codeUndelivered = true; // pluma\n", tree.read(patch.INTRO_STEP))
+
+        def stops(rel, text, where):
+            tree.write(rel, text)
+            with self.assertRaises(patch.PatchError) as e:
+                patch.verify(tree, c)
+            self.assertIn(where, str(e.exception))
+            tree.write(rel, patched)
+
+        # The texts: renamed, renamed and changed, lost, or a new one naming
+        # Telegram beside them.
+        patched = lang
+        failed = '"lng_pluma_code_failed_title" = "Code didn\'t reach Telegram";\n'
+        stops(patch.LANG, lang.replace(failed, failed.replace("Telegram", "Pluma")), "lng_pluma_code_failed_title")
+        stops(patch.LANG, lang.replace(failed, failed.replace("reach", "get to")), "lng_pluma_code_failed_title")
+        stops(patch.LANG, lang.replace(failed, ""), "lng_pluma_code_failed_title")
+        stops(patch.LANG, lang.replace(failed, failed + '"lng_pluma_code_other" = "Open Telegram";\n'),
+              "lng_pluma_code_other")
+        # The code: another tg:// link, or none; an edit or a function undone.
+        patched = code
+        stops(patch.INTRO_CODE, code.replace("File::OpenUrl(getData()->codeByFragmentUrl);",
+                                             'File::OpenUrl(u"tg://resolve?domain=x"_q);'), "intro_code.cpp")
+        stops(patch.INTRO_CODE, code.replace(patch.TELEGRAM_SETTINGS_LINK, 'u"tg://settings"_q'), "intro_code.cpp")
+        stops(patch.INTRO_CODE, code.replace(patch.TELEGRAM_SETTINGS_LINK, 'u"plm://settings/phone_privacy"_q'),
+              "intro_code.cpp")
+        for rel, old, new in patch.LOGIN_CODE_EDITS:
+            with self.subTest(rel=rel, new=new[:60]):
+                patched = tree.read(rel)
+                stops(rel, patched.replace(new, old), pathlib.PurePath(rel).name)
+        patched = code
+        for head, body, _ in patch.LOGIN_CODE_BODIES:
+            with self.subTest(head=head):
+                stops(patch.INTRO_CODE, code.replace(body, "\t_code->requestCode();"), "intro_code.cpp")
+        patch.verify(tree, c)
+
+    def test_login_code_screens_layout(self):
+        """The description of the screens of task 076 moves the content
+        under it by what it has over upstream's three lines, the native
+        screens not at all; the content rises and the window keeps its
+        height so that the next button and the language link stay in view;
+        the button and the slide follow the description."""
+        tree, _ = self.run_patch()
+        S = patch.SOURCES
+
+        def body(rel, head):
+            text = tree.read(rel)
+            start = text.index(head)
+            return text[start:text.index("\n}\n", start)]
+
+        code = tree.read(patch.INTRO_CODE)
+        self.assertIn("\t\tconst auto room = st::introDescription.style.lineHeight * 3;\n"
+                      "\t\tsetContentShift((mode == Mode::Telegram || mode == Mode::Undelivered)\n"
+                      "\t\t\t? std::max(height - room, 0)\n\t\t\t: 0);\n", code)
+        self.assertNotIn("introLinkTop;\n\t\tsetContentShift", code)
+        top = body(patch.INTRO_STEP, "int Step::contentTop() const {\n")
+        self.assertLess(top.index("height() - st::introNextTop - shift - ContentBelowNextTop());"),
+                        top.index("accumulate_max(result, st::introStepTopMin);"))
+        shift = body(patch.INTRO_STEP, "void Step::setContentShift(int shift) { // pluma\n")
+        self.assertIn("_contentShiftAnimation.start(", shift)
+        self.assertIn("st::introStepTopMin\n\t\t\t+ st::introNextTop\n\t\t\t+ shift\n\t\t\t+ ContentBelowNextTop())",
+                      shift)
+        # The slide shows the whole of both steps.
+        step = tree.read(patch.INTRO_STEP)
+        self.assertIn("\t\tauto rightSnapshot = prepareSlideAnimation(_slideTop, _slideHeight);\n", step)
+        self.assertIn("\t\t\t[=] { update(0, _slideTop, width(), _slideHeight); }, // pluma\n", step)
+        self.assertNotIn("st::introStepWidth, st::introStepHeight));", step)
+        # The next button moves with the slide and with the description.
+        widget = tree.read(patch.INTRO_WIDGET)
+        self.assertIn("\t\t_nextMoveAnimation.start(\n", body(patch.INTRO_WIDGET, "void Widget::historyMove("))
+        self.assertIn("\t\tshown * _nextMoveAnimation.value(1.)); // pluma\n", widget)
+        self.assertIn("\t\t\t_requiredHeight = height;\n", body(patch.INTRO_WIDGET, "void Widget::setupStep() {\n"))
+        # The window keeps the height the intro needs, and drops it with it.
+        self.assertIn("\t\t+ st::windowMinHeight\n\t\t+ bodyMinHeightAdd(); // pluma",
+                      body(S + "/window/main_window.cpp", "int MainWindow::computeMinHeight() const {\n"))
+        main = tree.read(S + "/mainwindow.cpp")
+        self.assertIn("\t\t? std::max(_intro->requiredHeight() - st::windowMinHeight, 0)\n", main)
+        self.assertIn("\t\trecountGeometryConstraints();\n",
+                      body(S + "/mainwindow.cpp", "void MainWindow::setupIntro("))
+        self.assertIn("\t\tsetMinimumSize(QSize(computeMinWidth(), computeMinHeight()));\n",
+                      body(S + "/mainwindow.cpp", "void MainWindow::clearWidgetsHook() {\n"))
+
+    def test_login_code_screens_resend(self):
+        """The answers of auth.resendCode on the screens of task 076: the
+        countdown of FLOOD_WAIT, the administrator when nothing more can be
+        sent, the phone entry when the code expired; no link while a request
+        is on its way or the step slides."""
+        tree, _ = self.run_patch()
+        code = tree.read(patch.INTRO_CODE)
+        start = code.index("void CodeWidget::noTelegramCodeFail(")
+        fail = code[start:code.index("\n}\n", start)]
+        # The state first, then the row, then what may leave the step.
+        order = ["_resendFloodUntil = crl::now() + seconds * crl::time(1000);",
+                 "getData()->codeResendable = false;",
+                 "updateCallText();",
+                 "showCodeError(tr::lng_flood_error());",
+                 "showAdministratorBox(); // pluma",
+                 "goBack();"]
+        self.assertEqual([fail.index(s) for s in order], sorted(fail.index(s) for s in order))
+        self.assertNotIn('error.type() != u"SEND_CODE_UNAVAILABLE"_q', fail)
+        start = code.index("void CodeWidget::updateCallText() {\n")
+        row = code[start:code.index("\n}\n", start)]
+        self.assertIn("\t\t\t_resendFloodUntil);\n", row)
+        self.assertIn("\t\t_noTelegramCode->setVisible(text.isEmpty() && !animating());\n", row)
+        self.assertIn("\t\t\t? tr::lng_pluma_code_sending(tr::now)\n", row)
+        self.assertEqual(code.count("\t\tshowAdministratorBox();\n"), 1)
+        self.assertEqual(code.count("Ui::MakeInformBox({\n\t\t.text = tr::lng_pluma_code_admin_text(),"), 1)
+
     def test_telegram_plane_in_a_new_icon(self):
         """The plane of the 7.4 notice is Pluma's mark; another file drawing
         Telegram's stops the patch."""
@@ -1384,6 +1513,94 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class LoginCodeScreensTest(unittest.TestCase):
+    """The edits of task 076 on files made of the texts they expect."""
+
+    def tree(self, root, edits=patch.LOGIN_CODE_EDITS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {patch.LANG: patch.LOGIN_CODE_STRINGS_AFTER}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for head, _, had in patch.LOGIN_CODE_BODIES:
+            files[patch.INTRO_CODE] += head + "".join(f"\t{s}\n" for s in had) + "}\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "task 076"):
+                patch.verify_login_code_screens(tree)
+            patch.login_code_screens(tree)
+            patch.verify_login_code_screens(tree)
+            entries = {m["key"]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+            self.assertEqual({k: v for k, v in entries.items() if k.startswith("lng_pluma_code_")},
+                             patch.LOGIN_CODE_STRINGS)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.login_code_screens(tree)
+
+    def test_texts(self):
+        # The texts of the task, in tdesktop's placeholders and markup; each
+        # names the real Telegram where the task's text does.
+        s = patch.LOGIN_CODE_STRINGS
+        self.assertEqual(len(s), 12)
+        self.assertIn("**{phone_number}**", s["lng_pluma_code_telegram_about"])
+        self.assertIn("**{phone_number}**", s["lng_pluma_code_failed_about"])
+        self.assertTrue(s["lng_pluma_code_resend_in"].endswith(" {time}"))
+        for key in ("lng_pluma_code_telegram_title", "lng_pluma_code_telegram_about", "lng_pluma_code_telegram_button",
+                    "lng_pluma_code_failed_title", "lng_pluma_code_failed_about", "lng_pluma_code_failed_button"):
+            self.assertIn("Telegram", s[key], key)
+        for value in s.values():
+            self.assertNotIn("SMS", value)
+            self.assertIsNotNone(patch.LANG_ENTRY.fullmatch(f'"k" = "{value}";'), value)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, new) in enumerate(patch.LOGIN_CODE_EDITS):
+            changed = old[:-2] + "~" + old[-1]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.LOGIN_CODE_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.login_code_screens(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.login_code_screens(tree)
+            for rel, old, new in patch.LOGIN_CODE_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(rel=rel, new=new[:60]), self.assertRaisesRegex(patch.PatchError, "task 076"):
+                    patch.verify_login_code_screens(tree)
+                tree.write(rel, patched)
+            code = tree.read(patch.INTRO_CODE)
+            for head, body, _ in patch.LOGIN_CODE_BODIES:
+                tree.write(patch.INTRO_CODE, code.replace(head + body, head + "\t_isFragment;"))
+                with self.subTest(head=head), self.assertRaisesRegex(patch.PatchError, "task 076"):
+                    patch.verify_login_code_screens(tree)
+            tree.write(patch.INTRO_CODE, code + "\t_isFragment = false;\n")
+            with self.assertRaisesRegex(patch.PatchError, "Fragment"):
+                patch.verify_login_code_screens(tree)
+            tree.write(patch.INTRO_CODE, code)
+            lang = tree.read(patch.LANG)
+            for key, value in patch.LOGIN_CODE_STRINGS.items():
+                entry = f'"{key}" = "{value}";\n'
+                for broken in (lang.replace(entry, ""), lang.replace(entry, entry.replace("Telegram", "Pluma")),
+                               lang + entry):
+                    if broken == lang:
+                        continue
+                    tree.write(patch.LANG, broken)
+                    with self.subTest(key=key), self.assertRaisesRegex(patch.PatchError, key):
+                        patch.verify_login_code_screens(tree)
+            tree.write(patch.LANG, lang)
+            patch.verify_login_code_screens(tree)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 # Builds the Pluma desktop client for Linux, Windows and macOS from the
 # tdesktop release upstream.env pins.
 #
-#   check         the scripts' tests, the patch on a sparse checkout of the
-#                 pinned upstream (layer 228, the server key, no Telegram
-#                 address or fallback; for the development server, and for
-#                 the server of the repository variables when they are set),
-#                 and lint: seconds, on Linux;
+#   check         the patch on a sparse checkout of the pinned upstream
+#                 (layer 228, the server key, no Telegram address or fallback;
+#                 for the development server, and for the server of the
+#                 repository variables when they are set), and lint: seconds,
+#                 on Linux;
+#   tests         the scripts' tests, next to the builds, which do not wait
+#                 for them; a release does;
 #   linux-env     the upstream's Linux build environment as a Docker image in
 #                 ghcr.io, built only when its sources change (two to four
 #                 hours, once);
@@ -75,8 +77,6 @@ jobs:
           persist-credentials: false
       - name: Fetch upstream (the files the patch reads)
         run: ci/fetch-upstream.sh sparse
-      - name: Tests
-        run: python3 -I -m unittest discover -s ci -p '*_test.py' -v
       - name: Patch for the development server
         run: ci/configure.sh dev
       - name: Target
@@ -114,6 +114,18 @@ jobs:
         run: echo "image=$(ci/linux-env.sh ref)" >>"$GITHUB_OUTPUT"
       - name: Lint
         run: ci/lint.sh
+
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch upstream (the files the patch reads)
+        run: ci/fetch-upstream.sh sparse
+      - name: Tests
+        run: python3 -I -m unittest discover -s ci -p '*_test.py' -v
 
   linux-env:
     needs: check
@@ -156,6 +168,9 @@ jobs:
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -208,14 +223,16 @@ jobs:
         if: always() && steps.build.outcome != 'skipped'
         run: ci/ccache-stats.sh
       # Saved even when the build fails, so a re-run picks up where it
-      # stopped; not saved again when nothing was compiled. Only main saves
-      # caches, in place of the entry the new one supersedes (README, Caches).
+      # stopped; not saved again when nothing was compiled. Saved in place
+      # of the entry of the branch it supersedes (README, Caches). A pull
+      # request saves a finished build only: the trim would leave a stopped
+      # one little, and its next push would restore that, not main's.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -262,6 +279,9 @@ jobs:
     # variables that differ in case only (a TARGET next to libvpx's target).
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
     steps:
@@ -373,11 +393,11 @@ jobs:
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -419,6 +439,9 @@ jobs:
       contents: read
     env:
       PLUMA_TARGET: ${{ needs.check.outputs.target }}
+      # The token of a fork or of Dependabot cannot delete the entry a new
+      # one supersedes.
+      SAVE_CCACHE: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
       # Added to AppVersion: the updater takes a higher version only.
       PLUMA_BUILD: ${{ github.run_number }}
       # The paths of the libraries are part of their cache keys
@@ -517,11 +540,11 @@ jobs:
       # Saved even when the build fails, so a re-run picks up where it
       # stopped; not saved again when nothing was compiled.
       - name: Trim ccache
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         run: ccache --evict-older-than 1d || true
       - name: Room for ccache
         id: ccache-room
-        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && github.ref == 'refs/heads/main'
+        if: always() && steps.ccache.outputs.misses != '0' && steps.ccache.outputs.misses != '' && env.SAVE_CCACHE == 'true' && (github.event_name != 'pull_request' || steps.build.outcome == 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -565,12 +588,12 @@ jobs:
   # hour the job waits; the signed app is then kept as
   # pluma-desktop-macos-notarizing, and the workflow staple-macos finishes it.
   release:
-    needs: [check, linux, windows, macos]
+    needs: [check, tests, linux, windows, macos]
     # Each system that built: a manual run of one system, or a failed build
     # of another, still signs and publishes what there is.
     if: >-
       !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.check.outputs.target == 'server'
+      && needs.check.outputs.target == 'server' && needs.tests.result == 'success'
       && (needs.macos.result == 'success' || needs.linux.result == 'success' || needs.windows.result == 'success')
     runs-on: macos-26
     timeout-minutes: 60
