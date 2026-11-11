@@ -367,6 +367,66 @@ class BrandTest(unittest.TestCase):
             with self.subTest(data=data[:8]), self.assertRaises(patch.PatchError):
                 patch.zipped_colors(data, "t")
 
+    def test_verified_badge_table(self):
+        # The rosette is the accent of each palette and the check the colour
+        # of text on it; neither is a blue.
+        day = dict((key, new) for key, _, new in patch.load_table(patch.BRAND / "palette-day.txt"))
+        night = dict((key, new) for key, _, new in patch.load_table(patch.BRAND / "palette-night.txt"))
+        self.assertEqual(patch.VERIFIED_BADGE["dialogsVerifiedIconBg"], (day["windowBgActive"], night["windowBgActive"]))
+        self.assertEqual(patch.VERIFIED_BADGE["profileVerifiedCheckBg"], (day["windowBgActive"], night["windowBgActive"]))
+        self.assertEqual(patch.VERIFIED_BADGE["profileVerifiedCheckFg"], ("#ffffff", night["profileVerifiedCheckFg"]))
+        self.assertEqual(patch.VERIFIED_BADGE["dialogsVerifiedIconFgActive"],
+                         (day["dialogsBgActive"], night["dialogsBgActive"]))
+        for key, colors in patch.VERIFIED_BADGE.items():
+            with self.subTest(key=key):
+                self.assertEqual(len(colors), 2)
+                self.assertFalse(any(patch.is_blue(color) for color in colors))
+
+    def test_verified_badge(self):
+        day = "".join(f"{key}: {light};\n" for key, (light, _) in patch.VERIFIED_BADGE.items())
+        night = {key: dark for key, (_, dark) in patch.VERIFIED_BADGE.items()}
+        style = ('dialogsVerifiedIcon: icon {\n\t{ "dialogs/dialogs_verified_star", dialogsVerifiedIconBg },\n'
+                 '\t{ "dialogs/dialogs_verified_check", dialogsVerifiedIconFg },\n}\n'
+                 'infoVerifiedStar: icon {{ "profile_verified_star", profileVerifiedCheckBg }};\n')
+        cover = 'verified: icon {{ "profile_verified_star", groupCallMembersFg }};\n'
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+
+            def write(rel, text):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            for rel in (patch.VERSION_H, patch.CMAKE_APP):
+                write(rel, "")
+            write(patch.SOURCES + "/dialogs/dialogs.style", style)
+            write(patch.VERIFIED_ON_COVER[1], cover)
+            tree = patch.Tree(root)
+            values = patch.palette_values(day)
+            patch.verify_verified_badge(tree, values, {**values, **night})
+            # A reference resolves to the colour it names.
+            referred = {**values, "windowBgActive": "#5b7a5e", "dialogsVerifiedIconBg": "windowBgActive"}
+            patch.verify_verified_badge(tree, referred, {**referred, **night})
+            # Another colour in either theme, a key gone, another key in a
+            # style, the cover's colour elsewhere, no icon at all: verify()
+            # stops.
+            for light, dark, rel, text in (
+                    ({**values, "profileVerifiedCheckBg": "#8a5cf5"}, None, None, None),
+                    (values, {"dialogsVerifiedIconFg": "#ffffff"}, None, None),
+                    ({k: v for k, v in values.items() if k != "dialogsVerifiedIconFgActive"}, None, None, None),
+                    (values, None, patch.SOURCES + "/dialogs/dialogs.style",
+                     style.replace("dialogsVerifiedIconBg }", "activeButtonBg }")),
+                    (values, None, patch.SOURCES + "/info/info.style", cover),
+                    (values, None, patch.SOURCES + "/dialogs/dialogs.style", "")):
+                with self.subTest(rel=rel, text=text):
+                    if rel:
+                        write(rel, text)
+                    if rel == patch.SOURCES + "/dialogs/dialogs.style" and not text:
+                        (root / patch.VERIFIED_ON_COVER[1]).unlink()
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_verified_badge(tree, light, {**light, **night, **(dark or {})})
+                    write(patch.SOURCES + "/dialogs/dialogs.style", style)
+                    write(patch.VERIFIED_ON_COVER[1], cover)
+                    (root / patch.SOURCES / "info/info.style").unlink(missing_ok=True)
+
     def test_name_telegram(self):
         self.assertEqual(patch.name_telegram("Telegram Desktop and Telegram's cloud", "Pluma"),
                          ("Pluma and Pluma's cloud", 2))
@@ -544,6 +604,13 @@ DAMAGE = (
     (patch.INTRO_QR, "QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.", "QColor(0x40, 0xA7, 0xE3);"),
     # People's colours: another cyan name, the export's rule of blue avatars.
     (patch.PALETTE, "historyPeer7NameFg: #2996ad;", "historyPeer7NameFg: #2996ae;"),
+    # The verified badge: a colour of its own (not blue), its icons in other
+    # keys.
+    (patch.PALETTE, "dialogsVerifiedIconBg: windowBgActive;", "dialogsVerifiedIconBg: #8a5cf5;"),
+    (S + "/dialogs/dialogs.style", '{ "dialogs/dialogs_verified_star", dialogsVerifiedIconBgOver },',
+     '{ "dialogs/dialogs_verified_star", activeButtonBg },'),
+    (S + "/info/info.style", '{{ "profile_verified_check", profileVerifiedCheckFg }}',
+     '{{ "profile_verified_check", windowFgActive }}'),
     (patch.EXPORT_CSS, ".userpic4,\n.media_audio_file .fill,", ".userpic4,\n.media_audio .fill,"),
     # The ways into Telegram's services.
     (patch.SETTINGS_MAIN, "OpenAskQuestionConfirm(controller); },", "OpenAskQuestion(controller); },"),
@@ -977,6 +1044,45 @@ class UpstreamTest(unittest.TestCase):
                             (patch.DAY_BLUE_THEME, patch.zipped_colors(tree.read_bytes(patch.DAY_BLUE_THEME), ""))):
             with self.subTest(rel=rel):
                 self.assertEqual(patch.palette_values(colors)["historyPeer4NameFg"], "windowActiveTextFg")
+
+    def test_verified_badge(self):
+        """The verified badge is Pluma's accent with the colour of text on it
+        in Classic and Tinted, everywhere it is drawn; Day, Night and the
+        bases keep Telegram's, which follows their accent."""
+        tree, c = self.run_patch()
+        day = patch.palette_values(tree.read(patch.PALETTE))
+        night = {**day, **patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))}
+        for i, values in enumerate((day, night)):
+            self.assertEqual({key: patch.resolve(values, key) for key in patch.VERIFIED_BADGE},
+                             {key: colors[i] for key, colors in patch.VERIFIED_BADGE.items()})
+        upstream = patch.palette_values(self.files[patch.PALETTE].decode("utf-8"))
+        for rel in patch.TELEGRAM_THEMES:
+            with self.subTest(rel=rel):
+                before = {**upstream, **patch.palette_values(patch.zipped_colors(self.files[rel], rel))}
+                after = {**day, **patch.palette_values(patch.zipped_colors(tree.read_bytes(rel), rel))}
+                self.assertEqual({key: after[key] for key in patch.VERIFIED_BADGE},
+                                 {key: before[key] for key in patch.VERIFIED_BADGE})
+        # The accent picker of Tinted keeps the check readable on the accent.
+        self.assertIn('{ qstr("profileVerifiedCheckFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }',
+                      tree.read(patch.EMBEDDED_THEMES))
+        # verify() finds another colour of the badge in either theme,
+        # however the edits were made.
+        damage = (
+            (patch.PALETTE, lambda d: d.replace(b"\nprofileVerifiedCheckBg: windowBgActive;",
+                                                b"\nprofileVerifiedCheckBg: #8a5cf5;")),
+            (patch.NIGHT_THEME, lambda d: patch.night_theme(patch.night_colors(d).replace(
+                "dialogsVerifiedIconFg: #131513;", "dialogsVerifiedIconFg: #ffffff;"))),
+        )
+        for rel, damaged in damage:
+            with self.subTest(rel=rel):
+                patched = tree.read_bytes(rel)
+                self.assertNotEqual(damaged(patched), patched, "the damage does not apply to the patched file")
+                tree.write_bytes(rel, damaged(patched))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+                self.assertIn("verified badge", str(e.exception))
+                tree.write_bytes(rel, patched)
 
     def test_birthday_banner(self):
         """The banner of contacts' birthdays shows without Premium, a click
