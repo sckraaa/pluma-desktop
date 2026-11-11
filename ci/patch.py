@@ -254,7 +254,16 @@ UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTIT
                   SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
 SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.palette"),
-                   ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"))
+                   ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/v2/InstanceV2Impl.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/v2/CustomParameters.h"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/VideoCaptureInterfaceImpl.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/VideoCaptureInterfaceImpl.h"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/desktop_capturer/DesktopCaptureSource.h"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/desktop_capturer/DesktopCaptureSourceHelper.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/desktop_capturer/DesktopCaptureSourceHelper.h"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/platform/tdesktop/VideoCapturerInterfaceImpl.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/platform/darwin/DesktopSharingCapturer.mm"))
 
 SOURCE_SUFFIXES = (".cpp", ".h", ".mm", ".m", ".c", ".cc", ".hpp")
 # What the scans of verify() leave out: upstream's own test harness and unit
@@ -2432,7 +2441,8 @@ def check_upstream(tree, c):
     # ci/sign-macos.sh signs with upstream's entitlements, which it copies.
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
-    for rel in EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited():
+    for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
+                + call_parameters_edited()):
         tree.lf_only(rel)
 
 
@@ -2609,6 +2619,7 @@ def patch(tree, c):
     no_ai_editor(tree)
     # After rebrand(): the texts name the real Telegram.
     login_code_screens(tree)
+    call_parameters(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2752,6 +2763,7 @@ def verify(tree, c):
     verify_premium_for_everyone(tree)
     verify_no_ai_editor(tree)
     verify_login_code_screens(tree)
+    verify_call_parameters(tree)
 
 
 
@@ -3544,6 +3556,569 @@ def verify_login_code_screens(tree):
     for rel in (INTRO_CODE, INTRO_CODE_H):
         if "_isFragment" in tree.read(rel) or "introFragmentButton" in tree.read(rel):
             raise PatchError(f"{rel}: the code step still shows Fragment's screen")
+
+
+# --- Call parameters from the server (task 077) ------------------------------
+# The quality of a 1:1 call is set in tgcalls by literals that no setting
+# reaches (docs/tasks/077-research of the server repository, audio.md and
+# video.md, read at the tgcalls commit 1c236c09 this release pins). The server
+# sends values in phoneCall.custom_parameters, a JSON object; tgcalls already
+# parses it into a map for its network_* keys (v2/InstanceV2Impl.cpp, the
+# constructor), but tdesktop, unlike Android and iOS, never passed it
+# (calls_call.cpp, createAndStartController). Each key replaces one literal
+# where tgcalls sets it today. A key that is absent, not a number or outside
+# the range the server accepts (pkg/phonecalls/parameters.go) keeps
+# upstream's value, so a server that sends nothing gets Telegram's behaviour,
+# for an A/B comparison. The server's kbit/s count 1000 bit/s, while upstream
+# writes its own rates as kbit * 1024 (32 * 1024), so the members hold bit/s:
+#   audio_ptime_ms          Opus packet time of the sender, 60 ms upstream
+#                           (10, 20, 40, 60 or 120);
+#   audio_max_bitrate_kbps  the Opus cap, 32 * 1024 bit/s upstream (6-128);
+#   audio_min_bitrate_kbps  with the cap, the range the bandwidth estimate
+#                           moves Opus in (WebRTC-Audio-Allocation); upstream
+#                           holds Opus at the cap (min = max,
+#                           WebRtcAudioSendStream::UpdateAllowedBitrateRange)
+#                           (6-128);
+#   audio_jitter_min_ms     the receiver's jitter buffer floor, 50 ms
+#                           upstream (1-500);
+#   audio_rnnoise           RNNoise after the classic noise suppressor, as in
+#                           group calls; off upstream (true/false);
+#   video_max_bitrate_kbps  the camera cap, 1000 * 1024 bit/s upstream
+#                           (100-20000);
+#   screen_max_bitrate_kbps the screen cap; upstream sets none, WebRTC's
+#                           default by frame size applies (100-20000);
+#   start_bitrate_kbps      the start of the bandwidth estimate (CallConfig
+#                           bitrate_config); upstream sets none, WebRTC starts
+#                           at 300 kbit/s (30-20000);
+#   video_fps               the rate the camera is adapted to, 25 upstream
+#                           (VideoCaptureInterfaceImpl.cpp 129, 131), set on
+#                           the capture when the call takes the camera, as on
+#                           iOS (1-60). It acts on macOS only: there
+#                           adaptVideoSource drops frames of the 30 the camera
+#                           captures (DarwinInterface.mm 120-121,
+#                           VideoCapturerInterfaceImpl.mm 236); on Windows and
+#                           Linux adaptVideoSource does nothing
+#                           (DesktopInterface.cpp 45-46) and the camera runs at
+#                           the 30 it asks the device for (VideoCameraCapturer
+#                           .cpp 21-23), which the key does not change.
+#                           The rate stays on the capture object: a call
+#                           moved to a conference hands it over
+#                           (calls_call.cpp 448), so on macOS the
+#                           conference keeps the call's rate;
+#   screen_fps              the rate of a shared screen, upstream 24 on Windows
+#                           and Linux (VideoCapturerInterfaceImpl.cpp 48-51)
+#                           and 25 on macOS (DesktopSharingCapturer.mm 72-76)
+#                           (1-60);
+#   screen_max_size_px      the long side of a shared screen; upstream halves a
+#                           frame at least twice 1280x720 (1920x1080 on macOS)
+#                           and sends a smaller one whole
+#                           (DesktopCaptureSourceHelper.cpp,
+#                           SourceFrameCallbackImpl::OnCaptureResult); with the
+#                           key a larger frame is scaled down to it whole and a
+#                           smaller one is sent as it is (320-3840).
+# The screen capture is not the call's: tdesktop makes it outside the call and
+# shares it in the process (calls_instance.cpp 1028-1049,
+# Instance::getVideoCapture; the source previews of
+# desktop_capture_choose_source.cpp make their own). So the engine sets the two
+# screen keys process-wide (SetCallScreenCaptureLimits) when it starts and
+# clears them when it goes, and only the screen capturers of a call
+# (DesktopCaptureSourceData::followsCallLimits) read them, on every frame, so
+# a share started before the call connected follows them too. One private
+# call runs at a time, and none beside a group call (calls_instance.cpp 705,
+# 346): a group call's screen, made by the same capturer
+# (calls_group_call.cpp 2903-2906), keeps upstream's values, and a call moved
+# to a conference hands its capture over with upstream's from its end.
+# The library version the server negotiates between native clients, 9.0.0,
+# runs InstanceV2Impl, the engine edited here.
+TGCALLS = "Telegram/ThirdParty/tgcalls"
+TGCALLS_V2 = TGCALLS + "/tgcalls/v2/InstanceV2Impl.cpp"
+TGCALLS_CUSTOM_PARAMETERS = TGCALLS + "/tgcalls/v2/CustomParameters.h"
+TGCALLS_CAPTURE = TGCALLS + "/tgcalls/VideoCaptureInterfaceImpl.cpp"
+TGCALLS_CAPTURE_HEADER = TGCALLS + "/tgcalls/VideoCaptureInterfaceImpl.h"
+TGCALLS_SCREEN_SOURCE = TGCALLS + "/tgcalls/desktop_capturer/DesktopCaptureSource.h"
+TGCALLS_SCREEN_HELPER = TGCALLS + "/tgcalls/desktop_capturer/DesktopCaptureSourceHelper.cpp"
+TGCALLS_SCREEN_HELPER_HEADER = TGCALLS + "/tgcalls/desktop_capturer/DesktopCaptureSourceHelper.h"
+TGCALLS_SCREEN_WINDOWS_LINUX = TGCALLS + "/tgcalls/platform/tdesktop/VideoCapturerInterfaceImpl.cpp"
+TGCALLS_SCREEN_MACOS = TGCALLS + "/tgcalls/platform/darwin/DesktopSharingCapturer.mm"
+CALLS_CALL = SOURCES + "/calls/calls_call.cpp"
+CALL_PARAMETERS_EDITS = (
+    (CALLS_CALL,
+     "\t\t\t.maxApiLayer = protocol.vmax_layer().v,\n\t\t},\n",
+     "\t\t\t.maxApiLayer = protocol.vmax_layer().v,\n"
+     "\t\t\t// pluma: the call's parameters from the server, which tgcalls\n"
+     "\t\t\t// reads (task 077); upstream does not pass them.\n"
+     "\t\t\t.customParameters = (call.vcustom_parameters()\n"
+     "\t\t\t\t? call.vcustom_parameters()->c_dataJSON().vdata().v.toStdString()\n"
+     "\t\t\t\t: std::string()),\n"
+     "\t\t},\n"),
+    (TGCALLS_CUSTOM_PARAMETERS,
+     "} // namespace tgcalls\n\n#endif\n",
+     "// pluma: an integer key read against upstream's own value. An absent key, a\n"
+     "// value that is not a number or one outside [minValue, maxValue] reads as\n"
+     "// defaultValue, so a server value of 0 differs from an absent key and a value\n"
+     "// out of range keeps upstream's behaviour. A fraction is truncated.\n"
+     "inline int getCustomParameterIntOr(std::map<std::string, json11::Json> const &parameters, std::string const &name, "
+     "int defaultValue, int minValue, int maxValue) {\n"
+     "    const auto value = parameters.find(name);\n"
+     "    if (value != parameters.end() && value->second.is_number()) {\n"
+     "        const double number = value->second.number_value();\n"
+     "        if (number >= minValue && number <= maxValue) {\n"
+     "            return static_cast<int>(number);\n"
+     "        }\n"
+     "    }\n"
+     "    return defaultValue;\n"
+     "}\n"
+     "\n"
+     "// pluma: a rate key in kbit/s of the server, which counts 1000 bit/s, as\n"
+     "// bit/s; defaultBps (upstream's own value, which counts a kbit as 1024 bit)\n"
+     "// when the key is absent, not a number or outside [minKbps, maxKbps].\n"
+     "// minKbps is above 0.\n"
+     "inline int getCustomParameterKbpsAsBps(std::map<std::string, json11::Json> const &parameters, std::string const &name, "
+     "int defaultBps, int minKbps, int maxKbps) {\n"
+     "    const int kbps = getCustomParameterIntOr(parameters, name, 0, minKbps, maxKbps);\n"
+     "    return kbps > 0 ? kbps * 1000 : defaultBps;\n"
+     "}\n"
+     "\n"
+     "} // namespace tgcalls\n\n#endif\n"),
+    (TGCALLS_V2,
+     "#include <random>\n#include <sstream>\n",
+     "#include <random>\n#include <sstream>\n"
+     "// pluma: the field trials, the noise suppression and the screen limits of a\n"
+     "// call (task 077).\n"
+     "#include <cmath>\n"
+     "#include <cstring>\n"
+     "#include <mutex>\n"
+     "#include <set>\n"
+     "#include \"modules/audio_processing/include/audio_processing.h\"\n"
+     "#include \"desktop_capturer/DesktopCaptureSourceHelper.h\"\n"
+     "\n"
+     "#ifndef USE_RNNOISE\n"
+     "#define USE_RNNOISE 1\n"
+     "#endif\n"
+     "\n"
+     "#if USE_RNNOISE\n"
+     "#include \"rnnoise.h\"\n"
+     "#endif\n"),
+    (TGCALLS_V2,
+     "class OutgoingAudioChannel : public sigslot::has_slots<> {\n",
+     "// pluma: WebRTC keeps the pointer to the field trial string it is given\n"
+     "// (field_trial::InitFieldTrialsFromString) and reads it until the next\n"
+     "// call replaces it, which may come from another engine. Each distinct\n"
+     "// string a call builds therefore stays allocated for the life of the\n"
+     "// process; the server sends a few distinct values at most.\n"
+     "static const char *PersistentFieldTrials(std::string const &fieldTrials) {\n"
+     "    static std::mutex mutex;\n"
+     "    static std::set<std::string> *strings = new std::set<std::string>();\n"
+     "    std::lock_guard<std::mutex> lock(mutex);\n"
+     "    return strings->insert(fieldTrials).first->c_str();\n"
+     "}\n"
+     "\n"
+     "#if USE_RNNOISE\n"
+     "// pluma: RNNoise on the captured voice, as group calls run it\n"
+     "// (group/GroupInstanceCustomImpl.cpp, AudioCapturePostProcessor), when\n"
+     "// the server asks for it with audio_rnnoise (task 077); the classic\n"
+     "// noise suppressor stays on before it, as there. RNNoise takes 10 ms at\n"
+     "// 48 kHz, the rate the capture is processed at for Opus; a buffer of\n"
+     "// another size or with more channels passes unchanged.\n"
+     "class RnnoiseCapturePostProcessor : public webrtc::CustomProcessing {\n"
+     "public:\n"
+     "    RnnoiseCapturePostProcessor() :\n"
+     "    _denoiseState(rnnoise_create(nullptr)),\n"
+     "    _frameSamples(rnnoise_get_frame_size()) {\n"
+     "    }\n"
+     "\n"
+     "    ~RnnoiseCapturePostProcessor() override {\n"
+     "        if (_denoiseState) {\n"
+     "            rnnoise_destroy(_denoiseState);\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "private:\n"
+     "    void Initialize(int sample_rate_hz, int num_channels) override {\n"
+     "    }\n"
+     "\n"
+     "    void Process(webrtc::AudioBuffer *buffer) override {\n"
+     "        if (!buffer || !_denoiseState || buffer->num_channels() != 1 || buffer->num_frames() != _frameSamples.size()) {\n"
+     "            return;\n"
+     "        }\n"
+     "        float *samples = buffer->channels()[0];\n"
+     "        float peak = 0.0f;\n"
+     "        for (size_t i = 0; i < _frameSamples.size(); i++) {\n"
+     "            peak = std::max(std::fabs(samples[i]), peak);\n"
+     "        }\n"
+     "        // Silence is left alone, as in group calls.\n"
+     "        if (peak < 0.01f) {\n"
+     "            return;\n"
+     "        }\n"
+     "        rnnoise_process_frame(_denoiseState, _frameSamples.data(), samples);\n"
+     "        std::memcpy(samples, _frameSamples.data(), _frameSamples.size() * sizeof(float));\n"
+     "    }\n"
+     "\n"
+     "    std::string ToString() const override {\n"
+     "        return \"RnnoiseCapturePostProcessor\";\n"
+     "    }\n"
+     "\n"
+     "    void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting setting) override {\n"
+     "    }\n"
+     "\n"
+     "    DenoiseState *_denoiseState = nullptr;\n"
+     "    std::vector<float> _frameSamples;\n"
+     "};\n"
+     "#endif\n"
+     "\n"
+     "class OutgoingAudioChannel : public sigslot::has_slots<> {\n"),
+    (TGCALLS_V2,
+     "        std::shared_ptr<Threads> threads\n    ) :\n    _threads(threads),\n    _ssrc(mediaContent.ssrc),\n    _call(call),\n",
+     "        std::shared_ptr<Threads> threads,\n"
+     "        int packetTimeMs // pluma: the Opus packet time, upstream 60 ms\n"
+     "    ) :\n    _threads(threads),\n    _ssrc(mediaContent.ssrc),\n    _call(call),\n"),
+    (TGCALLS_V2,
+     "                codec.SetParam(cricket::kCodecParamPTime, 60);\n",
+     "                codec.SetParam(cricket::kCodecParamPTime, packetTimeMs); // pluma: upstream 60\n"),
+    (TGCALLS_V2,
+     "        std::function<void(float)> onAudioLevelUpdated,\n        std::shared_ptr<Threads> threads) :\n",
+     "        std::function<void(float)> onAudioLevelUpdated,\n"
+     "        std::shared_ptr<Threads> threads,\n"
+     "        int jitterBufferMinDelayMs) : // pluma: the jitter buffer floor, upstream 50 ms\n"),
+    (TGCALLS_V2,
+     "        audioOptions.audio_jitter_buffer_min_delay_ms = 50;\n",
+     "        audioOptions.audio_jitter_buffer_min_delay_ms = jitterBufferMinDelayMs; // pluma: upstream 50\n"),
+    (TGCALLS_V2,
+     "        webrtc::field_trial::InitFieldTrialsFromString(\n"
+     "            \"WebRTC-DataChannel-Dcsctp/Enabled/\"\n"
+     "            \"WebRTC-Audio-MinimizeResamplingOnMobile/Enabled/\"\n"
+     "            \"WebRTC-Audio-iOS-Holding/Enabled/\"\n"
+     "            \"WebRTC-IceFieldTrials/skip_relay_to_non_relay_connections:true/\"\n"
+     "        );\n"
+     "        \n"
+     "        if (!descriptor.config.customParameters.empty()) {\n"
+     "            std::string parsingError;\n"
+     "            auto customParametersJson = json11::Json::parse(descriptor.config.customParameters, parsingError);\n"
+     "            if (customParametersJson.is_object()) {\n"
+     "                _customParameters = customParametersJson.object_items();\n"
+     "            }\n"
+     "        }\n",
+     "        if (!descriptor.config.customParameters.empty()) {\n"
+     "            std::string parsingError;\n"
+     "            auto customParametersJson = json11::Json::parse(descriptor.config.customParameters, parsingError);\n"
+     "            if (customParametersJson.is_object()) {\n"
+     "                _customParameters = customParametersJson.object_items();\n"
+     "            }\n"
+     "        }\n"
+     "\n"
+     "        // pluma: the quality of the call from the server's custom parameters\n"
+     "        // (task 077), read before the field trials, which depend on them. An\n"
+     "        // absent key keeps upstream's value; the server's kbit/s count 1000\n"
+     "        // bit/s, the members hold bit/s.\n"
+     "        _audioPtimeMs = getCustomParameterIntOr(_customParameters, \"audio_ptime_ms\", 60, 10, 120);\n"
+     "        if (_audioPtimeMs != 10 && _audioPtimeMs != 20 && _audioPtimeMs != 40 && _audioPtimeMs != 120) {\n"
+     "            _audioPtimeMs = 60; // the server sends 10, 20, 40, 60 or 120 ms\n"
+     "        }\n"
+     "        _audioMaxBitrateBps = getCustomParameterKbpsAsBps(_customParameters, \"audio_max_bitrate_kbps\", 32 * 1024, 6, 128);\n"
+     "        const int audioMinBitrateBps = getCustomParameterKbpsAsBps(_customParameters, \"audio_min_bitrate_kbps\", 0, 6, 128);\n"
+     "        _audioJitterBufferMinDelayMs = getCustomParameterIntOr(_customParameters, \"audio_jitter_min_ms\", 50, 1, 500);\n"
+     "        _audioRnnoise = getCustomParameterBool(_customParameters, \"audio_rnnoise\");\n"
+     "        _videoMaxBitrateBps = getCustomParameterKbpsAsBps(_customParameters, \"video_max_bitrate_kbps\", 1000 * 1024, 100, 20000);\n"
+     "        _screencastMaxBitrateBps = getCustomParameterKbpsAsBps(_customParameters, \"screen_max_bitrate_kbps\", 0, 100, 20000);\n"
+     "        _startBitrateBps = getCustomParameterKbpsAsBps(_customParameters, \"start_bitrate_kbps\", 0, 30, 20000);\n"
+     "        _videoFps = getCustomParameterIntOr(_customParameters, \"video_fps\", 0, 1, 60);\n"
+     "        const int screenFps = getCustomParameterIntOr(_customParameters, \"screen_fps\", 0, 1, 60);\n"
+     "        const int screenMaxSidePx = getCustomParameterIntOr(_customParameters, \"screen_max_size_px\", 0, 320, 3840);\n"
+     "        // The screen capture is the process's, not the call's: this call owns\n"
+     "        // its limits until the destructor clears them; 0 keeps upstream's.\n"
+     "        SetCallScreenCaptureLimits(this, screenMaxSidePx, screenFps);\n"
+     "\n"
+     "        std::string fieldTrials =\n"
+     "            \"WebRTC-DataChannel-Dcsctp/Enabled/\"\n"
+     "            \"WebRTC-Audio-MinimizeResamplingOnMobile/Enabled/\"\n"
+     "            \"WebRTC-Audio-iOS-Holding/Enabled/\"\n"
+     "            \"WebRTC-IceFieldTrials/skip_relay_to_non_relay_connections:true/\";\n"
+     "        // Without a range the send stream holds Opus at its target (min = max,\n"
+     "        // WebRtcAudioSendStream::UpdateAllowedBitrateRange); the trial lets the\n"
+     "        // bandwidth estimate move it between the two\n"
+     "        // (AudioSendStream::GetMinMaxBitrateConstraints).\n"
+     "        if (audioMinBitrateBps != 0 && audioMinBitrateBps <= _audioMaxBitrateBps) {\n"
+     "            fieldTrials += \"WebRTC-Audio-Allocation/min:\" + std::to_string(audioMinBitrateBps) + \"bps,max:\" "
+     "+ std::to_string(_audioMaxBitrateBps) + \"bps/\";\n"
+     "        }\n"
+     "        webrtc::field_trial::InitFieldTrialsFromString(PersistentFieldTrials(fieldTrials));\n"
+     "        RTC_LOG(LS_INFO) << \"Call quality: ptime \" << _audioPtimeMs << \" ms, audio \" << audioMinBitrateBps << \"-\" "
+     "<< _audioMaxBitrateBps << \" bps, jitter floor \" << _audioJitterBufferMinDelayMs << \" ms, rnnoise \" "
+     "<< _audioRnnoise << \", video \" << _videoMaxBitrateBps << \", screen \" << _screencastMaxBitrateBps "
+     "<< \", start \" << _startBitrateBps << \" bps, camera \" << _videoFps << \" fps, screen \" << screenMaxSidePx "
+     "<< \" px at \" << screenFps << \" fps\";\n"),
+    (TGCALLS_V2,
+     "            callConfig.audio_state = _channelManager->media_engine()->voice().GetAudioState();\n",
+     "            callConfig.audio_state = _channelManager->media_engine()->voice().GetAudioState();\n"
+     "            // pluma: the start of the bandwidth estimate; upstream keeps WebRTC's 300 kbit/s.\n"
+     "            if (_startBitrateBps != 0) {\n"
+     "                callConfig.bitrate_config.start_bitrate_bps = _startBitrateBps;\n"
+     "            }\n"),
+    (TGCALLS_V2,
+     "                            outgoingAudioContent.value(),\n                            _threads\n                        ));\n",
+     "                            outgoingAudioContent.value(),\n"
+     "                            _threads,\n"
+     "                            _audioPtimeMs\n"
+     "                        ));\n"),
+    (TGCALLS_V2,
+     "                            _audioLevelUpdated,\n                            _threads\n                        ));\n",
+     "                            _audioLevelUpdated,\n"
+     "                            _threads,\n"
+     "                            _audioJitterBufferMinDelayMs\n"
+     "                        ));\n"),
+    (TGCALLS_V2,
+     "        webrtc::AudioProcessingBuilder builder;\n"
+     "        peerConnectionFactoryDependencies.audio_processing = builder.Create();\n",
+     "        webrtc::AudioProcessingBuilder builder;\n"
+     "#if USE_RNNOISE\n"
+     "        // pluma: RNNoise on the captured voice when the server switches it on.\n"
+     "        if (_audioRnnoise) {\n"
+     "            builder.SetCapturePostProcessing(std::make_unique<RnnoiseCapturePostProcessor>());\n"
+     "        }\n"
+     "#endif\n"
+     "        peerConnectionFactoryDependencies.audio_processing = builder.Create();\n"),
+    (TGCALLS_V2,
+     "        if (_outgoingAudioChannel) {\n"
+     "            _outgoingAudioChannel->setMaxBitrate(32 * 1024);\n"
+     "        }\n"
+     "        if (_outgoingVideoChannel) {\n"
+     "            _outgoingVideoChannel->setMaxBitrate(1000 * 1024);\n"
+     "        }\n",
+     "        // pluma: the caps of the custom parameters; upstream's are 32 and 1000 kbit, the screen has none.\n"
+     "        if (_outgoingAudioChannel) {\n"
+     "            _outgoingAudioChannel->setMaxBitrate(_audioMaxBitrateBps);\n"
+     "        }\n"
+     "        if (_outgoingVideoChannel) {\n"
+     "            _outgoingVideoChannel->setMaxBitrate(_videoMaxBitrateBps);\n"
+     "        }\n"
+     "        if (_outgoingScreencastChannel && _screencastMaxBitrateBps != 0) {\n"
+     "            _outgoingScreencastChannel->setMaxBitrate(_screencastMaxBitrateBps);\n"
+     "        }\n"),
+    (TGCALLS_V2,
+     "    std::map<std::string, json11::Json> _customParameters;\n",
+     "    std::map<std::string, json11::Json> _customParameters;\n"
+     "    // pluma: the quality of the call, read from _customParameters in the\n"
+     "    // constructor; upstream's values until then.\n"
+     "    int _audioPtimeMs = 60;\n"
+     "    int _audioMaxBitrateBps = 32 * 1024;\n"
+     "    int _audioJitterBufferMinDelayMs = 50;\n"
+     "    bool _audioRnnoise = false;\n"
+     "    int _videoMaxBitrateBps = 1000 * 1024;\n"
+     "    int _screencastMaxBitrateBps = 0;\n"
+     "    int _startBitrateBps = 0;\n"
+     "    int _videoFps = 0; // the capture's own adaptation, 25\n"),
+    # The screen limits belong to the call that set them until it goes.
+    (TGCALLS_V2,
+     "    ~InstanceV2ImplInternal() {\n",
+     "    ~InstanceV2ImplInternal() {\n"
+     "        ClearCallScreenCaptureLimits(this); // pluma: task 077\n"),
+    # The camera's frame rate, as on iOS.
+    (TGCALLS_V2,
+     "                _videoCapture = videoCapture;\n                _screencastCapture = nullptr;\n",
+     "                _videoCapture = videoCapture;\n"
+     "                _screencastCapture = nullptr;\n"
+     "                // pluma: 25 upstream; phoneCall.custom_parameters may set it (task 077).\n"
+     "                if (_videoFps != 0) {\n"
+     "                    videoCaptureImpl->setAdaptationFramerate(_videoFps);\n"
+     "                }\n"),
+    (TGCALLS_CAPTURE_HEADER,
+     "    void setPreferredAspectRatio(float aspectRatio);\n",
+     "    void setPreferredAspectRatio(float aspectRatio);\n"
+     "    void setAdaptationFramerate(int framerate); // pluma: task 077\n"),
+    (TGCALLS_CAPTURE_HEADER,
+     "    bool _isScreenCapture = false;\n",
+     "    bool _isScreenCapture = false;\n"
+     "    int _adaptationFramerate = 25; // pluma: upstream's literal of updateAspectRateAdaptation (task 077)\n"),
+    (TGCALLS_CAPTURE,
+     "void VideoCaptureInterfaceObject::setPreferredAspectRatio(float aspectRatio) {\n"
+     "    _preferredAspectRatio = aspectRatio;\n"
+     "    updateAspectRateAdaptation();\n"
+     "}\n",
+     "void VideoCaptureInterfaceObject::setPreferredAspectRatio(float aspectRatio) {\n"
+     "    _preferredAspectRatio = aspectRatio;\n"
+     "    updateAspectRateAdaptation();\n"
+     "}\n"
+     "\n"
+     "// pluma: the frame rate the camera is adapted to, 25 upstream (task 077).\n"
+     "void VideoCaptureInterfaceObject::setAdaptationFramerate(int framerate) {\n"
+     "    if (_adaptationFramerate != framerate) {\n"
+     "        _adaptationFramerate = framerate;\n"
+     "        updateAspectRateAdaptation();\n"
+     "    }\n"
+     "}\n"),
+    (TGCALLS_CAPTURE,
+     "adaptVideoSource(_videoSource, (int)width, (int)height, 25);\n",
+     "adaptVideoSource(_videoSource, (int)width, (int)height, _adaptationFramerate);\n"),
+    (TGCALLS_CAPTURE,
+     "adaptVideoSource(_videoSource, _videoCapturerResolution.first, _videoCapturerResolution.second, 25);\n",
+     "adaptVideoSource(_videoSource, _videoCapturerResolution.first, _videoCapturerResolution.second, "
+     "_adaptationFramerate);\n"),
+    # The screen limits of the private call in progress, read by the screen
+    # capturers of calls on every frame.
+    (TGCALLS_SCREEN_SOURCE,
+     "\tbool captureMouse = true;\n\n\tstd::string cachedKey() const;\n",
+     "\tbool captureMouse = true;\n"
+     "\t// pluma: a screen shared in a call follows the limits of the private call\n"
+     "\t// in progress (SetCallScreenCaptureLimits, task 077) where it sets them,\n"
+     "\t// in place of aspectSize's halving and fps; source previews do not.\n"
+     "\tbool followsCallLimits = false;\n"
+     "\n"
+     "\tstd::string cachedKey() const;\n"),
+    (TGCALLS_SCREEN_HELPER_HEADER,
+     "bool ShouldBeDesktopCapture(const std::string &uniqueKey);\n",
+     "bool ShouldBeDesktopCapture(const std::string &uniqueKey);\n"
+     "\n"
+     "// pluma: the long side in pixels and the frame rate of a screen shared in\n"
+     "// the private call in progress, from its custom_parameters (task 077); 0\n"
+     "// keeps the capture's own value. The capture belongs to the process, not to\n"
+     "// the call, so the call that set the limits last owns them until it clears\n"
+     "// them; a clear by another call does nothing.\n"
+     "void SetCallScreenCaptureLimits(const void *call, int maxSide, int fps);\n"
+     "void ClearCallScreenCaptureLimits(const void *call);\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "#include <vector>\n#include <functional>\n",
+     "#include <vector>\n#include <functional>\n"
+     "// pluma: the screen limits of a private call (task 077).\n"
+     "#include <atomic>\n"
+     "#include <mutex>\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "class SourceFrameCallbackImpl : public webrtc::DesktopCapturer::Callback {\n"
+     "public:\n"
+     "    SourceFrameCallbackImpl(DesktopSize size, int fps);\n",
+     "// pluma: the limits of SetCallScreenCaptureLimits. The owner changes under\n"
+     "// the mutex; the capture reads the values on every frame without it.\n"
+     "std::mutex CallScreenLimitsMutex;\n"
+     "const void *CallScreenLimitsOwner = nullptr;\n"
+     "std::atomic<int> CallScreenMaxSide{ 0 };\n"
+     "std::atomic<int> CallScreenFps{ 0 };\n"
+     "\n"
+     "class SourceFrameCallbackImpl : public webrtc::DesktopCapturer::Callback {\n"
+     "public:\n"
+     "    SourceFrameCallbackImpl(DesktopSize size, int fps, bool followsCallLimits);\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "    DesktopSize size_;\n",
+     "    DesktopSize size_;\n"
+     "    bool followsCallLimits_ = false; // pluma: task 077\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "SourceFrameCallbackImpl::SourceFrameCallbackImpl(DesktopSize size, int fps)\n: size_(size) {\n}\n",
+     "SourceFrameCallbackImpl::SourceFrameCallbackImpl(DesktopSize size, int fps, bool followsCallLimits)\n"
+     ": size_(size)\n"
+     ", followsCallLimits_(followsCallLimits) {\n"
+     "}\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "        ? DesktopSize{ frameSize.width() / 2, frameSize.height() / 2 }\n"
+     "        : DesktopSize{ frameSize.width(), frameSize.height() };\n",
+     "        ? DesktopSize{ frameSize.width() / 2, frameSize.height() / 2 }\n"
+     "        : DesktopSize{ frameSize.width(), frameSize.height() };\n"
+     "    // pluma: the long side the private call sets, if any: a larger frame is\n"
+     "    // scaled down to it whole, a smaller one is sent as it is (task 077).\n"
+     "    if (const auto maxSide = followsCallLimits_ ? CallScreenMaxSide.load() : 0) {\n"
+     "        const auto longSide = std::max(frameSize.width(), frameSize.height());\n"
+     "        fittedSize = (longSide > maxSide)\n"
+     "            ? DesktopSize{\n"
+     "                int((long long)frameSize.width() * maxSide / longSide),\n"
+     "                int((long long)frameSize.height() * maxSide / longSide) }\n"
+     "            : DesktopSize{ frameSize.width(), frameSize.height() };\n"
+     "    }\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "    bool _currentlyOnPause = false;\n    double _delayMs = 0.;\n",
+     "    bool _currentlyOnPause = false;\n"
+     "    double _delayMs = 0.;\n"
+     "    bool _followsCallLimits = false; // pluma: task 077\n"),
+    (TGCALLS_SCREEN_HELPER,
+     ", _callback(data.aspectSize, data.fps)\n, _delayMs(1000. / data.fps) {\n",
+     ", _callback(data.aspectSize, data.fps, data.followsCallLimits)\n"
+     ", _delayMs(1000. / data.fps)\n"
+     ", _followsCallLimits(data.followsCallLimits) {\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "    _scheduler.runDelayed(_delayMs, [=, this] {\n",
+     "    // pluma: the frame rate the private call sets, if any (task 077).\n"
+     "    const auto callFps = _followsCallLimits ? CallScreenFps.load() : 0;\n"
+     "    _scheduler.runDelayed((callFps > 0) ? (1000. / callFps) : _delayMs, [=, this] {\n"),
+    (TGCALLS_SCREEN_HELPER,
+     "bool ShouldBeDesktopCapture(const std::string &uniqueKey) {\n"
+     "    return (uniqueKey.find(\"desktop_capturer_\") == 0);\n"
+     "}\n",
+     "bool ShouldBeDesktopCapture(const std::string &uniqueKey) {\n"
+     "    return (uniqueKey.find(\"desktop_capturer_\") == 0);\n"
+     "}\n"
+     "\n"
+     "// pluma: task 077.\n"
+     "void SetCallScreenCaptureLimits(const void *call, int maxSide, int fps) {\n"
+     "    std::lock_guard<std::mutex> lock(CallScreenLimitsMutex);\n"
+     "    CallScreenLimitsOwner = call;\n"
+     "    CallScreenMaxSide = maxSide;\n"
+     "    CallScreenFps = fps;\n"
+     "}\n"
+     "\n"
+     "void ClearCallScreenCaptureLimits(const void *call) {\n"
+     "    std::lock_guard<std::mutex> lock(CallScreenLimitsMutex);\n"
+     "    if (CallScreenLimitsOwner == call) {\n"
+     "        CallScreenLimitsOwner = nullptr;\n"
+     "        CallScreenMaxSide = 0;\n"
+     "        CallScreenFps = 0;\n"
+     "    }\n"
+     "}\n"),
+    # The screen capturers of calls: Windows and Linux, macOS.
+    (TGCALLS_SCREEN_WINDOWS_LINUX,
+     "\t\t\t/*.fps = */24.,\n\t\t\t/*.captureMouse = */true,\n\t\t};\n",
+     "\t\t\t/*.fps = */24.,\n"
+     "\t\t\t/*.captureMouse = */true,\n"
+     "\t\t\t/*.followsCallLimits = */true, // pluma: task 077\n"
+     "\t\t};\n"),
+    (TGCALLS_SCREEN_MACOS,
+     "\t        /*.fps = */25,\n\t        /*.captureMouse = */true,\n        };\n",
+     "\t        /*.fps = */25,\n"
+     "\t        /*.captureMouse = */true,\n"
+     "\t        /*.followsCallLimits = */true, // pluma: task 077\n"
+     "        };\n"),
+)
+# The keys the edits read, each exactly once.
+CALL_PARAMETER_KEYS = ("audio_ptime_ms", "audio_max_bitrate_kbps", "audio_min_bitrate_kbps", "audio_jitter_min_ms",
+                       "audio_rnnoise", "video_max_bitrate_kbps", "screen_max_bitrate_kbps", "start_bitrate_kbps",
+                       "video_fps", "screen_fps", "screen_max_size_px")
+# What the edits replace may stay nowhere else: another place that sets the
+# same value would escape the server's (upstream adding one stops the patch
+# until it is read).
+CALL_PARAMETERS_GUARDS = (
+    (TGCALLS_V2, "kCodecParamPTime", 1),
+    (TGCALLS_V2, "audio_jitter_buffer_min_delay_ms", 1),
+    (TGCALLS_V2, "InitFieldTrialsFromString(", 1),
+    (TGCALLS_V2, "->setMaxBitrate(", 3),
+    (TGCALLS_V2, "SetCapturePostProcessing(", 1),
+    (TGCALLS_V2, "bitrate_config", 1),
+    (TGCALLS_V2, "new OutgoingAudioChannel(", 2),
+    (TGCALLS_V2, "new IncomingV2AudioChannel(", 1),
+    (CALLS_CALL, "tgcalls::Descriptor descriptor = {", 1),
+    (TGCALLS_V2, "setAdaptationFramerate(", 1),
+    (TGCALLS_V2, "SetCallScreenCaptureLimits(", 1),
+    (TGCALLS_V2, "ClearCallScreenCaptureLimits(", 1),
+    (TGCALLS_CAPTURE, "adaptVideoSource(", 2),
+    (TGCALLS_SCREEN_HELPER, "OnCaptureResult(", 2),
+    (TGCALLS_SCREEN_HELPER, "_scheduler.runDelayed(", 1),
+) + tuple((TGCALLS_V2, f'_customParameters, "{key}"', 1) for key in CALL_PARAMETER_KEYS)
+
+
+def call_parameters(tree):
+    for rel, old, new in CALL_PARAMETERS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_call_parameters(tree):
+    for rel, old, new in CALL_PARAMETERS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the call parameters from the server (task 077) are not read there")
+    for rel, s, count in CALL_PARAMETERS_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another place sets what the server's call parameters should")
+
+
+def call_parameters_edited():
+    """The files call_parameters() edits."""
+    return tuple(sorted({rel for rel, _, _ in CALL_PARAMETERS_EDITS}))
 
 
 def main(argv=None):

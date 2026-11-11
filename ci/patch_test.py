@@ -665,6 +665,9 @@ DAMAGE += tuple((rel, old, old.replace("premium", "promium").replace("Premium", 
 # Every edit of the AI editor, damaged in the pinned upstream, stops the patch
 # with the file's name.
 DAMAGE += tuple((rel, old, old.replace("\t", "    ", 1)) for rel, old, _ in patch.NO_AI_EDITOR_EDITS)
+# Every edit of the call parameters, damaged in the pinned upstream (tdesktop
+# and its tgcalls), stops the patch with the file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CALL_PARAMETERS_EDITS)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -1673,6 +1676,160 @@ class NoAiEditorTest(unittest.TestCase):
 
     def test_lf_only_covers_the_edits(self):
         self.assertEqual(set(patch.no_ai_editor_edited()), {rel for rel, _, _ in patch.NO_AI_EDITOR_EDITS})
+
+
+class CallParametersTest(unittest.TestCase):
+    """The edits of task 077 on files made of the texts they expect, with
+    as many of the guarded texts as the patched pinned upstream has."""
+
+    def tree(self, root, edits=patch.CALL_PARAMETERS_EDITS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        patched = dict(files)
+        for rel, old, new in patch.CALL_PARAMETERS_EDITS:
+            patched[rel] = patched[rel].replace(old, new)
+        for rel, s, count in patch.CALL_PARAMETERS_GUARDS:
+            missing = count - patched[rel].count(s)
+            self.assertGreaterEqual(missing, 0, s)
+            files[rel] += (s + "\n") * missing
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "task 077"):
+                patch.verify_call_parameters(tree)
+            patch.call_parameters(tree)
+            patch.verify_call_parameters(tree)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.call_parameters(tree)
+
+    def test_defaults_are_upstreams(self):
+        # Without a key every value is the pinned tgcalls' own (A/B against
+        # Telegram): Opus 60 ms at 32 * 1024 bit/s, a jitter floor of 50 ms,
+        # the camera at 1000 * 1024 bit/s, no cap on the screen, no start
+        # bitrate, no RNNoise, and upstream's field trials, extended only by
+        # a range from the server.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_parameters(tree)
+            v2 = tree.read(patch.TGCALLS_V2)
+            for key, default in (("audio_ptime_ms", "60"), ("audio_max_bitrate_kbps", "32 * 1024"),
+                                 ("audio_min_bitrate_kbps", "0"), ("audio_jitter_min_ms", "50"),
+                                 ("video_max_bitrate_kbps", "1000 * 1024"), ("screen_max_bitrate_kbps", "0"),
+                                 ("start_bitrate_kbps", "0"), ("video_fps", "0"), ("screen_fps", "0"),
+                                 ("screen_max_size_px", "0")):
+                self.assertRegex(v2, rf'_customParameters, "{key}", {re.escape(default)}, \d+, \d+\);\n', key)
+            for member in ("int _audioPtimeMs = 60;", "int _audioMaxBitrateBps = 32 * 1024;",
+                           "int _audioJitterBufferMinDelayMs = 50;", "bool _audioRnnoise = false;",
+                           "int _videoMaxBitrateBps = 1000 * 1024;", "int _screencastMaxBitrateBps = 0;",
+                           "int _startBitrateBps = 0;", "int _videoFps = 0;"):
+                self.assertIn(f"    {member}", v2)
+            # The camera keeps upstream's 25 unless the call sets a rate; the
+            # screen keeps upstream's size and rate unless the call sets limits.
+            self.assertIn("                if (_videoFps != 0) {\n", v2)
+            self.assertIn("    int _adaptationFramerate = 25;", tree.read(patch.TGCALLS_CAPTURE_HEADER))
+            self.assertEqual(tree.read(patch.TGCALLS_CAPTURE).count(", _adaptationFramerate);\n"), 2)
+            self.assertIn("SetCallScreenCaptureLimits(this, screenMaxSidePx, screenFps);\n", v2)
+            helper = tree.read(patch.TGCALLS_SCREEN_HELPER)
+            self.assertIn("std::atomic<int> CallScreenMaxSide{ 0 };\nstd::atomic<int> CallScreenFps{ 0 };\n", helper)
+            self.assertIn("    if (const auto maxSide = followsCallLimits_ ? CallScreenMaxSide.load() : 0) {\n", helper)
+            self.assertIn("(callFps > 0) ? (1000. / callFps) : _delayMs", helper)
+            self.assertIn("\tbool followsCallLimits = false;\n", tree.read(patch.TGCALLS_SCREEN_SOURCE))
+            self.assertIn("        if (_outgoingScreencastChannel && _screencastMaxBitrateBps != 0) {\n", v2)
+            self.assertIn("            if (_startBitrateBps != 0) {\n", v2)
+            self.assertIn("        if (audioMinBitrateBps != 0 && audioMinBitrateBps <= _audioMaxBitrateBps) {\n", v2)
+            trials = re.search(r'std::string fieldTrials =\n((?:            "[^"]*";?\n)+)', v2)
+            pinned_old = next(old for _, old, _ in patch.CALL_PARAMETERS_EDITS if "InitFieldTrialsFromString(\n" in old)
+            pinned = re.search(r'InitFieldTrialsFromString\(\n((?:            "[^"]*"\n)+)        \);', pinned_old)
+            self.assertIsNotNone(trials)
+            self.assertIsNotNone(pinned)
+            self.assertEqual(re.findall(r'"([^"]*)"', trials.group(1)), re.findall(r'"([^"]*)"', pinned.group(1)))
+            self.assertIn(".customParameters = (call.vcustom_parameters()\n", tree.read(patch.CALLS_CALL))
+
+    def test_keys(self):
+        # The keys the edits read are the server's (pkg/phonecalls/parameters.go
+        # of the server repository), each listed in the comment of
+        # CALL_PARAMETERS_EDITS with its range, which the reads use.
+        keys = set()
+        for _, _, new in patch.CALL_PARAMETERS_EDITS:
+            keys |= set(re.findall(r'_customParameters, "([a-z0-9_]+)"', new))
+        self.assertEqual(keys, set(patch.CALL_PARAMETER_KEYS))
+        source = pathlib.Path(patch.__file__).read_text()
+        reads = "".join(new for _, _, new in patch.CALL_PARAMETERS_EDITS)
+        for key in keys:
+            documented = re.search(rf"#   {key} +[^\n]*(?:\n#    +[^\n]*)*", source)
+            self.assertIsNotNone(documented, key)
+            limits = re.search(rf'_customParameters, "{key}", [^,]+, (\d+), (\d+)\);', reads)
+            if key == "audio_ptime_ms":
+                # The server's packet times, not every value of 10-120.
+                self.assertIn("(10, 20, 40, 60 or 120)", documented.group(0))
+                self.assertIn("if (_audioPtimeMs != 10 && _audioPtimeMs != 20 && _audioPtimeMs != 40 "
+                              "&& _audioPtimeMs != 120) {\n            _audioPtimeMs = 60;", reads)
+            elif limits:
+                self.assertIn(f"({limits.group(1)}-{limits.group(2)})", documented.group(0), key)
+            else:
+                self.assertIn("(true/false)", documented.group(0), key)
+
+    def test_screen_limits(self):
+        # The screen capturers of calls, on Windows and Linux and on macOS,
+        # follow the limits; nothing else sets the flag, so the previews of the
+        # source chooser (desktop_capture_choose_source.cpp) keep their own.
+        edited = [(rel, new) for rel, _, new in patch.CALL_PARAMETERS_EDITS if "followsCallLimits = */true" in new]
+        self.assertEqual({rel for rel, _ in edited}, {patch.TGCALLS_SCREEN_WINDOWS_LINUX, patch.TGCALLS_SCREEN_MACOS})
+        # A clear by a call that is no longer the owner keeps the limits of the
+        # call that set them last; the engine sets them once and clears them in
+        # its destructor.
+        helper = next(new for rel, old, new in patch.CALL_PARAMETERS_EDITS
+                      if rel == patch.TGCALLS_SCREEN_HELPER and "ShouldBeDesktopCapture" in old)
+        self.assertIn("    if (CallScreenLimitsOwner == call) {\n", helper)
+        self.assertIn("    std::lock_guard<std::mutex> lock(CallScreenLimitsMutex);\n", helper)
+        destructor = next(new for rel, old, new in patch.CALL_PARAMETERS_EDITS if "~InstanceV2ImplInternal" in old)
+        self.assertIn("ClearCallScreenCaptureLimits(this);", destructor)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, new) in enumerate(patch.CALL_PARAMETERS_EDITS):
+            changed = old[:-2] + "~" + old[-1]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.CALL_PARAMETERS_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.call_parameters(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_parameters(tree)
+            for i, (rel, old, new) in enumerate(patch.CALL_PARAMETERS_EDITS):
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=i), self.assertRaisesRegex(patch.PatchError, "task 077"):
+                    patch.verify_call_parameters(tree)
+                tree.write(rel, patched)
+            patch.verify_call_parameters(tree)
+
+    def test_another_place(self):
+        for rel, s, _ in patch.CALL_PARAMETERS_GUARDS:
+            with self.subTest(file=rel, text=s), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.call_parameters(tree)
+                tree.write(rel, tree.read(rel) + s + "\n")
+                with self.assertRaisesRegex(patch.PatchError, "another place sets"):
+                    patch.verify_call_parameters(tree)
+
+    def test_lf_only_covers_the_edits(self):
+        self.assertEqual(set(patch.call_parameters_edited()), {rel for rel, _, _ in patch.CALL_PARAMETERS_EDITS})
+        self.assertEqual({s for s, _ in patch.SUBMODULE_PATHS if s == patch.TGCALLS}, {patch.TGCALLS})
+        self.assertEqual({patch.TGCALLS + "/" + p for s, p in patch.SUBMODULE_PATHS if s == patch.TGCALLS},
+                         {rel for rel in patch.call_parameters_edited() if rel.startswith(patch.TGCALLS + "/")})
 
 
 if __name__ == "__main__":
