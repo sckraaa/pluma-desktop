@@ -735,6 +735,14 @@ DAMAGE += tuple((rel, old, old.replace("\t", "    ", 1)) for rel, old, _ in patc
 # Every edit of the call parameters, damaged in the pinned upstream (tdesktop
 # and its tgcalls), stops the patch with the file's name.
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CALL_PARAMETERS_EDITS)
+# The service account: the entry whose text is replaced and each use of its
+# key, damaged in the pinned upstream, stop the patch with the file's name.
+DAMAGE += ((patch.LANG, patch.SERVICE_ACCOUNT_OLD, '"lng_status_support" = "help desk";\n'),)
+DAMAGE += tuple((patch.PEER_VALUES, s, s.replace("lng_status_support", "lng_status_bot")) for s in patch.SERVICE_ACCOUNT_USES)
+# The transcribe button: upstream's condition that hides it on a view-once
+# message, damaged in the pinned upstream, stops the patch with the file's name.
+DAMAGE += tuple((rel, s, s.replace("ttlSeconds", "ttl")) for rel, s in patch.TRANSCRIBE_TTL_CHECKS)
+DAMAGE += tuple((rel, s, s.replace("TranscribeButton", "TranscribeButton2")) for rel, s in patch.TRANSCRIBE_BUTTONS.items())
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -827,12 +835,10 @@ class UpstreamTest(unittest.TestCase):
         tree, _ = self.run_patch()
         self.assertIn('return get<bool>(u"wallet_available"_q, false);', tree.read(S + "/main/main_app_config.cpp"))
 
-    def test_no_star_store_or_transcription_on_new_surfaces(self):
+    def test_no_star_or_store_on_new_surfaces(self):
         tree, _ = self.run_patch()
         message = tree.read(S + "/history/view/history_view_message.cpp")
         self.assertIn("if ((from->isPremium() // pluma: no star by a name (ADR 0041)\n", message)
-        self.assertIn("if (false // pluma: the server has no transcription to offer\n\t\t&& _data->isVideoMessage()\n",
-                      tree.read(S + "/history/view/media/history_view_gif.cpp"))
         self.assertIn("badge->showOn(rpl::single(session->premiumBadgesShown()));",
                       tree.read(S + "/settings/sections/settings_privacy_security.cpp"))
         self.assertIn("if (true // pluma: the server does not serve account.updateEmojiStatus\n",
@@ -1511,6 +1517,57 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(code.count("\t\tshowAdministratorBox();\n"), 1)
         self.assertEqual(code.count("Ui::MakeInformBox({\n\t\t.text = tr::lng_pluma_code_admin_text(),"), 1)
 
+    def test_service_account(self):
+        """The service account (task 080): "service account" in place of a
+        last seen, for user.support and for a service user, under
+        Telegram's key, which nothing else uses; no source is edited."""
+        tree, _ = self.run_patch()
+        lang = tree.read(patch.LANG)
+        self.assertIn('"lng_status_service_notifications" = "service notifications";\n'
+                      '"lng_status_support" = "service account";\n"lng_status_bot" = "bot";\n', lang)
+        self.assertNotIn('= "support";', lang)
+        self.assertEqual(tree.read_bytes(patch.PEER_VALUES), self.files[patch.PEER_VALUES])
+        values = tree.read(patch.PEER_VALUES)
+        special = values[values.index("std::optional<QString> OnlineTextSpecial("):
+                         values.index("std::optional<QString> OnlineTextCommon(")]
+        for s in patch.SERVICE_ACCOUNT_USES:
+            self.assertEqual(special.count(s), 1)
+        # Another place that says the key stops the check.
+        other = S + "/history/view/history_view_top_bar_widget.cpp"
+        self.written.add(other)
+        tree.write(other, tree.read(other) + "// tr::lng_status_support(tr::now)\n")
+        with self.assertRaisesRegex(patch.PatchError, "history_view_top_bar_widget.cpp: another use of lng_status_support"):
+            patch.verify_service_account(tree)
+
+    def test_transcribe_button(self):
+        """Voice and round messages have upstream's transcribe button again
+        (task 080), which a view-once message does not show; no source is
+        edited for it."""
+        tree, c = self.run_patch()
+        for rel, s in patch.TRANSCRIBE_TTL_CHECKS:
+            with self.subTest(rel=rel):
+                self.assertEqual(tree.read_bytes(rel), self.files[rel])
+                self.assertEqual(tree.read(rel).count(s), 1)
+        self.assertNotIn("transcription", "".join(new for _, _, new in patch.PREMIUM_FOR_EVERYONE_EDITS))
+        # Hiding the button again, as task 071 did, stops the check.
+        hidden = ((patch.TRANSCRIBE_TTL_CHECKS[0][0], "\t\tif ((media && media->ttlSeconds())\n",
+                   "\t\tif (true // hidden\n\t\t\t|| (media && media->ttlSeconds())\n"),
+                  (patch.TRANSCRIBE_TTL_CHECKS[1][0], "\tif (_data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n",
+                   "\tif (false // hidden\n\t\t&& _data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n"))
+        for rel, old, new in hidden:
+            with self.subTest(hidden=rel):
+                text = tree.read(rel)
+                tree.write(rel, text.replace(old, new))
+                with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": not upstream's transcribe"):
+                    patch.verify(tree, c)
+                tree.write(rel, text)
+        # Upstream making the button on another surface stops the check.
+        other = S + "/history/view/media/history_view_photo.cpp"
+        self.written.add(other)
+        tree.write(other, tree.read(other) + "auto b = std::make_unique<TranscribeButton>(item, false);\n")
+        with self.assertRaisesRegex(patch.PatchError, "history_view_photo.cpp: another transcribe button"):
+            patch.verify(tree, c)
+
     def test_telegram_plane_in_a_new_icon(self):
         """The plane of the 7.4 notice is Pluma's mark; another file drawing
         Telegram's stops the patch."""
@@ -1625,6 +1682,75 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class TranscriptionTest(unittest.TestCase):
+    """The transcribe button (task 080) on files made of the texts the patch
+    expects."""
+
+    def tree(self, root, checks=patch.TRANSCRIBE_TTL_CHECKS, buttons=patch.TRANSCRIBE_BUTTONS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {}
+        for rel, s in checks:
+            files[rel] = files.get(rel, "") + s + "x\n"
+        for rel, s in buttons.items():
+            files[rel] = files.get(rel, "") + s + "x\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            before = {rel: tree.read(rel) for rel, _ in patch.TRANSCRIBE_TTL_CHECKS}
+            patch.transcription(tree)
+            patch.verify_transcription(tree)
+            self.assertEqual({rel: tree.read(rel) for rel, _ in patch.TRANSCRIBE_TTL_CHECKS}, before)
+
+    def test_view_once_is_in_the_conditions(self):
+        # Both places that make the button leave out a media with a ttl,
+        # which a view-once message has.
+        document, gif = (s for _, s in patch.TRANSCRIBE_TTL_CHECKS)
+        self.assertIn("\t\tif ((media && media->ttlSeconds())\n", document)
+        self.assertTrue(document.endswith("\t\t\tvoice->transcribe = nullptr;\n\t\t\tvoice->transcribeText = {};\n\t\t} else {\n"))
+        self.assertIn("\tif (_data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n", gif)
+        self.assertEqual([rel.rsplit("/", 1)[1] for rel, _ in patch.TRANSCRIBE_TTL_CHECKS],
+                         ["history_view_document.cpp", "history_view_gif.cpp"])
+
+    def test_upstream_changed(self):
+        for i, (rel, s) in enumerate(patch.TRANSCRIBE_TTL_CHECKS):
+            for changed in (s.replace("ttlSeconds", "ttl"), s + s):
+                checks = [c if j != i else (rel, changed) for j, c in enumerate(patch.TRANSCRIBE_TTL_CHECKS)]
+                with self.subTest(check=i, twice=changed == s + s), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), checks)
+                    with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": [02] occurrences"):
+                        patch.transcription(tree)
+                    with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": not upstream's"):
+                        patch.verify_transcription(tree)
+        for rel, s in patch.TRANSCRIBE_BUTTONS.items():
+            for changed in (s.replace("_realParent", "item").replace("data()", "item"), s + s):
+                buttons = dict(patch.TRANSCRIBE_BUTTONS, **{rel: changed})
+                with self.subTest(button=rel, twice=changed == s + s), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), buttons=buttons)
+                    with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": [02] occurrences"):
+                        patch.transcription(tree)
+                    with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": another transcribe"):
+                        patch.verify_transcription(tree)
+
+    def test_another_button(self):
+        # A button made anywhere else, or a second one in a known file, is a
+        # surface the ttl conditions do not cover.
+        for rel in (patch.SOURCES + "/history/view/media/history_view_photo.cpp",
+                    patch.TRANSCRIBE_TTL_CHECKS[0][0]):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                had = tree.read(rel) if (pathlib.Path(d) / rel).exists() else ""
+                tree.write(rel, had + "\tauto b = std::make_unique<TranscribeButton>(item, false);\n")
+                with self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name + ": another transcribe button"):
+                    patch.verify_transcription(tree)
 
 
 class LoginCodeScreensTest(unittest.TestCase):
@@ -1936,6 +2062,96 @@ class CallParametersTest(unittest.TestCase):
         self.assertEqual({s for s, _ in patch.SUBMODULE_PATHS if s == patch.TGCALLS}, {patch.TGCALLS})
         self.assertEqual({patch.TGCALLS + "/" + p for s, p in patch.SUBMODULE_PATHS if s == patch.TGCALLS},
                          {rel for rel in patch.call_parameters_edited() if rel.startswith(patch.TGCALLS + "/")})
+
+
+class ServiceAccountTest(unittest.TestCase):
+    """The service account (task 080) on files made of the texts the patch
+    expects."""
+
+    def tree(self, root, lang=patch.SERVICE_ACCOUNT_OLD, uses=patch.SERVICE_ACCOUNT_USES):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {patch.LANG: '"lng_status_service_notifications" = "service notifications";\n' + lang,
+                 patch.PEER_VALUES: "".join(s + "x\n" for s in uses)}
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "task 080"):
+                patch.verify_service_account(tree)
+            values = tree.read(patch.PEER_VALUES)
+            patch.service_account(tree)
+            patch.verify_service_account(tree)
+            entries = {m["key"]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+            self.assertEqual(entries, {"lng_status_service_notifications": "service notifications",
+                                       "lng_status_support": "service account"})
+            self.assertEqual(tree.read(patch.PEER_VALUES), values)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.service_account(tree)
+
+    def test_text(self):
+        # In the lower case of tdesktop's status lines, and not the words of
+        # the account of service notifications.
+        self.assertEqual(patch.SERVICE_ACCOUNT_TEXT, "service account")
+        self.assertEqual(patch.SERVICE_ACCOUNT_NEW, '"lng_status_support" = "service account";\n')
+        self.assertIsNotNone(patch.LANG_ENTRY.fullmatch(patch.SERVICE_ACCOUNT_NEW.strip()))
+        self.assertEqual([s.split("user->")[1].split("(")[0] for s in patch.SERVICE_ACCOUNT_USES],
+                         ["isSupport", "isServiceUser"])
+
+    def test_upstream_changed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), lang='"lng_status_support" = "help desk";\n')
+            with self.assertRaisesRegex(patch.PatchError, "lang.strings: 0 occurrences"):
+                patch.service_account(tree)
+        for i, use in enumerate(patch.SERVICE_ACCOUNT_USES):
+            for changed in (use.replace("user->is", "user->was"), use + use):
+                uses = [u if j != i else changed for j, u in enumerate(patch.SERVICE_ACCOUNT_USES)]
+                with self.subTest(use=i, changed=changed), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), uses=uses)
+                    with self.assertRaisesRegex(patch.PatchError, "data_peer_values.cpp: [02] occurrences"):
+                        patch.service_account(tree)
+                    # Nothing was written.
+                    self.assertIn(patch.SERVICE_ACCOUNT_OLD, tree.read(patch.LANG))
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.service_account(tree)
+            lang = tree.read(patch.LANG)
+            for broken in (lang.replace(patch.SERVICE_ACCOUNT_NEW, ""),
+                           lang.replace(patch.SERVICE_ACCOUNT_NEW, patch.SERVICE_ACCOUNT_OLD),
+                           lang.replace(patch.SERVICE_ACCOUNT_NEW, '"lng_status_support" = "Service account";\n'),
+                           lang + patch.SERVICE_ACCOUNT_NEW, lang + patch.SERVICE_ACCOUNT_OLD):
+                tree.write(patch.LANG, broken)
+                with self.subTest(lang=broken), self.assertRaisesRegex(patch.PatchError, "lang.strings: lng_status_support"):
+                    patch.verify_service_account(tree)
+            tree.write(patch.LANG, lang)
+            values = tree.read(patch.PEER_VALUES)
+            for i, use in enumerate(patch.SERVICE_ACCOUNT_USES):
+                tree.write(patch.PEER_VALUES, values.replace(use, use.replace("user->is", "user->was")))
+                with self.subTest(use=i), self.assertRaisesRegex(patch.PatchError, "data_peer_values.cpp: "):
+                    patch.verify_service_account(tree)
+            tree.write(patch.PEER_VALUES, values)
+            patch.verify_service_account(tree)
+
+    def test_another_use(self):
+        for rel in (patch.PEER_VALUES, patch.SOURCES + "/boxes/peer_list_box.cpp"):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.service_account(tree)
+                had = tree.read(rel) if rel == patch.PEER_VALUES else ""
+                tree.write(rel, had + "\tsetStatusText(tr::lng_status_support(tr::now));\n")
+                with self.assertRaisesRegex(patch.PatchError, "another use of lng_status_support"):
+                    patch.verify_service_account(tree)
+
+    def test_lf_only_covers_the_edits(self):
+        self.assertEqual(patch.service_account_edited(), (patch.LANG,))
 
 
 if __name__ == "__main__":
