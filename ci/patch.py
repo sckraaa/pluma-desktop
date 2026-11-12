@@ -2489,7 +2489,7 @@ def check_upstream(tree, c):
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
-                + call_parameters_edited()):
+                + call_parameters_edited() + service_account_edited()):
         tree.lf_only(rel)
 
 
@@ -2663,10 +2663,12 @@ def patch(tree, c):
 
     rebrand(tree, c)
     premium_for_everyone(tree)
+    transcription(tree)
     no_ai_editor(tree)
     # After rebrand(): the texts name the real Telegram.
     login_code_screens(tree)
     call_parameters(tree)
+    service_account(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2808,9 +2810,11 @@ def verify(tree, c):
     verify_brand(tree)
     verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
+    verify_transcription(tree)
     verify_no_ai_editor(tree)
     verify_login_code_screens(tree)
     verify_call_parameters(tree)
+    verify_service_account(tree)
 
 
 
@@ -2835,13 +2839,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/window/window_main_menu.cpp",
      "void MainMenu::setupSetEmojiStatus() {\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n",
      "void MainMenu::setupSetEmojiStatus() {\n\t// pluma: the server does not serve account.updateEmojiStatus.\n\t_setEmojiStatus->hide();\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n"),
-    ("Telegram/SourceFiles/history/view/media/history_view_document.cpp",
-     "\t\tif ((media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n",
-     "\t\tif (true // pluma: the server has no transcription to offer\n\t\t\t|| (media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n"),
-    # The same button on a round video.
-    ("Telegram/SourceFiles/history/view/media/history_view_gif.cpp",
-     "\tif (_data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n\t\t&& !_parent->data()->isScheduled()\n",
-     "\tif (false // pluma: the server has no transcription to offer\n\t\t&& _data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n\t\t&& !_parent->data()->isScheduled()\n"),
     # The star after a sender's name in a group: the slot for it stays only
     # for an emoji status.
     ("Telegram/SourceFiles/history/view/history_view_message.cpp",
@@ -2900,6 +2897,67 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Transcription of voice and round messages ---------------------------------
+# The server transcribes for everybody with Premium (task 080, ADR 0041), so
+# the button on a voice message and on a round video is upstream's again.
+# It never shows on a message that plays once or self-destructs: upstream
+# hides it for any media with a ttl (Data::Media::ttlSeconds(), which a
+# view-once message has as kTimeToLiveSingleView, data_media_types.h:211),
+# in Document::countOptimalSize and Gif::ensureTranscribeButton, the only
+# two places that make the button of a voice or round message; the server
+# refuses such a message too. No source is edited: upstream changing either
+# condition, or making the button anywhere else, stops the patch until that
+# place is read.
+TRANSCRIBE_TTL_CHECKS = (
+    (SOURCES + "/history/view/media/history_view_document.cpp",
+     "\t\tconst auto media = _parent->data()->media();\n"
+     "\t\tif ((media && media->ttlSeconds())\n\t\t\t|| IsHostedInstantViewMedia(_parent)\n"
+     "\t\t\t|| _realParent->isScheduled()\n\t\t\t|| _realParent->isAdminLogEntry()\n"
+     "\t\t\t|| (!session->premium()\n\t\t\t\t&& !transcribes->freeFor(_realParent)\n"
+     "\t\t\t\t&& !transcribes->trialsSupport())\n\t\t\t|| (!session->premium()\n"
+     "\t\t\t\t&& _data->duration() > transcribes->trialsMaxLengthMs())) {\n"
+     "\t\t\tvoice->transcribe = nullptr;\n\t\t\tvoice->transcribeText = {};\n\t\t} else {\n"),
+    (SOURCES + "/history/view/media/history_view_gif.cpp",
+     "void Gif::ensureTranscribeButton() const {\n\tconst auto media = _parent->data()->media();\n"
+     "\tif (_data->isVideoMessage()\n\t\t&& (!media || !media->ttlSeconds())\n\t\t&& !_parent->data()->isScheduled()\n"),
+)
+# Every place upstream makes a transcribe button: the two above, and the
+# summary of a long text (Message::ensureSummarizeButton), which is not
+# audio. Another one is a surface the ttl conditions above do not cover.
+TRANSCRIBE_BUTTON = "std::make_unique<TranscribeButton>("
+TRANSCRIBE_BUTTONS = {
+    SOURCES + "/history/view/media/history_view_document.cpp":
+        "\t\t\t\tvoice->transcribe = std::make_unique<TranscribeButton>(\n\t\t\t\t\t_realParent,\n\t\t\t\t\tfalse);\n",
+    SOURCES + "/history/view/media/history_view_gif.cpp":
+        "\t\t\t_transcribe = std::make_unique<TranscribeButton>(\n\t\t\t\t_realParent,\n\t\t\t\ttrue);\n",
+    SOURCES + "/history/view/history_view_message.cpp":
+        "\t\t\t\t= std::make_unique<TranscribeButton>(data(), false, true);\n",
+}
+
+
+def transcription(tree):
+    for rel, s in TRANSCRIBE_TTL_CHECKS:
+        tree.expect(rel, s)
+    for rel, s in TRANSCRIBE_BUTTONS.items():
+        tree.expect(rel, s)
+
+
+def verify_transcription(tree):
+    for rel, s in TRANSCRIBE_TTL_CHECKS:
+        if tree.read(rel).count(s) != 1:
+            raise PatchError(f"{rel}: not upstream's transcribe button, which a view-once message "
+                             "does not show (task 080)")
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        if TRANSCRIBE_BUTTON not in text:
+            continue
+        known = TRANSCRIBE_BUTTONS.get(rel)
+        if known is None or text.count(known) != 1 or TRANSCRIBE_BUTTON in text.replace(known, ""):
+            raise PatchError(f"{rel}: another transcribe button, which the conditions on a view-once "
+                             "message (task 080) do not cover")
+
 
 # --- No AI message editor (task 079) ------------------------------------------
 # The AI editor rewrites, proofreads, restyles and translates a typed message
@@ -4166,6 +4224,59 @@ def verify_call_parameters(tree):
 def call_parameters_edited():
     """The files call_parameters() edits."""
     return tuple(sorted({rel for rel, _, _ in CALL_PARAMETERS_EDITS}))
+
+
+# --- The service account (task 080) -------------------------------------------
+# The account of the Pluma server (@support, user.support, no last seen)
+# says "service account" where a person's last seen goes, not Telegram's
+# "support" (the owner's decision, 2026-11-11). Every status line of a user
+# takes the words from Data::OnlineTextSpecial (OnlineText and OnlineTextFull
+# of data_peer_values.cpp: the top bar of a chat, the profile, the lists of
+# people, the chat preview), which says lng_status_support twice: for
+# user.support and for a service user (an id that is a multiple of 1000,
+# PeerData::isServiceUser). The key keeps its name and both its uses, and
+# gets Pluma's words: no source is edited. This is the built-in English;
+# every other language comes from the server's language pack of tdesktop,
+# where the server puts the same words under this key in each language
+# (pkg/langpack/override.json of the server repository).
+PEER_VALUES = SOURCES + "/data/data_peer_values.cpp"
+SERVICE_ACCOUNT_KEY = "lng_status_support"
+SERVICE_ACCOUNT_TEXT = "service account"
+SERVICE_ACCOUNT_OLD = f'"{SERVICE_ACCOUNT_KEY}" = "support";\n'
+SERVICE_ACCOUNT_NEW = f'"{SERVICE_ACCOUNT_KEY}" = "{SERVICE_ACCOUNT_TEXT}";\n'
+# Who the key is said of. Upstream using it for anyone else, or anywhere
+# else, stops the patch until that place is read.
+SERVICE_ACCOUNT_USES = tuple(
+    f"\t}} else if (user->{check}()) {{\n\t\treturn tr::{SERVICE_ACCOUNT_KEY}(tr::now);\n"
+    for check in ("isSupport", "isServiceUser"))
+
+
+def service_account(tree):
+    for s in SERVICE_ACCOUNT_USES:
+        tree.expect(PEER_VALUES, s)
+    tree.replace(LANG, SERVICE_ACCOUNT_OLD, SERVICE_ACCOUNT_NEW)
+
+
+def verify_service_account(tree):
+    entries = [m["value"] for m in lang_entries(tree.read(LANG)) if m["key"] == SERVICE_ACCOUNT_KEY]
+    if entries != [SERVICE_ACCOUNT_TEXT]:
+        raise PatchError(f"{LANG}: {SERVICE_ACCOUNT_KEY} is not the text of the service account (task 080)")
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        if rel == PEER_VALUES:
+            for s in SERVICE_ACCOUNT_USES:
+                if text.count(s) != 1:
+                    raise PatchError(f"{rel}: {SERVICE_ACCOUNT_KEY} is not said of {s.split('user->')[1].split('(')[0]} "
+                                     "once; who the service account (task 080) is changed")
+                text = text.replace(s, "")
+        if SERVICE_ACCOUNT_KEY in text:
+            raise PatchError(f"{rel}: another use of {SERVICE_ACCOUNT_KEY}, "
+                             "which says \"service account\" (task 080)")
+
+
+def service_account_edited():
+    """The files service_account() edits."""
+    return (LANG,)
 
 
 def main(argv=None):
