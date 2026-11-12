@@ -743,6 +743,12 @@ DAMAGE += tuple((patch.PEER_VALUES, s, s.replace("lng_status_support", "lng_stat
 # message, damaged in the pinned upstream, stops the patch with the file's name.
 DAMAGE += tuple((rel, s, s.replace("ttlSeconds", "ttl")) for rel, s in patch.TRANSCRIBE_TTL_CHECKS)
 DAMAGE += tuple((rel, s, s.replace("TranscribeButton", "TranscribeButton2")) for rel, s in patch.TRANSCRIBE_BUTTONS.items())
+# Every edit of end-to-end group calls (task 094), and each block it removes,
+# damaged in the pinned upstream (tdesktop and its tgcalls), stops the patch
+# with the file's name; so does the entry of lang.strings the text follows.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.GROUP_CALLS_E2E_EDITS)
+DAMAGE += tuple((rel, s, s[:-2] + "~" + s[-1]) for rel, head, tail, _, _ in patch.GROUP_CALLS_E2E_SPANS for s in (head, tail))
+DAMAGE += ((patch.LANG, patch.GROUP_CALLS_E2E_STRINGS_AFTER, patch.GROUP_CALLS_E2E_STRINGS_AFTER.replace("no longer", "not")),)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -1539,6 +1545,140 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(patch.PatchError, "history_view_top_bar_widget.cpp: another use of lng_status_support"):
             patch.verify_service_account(tree)
 
+    def test_group_calls_e2e(self):
+        """Every group call is end to end (task 094): a chat's call takes the
+        encryption of a conference, never as a channel, and no RTMP or live
+        story is left."""
+        tree, _ = self.run_patch()
+        call = tree.read(patch.GROUP_CALL)
+        self.assertIn("bool GroupCall::e2e() const {\n", call)
+        self.assertIn("\treturn conference() || !videoStream();\n}\n", call)
+        # The key is made for a chat's call in the constructor, and again for
+        # each join once the old key went to the server.
+        self.assertIn("\t} else if (e2e()) {\n\t\t// pluma: a call of a group or a channel takes the encryption of a\n"
+                      "\t\t// conference (task 094).\n\t\tinitConferenceE2E();\n\t}\n", call)
+        self.assertIn("\tif (_e2eKeySent && e2e()) {\n\t\tinitConferenceE2E();\n\t}\n"
+                      "\t_joinState.action = JoinAction::Joining;\n", call)
+        # Every join of a chat's call asks for the last block first.
+        self.assertIn("\t\t\t\t&& !(_sharedCall && _sharedCall->blockchainMayBeEmpty())\n"
+                      "\t\t\t\t&& !_e2e->hasLastBlock0()) {\n\t\t\t\trefreshLastBlockAndJoin();\n", call)
+        # public_key and block go with every join of an end-to-end call: upstream's
+        # condition, on the _e2e every such call has.
+        self.assertIn("| (_e2e ? (Flag::f_public_key | Flag::f_block) : Flag());\n", call)
+        # A failing key counts once against the limit of rejoins, however
+        # many blocks of a batch fail with it.
+        self.assertIn("\t_e2e->failures() | rpl::take(1) | rpl::on_next([=] {\n", call)
+        self.assertIn("\t\tif (int(_e2eRejoins.size()) >= kE2ERejoinsLimit) {\n", call)
+        self.assertNotIn('value("stream")', call)
+        self.assertNotIn("f_rtmp_stream", call)
+        # The report goes every 5 seconds once joined, over tgcalls' data channel.
+        self.assertIn("constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n", call)
+        self.assertIn("\t\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n", call)
+        self.assertIn("    void sendE2EStatus(std::string const &report);\n", tree.read(patch.TGCALLS_GROUP_H))
+        group = tree.read(patch.TGCALLS_GROUP)
+        self.assertIn("        if (!_isDataChannelOpen) {\n            return;\n        }\n"
+                      "        _networkManager->perform([report](GroupNetworkManager *networkManager) {\n"
+                      "            networkManager->sendDataChannelMessage(report);\n", group)
+        # Data::GroupCall tracks who left the chain for a chat's call too.
+        data = tree.read(patch.DATA_GROUP_CALL)
+        self.assertIn("\tif (!_videoStream) {\n\t\t_participantUpdates.events(\n", data)
+        # The emoji of the key in the list of participants.
+        self.assertIn(", _fingerprint(call->e2e() // pluma: task 094\n", tree.read(patch.GROUP_CALL_MEMBERS))
+        # Only the user joins.
+        join_as = tree.read(patch.CHOOSE_JOIN_AS)
+        self.assertIn("\tlist = { not_null<PeerData*>(self) };\n", join_as)
+        self.assertNotIn(".joinAs = peer }", join_as)
+        # No RTMP and no live stories.
+        self.assertNotIn("lng_menu_start_group_call_with", tree.read(patch.PEER_MENU))
+        self.assertNotIn("calls_group_rtmp", tree.read(patch.CMAKE_APP))
+        self.assertNotIn("MTPphone_GetGroupCallStreamRtmpUrl", tree.read(patch.GROUP_CALL_SETTINGS))
+        self.assertNotIn("GroupCallOrigin::VideoStream", tree.read(patch.DATA_STORIES))
+        self.assertIn('"lng_pluma_group_call_e2e_failed" = "The encryption of this call keeps failing, so you left it. '
+                      'Join it again.";\n', tree.read(patch.LANG))
+        # The report holds the fields of E2E_STATUS_FIELDS and no other.
+        api = tree.read(patch.TDE2E_API)
+        report = api[api.index("QByteArray StatusReport("):]
+        report = report[:report.index("\n}\n")]
+        self.assertEqual(set(re.findall(r'u"(\w+)"_q', report)) - {"PlumaE2EStatus"},
+                         set(patch.E2E_STATUS_FIELDS) | set(patch.E2E_STATUS_SENDER_FIELDS))
+        self.assertIn('{ u"colibriClass"_q, u"PlumaE2EStatus"_q },', report)
+
+    def test_group_calls_e2e_changes_nothing_else(self):
+        """Every file differs from the patch without task 094 by the edits of
+        task 094 alone."""
+        with unittest.mock.patch.object(patch, "group_calls_e2e"), \
+                unittest.mock.patch.object(patch, "verify_group_calls_e2e"):
+            self.run_patch()
+        names = sorted(set(self.files) | self.written)
+        before = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
+        self.tearDown()
+        self.run_patch()
+        after = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
+        self.assertEqual(set(before), set(after))
+        expected = dict(before)
+        for rel in patch.group_calls_e2e_edited():
+            text = before[rel].decode("utf-8")
+            for r, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                if r == rel:
+                    text = text.replace(old, new)
+            for r, head, tail, block, _ in patch.GROUP_CALLS_E2E_SPANS:
+                if r == rel:
+                    start = text.index(head)
+                    text = text[:start] + block + text[text.index(tail, start) + len(tail):]
+            if rel == patch.LANG:
+                text = text.replace(patch.GROUP_CALLS_E2E_STRINGS_AFTER,
+                                    patch.GROUP_CALLS_E2E_STRINGS_AFTER + patch.group_calls_e2e_strings())
+            expected[rel] = text.encode("utf-8")
+        changed = sorted(rel for rel in names if before.get(rel) != after.get(rel))
+        self.assertEqual(changed, sorted(patch.group_calls_e2e_edited()))
+        for rel in changed:
+            self.assertEqual(after[rel], expected[rel], rel)
+
+    def test_group_calls_e2e_is_verified(self):
+        """verify() stops a tree where an edit of task 094 is undone, a new
+        place checks what it decides, or another way leads into a group call
+        that is not end to end."""
+        tree, c = self.run_patch()
+        patch.verify_group_calls_e2e(tree)
+
+        def stops(rel, text, message):
+            patched = tree.read(rel)
+            self.written.add(rel)
+            tree.write(rel, text(patched))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_group_calls_e2e(tree)
+            finally:
+                tree.write(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.GROUP_CALLS_E2E_EDITS):
+            with self.subTest(edit=i):
+                if new:
+                    stops(rel, lambda t: t.replace(new, old), "task 094")
+                else:
+                    stops(rel, lambda t: t + old, "task 094")
+        for rel, head, _, _, _ in patch.GROUP_CALLS_E2E_SPANS:
+            with self.subTest(span=rel):
+                stops(rel, lambda t: t + head, "still there")
+        for rel, s, _ in patch.GROUP_CALLS_E2E_GUARDS:
+            with self.subTest(guard=s):
+                stops(rel, lambda t: t + s + "\n", "another place decides")
+        other = S + "/calls/calls_top_bar.cpp"
+        for s in patch.GROUP_CALLS_E2E_SOURCES:
+            with self.subTest(source=s):
+                stops(other, lambda t: t + "// " + s + "\n", "another way into a group call")
+        # A field more in the report, even with the edit that makes it.
+        i, (rel, old, new) = next((i, e) for i, e in enumerate(patch.GROUP_CALLS_E2E_EDITS)
+                                  if e[0] == patch.TDE2E_API and "QByteArray StatusReport(" in e[2])
+        more = new.replace('\t\t{ u"senders"_q, senders },\n', '\t\t{ u"senders"_q, senders },\n\t\t{ u"nonce"_q, 0 },\n')
+        self.assertNotEqual(more, new)
+        edits = patch.GROUP_CALLS_E2E_EDITS[:i] + ((rel, old, more),) + patch.GROUP_CALLS_E2E_EDITS[i + 1:]
+        with self.subTest(report="a field more"), unittest.mock.patch.object(patch, "GROUP_CALLS_E2E_EDITS", edits):
+            stops(patch.TDE2E_API, lambda t: t.replace(new, more), "E2E_STATUS_FIELDS")
+        with self.subTest(cmake="rtmp"):
+            stops(patch.CMAKE_APP, lambda t: t + "    calls/group/calls_group_rtmp.cpp\n", "RTMP stream")
+        patch.verify(tree, c)
+
     def test_transcribe_button(self):
         """Voice and round messages have upstream's transcribe button again
         (task 080), which a view-once message does not show; no source is
@@ -2060,8 +2200,87 @@ class CallParametersTest(unittest.TestCase):
     def test_lf_only_covers_the_edits(self):
         self.assertEqual(set(patch.call_parameters_edited()), {rel for rel, _, _ in patch.CALL_PARAMETERS_EDITS})
         self.assertEqual({s for s, _ in patch.SUBMODULE_PATHS if s == patch.TGCALLS}, {patch.TGCALLS})
+        # The files of tgcalls the patch reads are those the call parameters
+        # (task 077) and end-to-end group calls (task 094) edit.
         self.assertEqual({patch.TGCALLS + "/" + p for s, p in patch.SUBMODULE_PATHS if s == patch.TGCALLS},
-                         {rel for rel in patch.call_parameters_edited() if rel.startswith(patch.TGCALLS + "/")})
+                         {rel for rel in patch.call_parameters_edited() + patch.group_calls_e2e_edited()
+                          if rel.startswith(patch.TGCALLS + "/")})
+
+
+class GroupCallsE2ETest(unittest.TestCase):
+    """The edits of task 094 on files made of the texts they expect."""
+
+    def tree(self, root, edits=patch.GROUP_CALLS_E2E_EDITS, spans=patch.GROUP_CALLS_E2E_SPANS):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        files = {patch.LANG: patch.GROUP_CALLS_E2E_STRINGS_AFTER}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, head, tail, _, had in spans:
+            files[rel] = files.get(rel, "") + head + "".join(s + "\n" for s in had) + tail + "x\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "task 094"):
+                patch.verify_group_calls_e2e(tree)
+            patch.group_calls_e2e(tree)
+            for rel, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                text = tree.read(rel)
+                self.assertEqual(text.count(new), 1 if new else text.count(new))
+                self.assertNotIn(old, text.replace(new, "") if new else text)
+            for rel, head, _, block, had in patch.GROUP_CALLS_E2E_SPANS:
+                text = tree.read(rel)
+                self.assertNotIn(head, text)
+                self.assertEqual(text.count(block), 1)
+                for s in had:
+                    self.assertNotIn(s, text)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.group_calls_e2e(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, new) in enumerate(patch.GROUP_CALLS_E2E_EDITS):
+            changed = old[:-2] + "~" + old[-1]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.GROUP_CALLS_E2E_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.group_calls_e2e(tree)
+        for i, (rel, head, tail, block, had) in enumerate(patch.GROUP_CALLS_E2E_SPANS):
+            # A block without one of the texts it must hold is not upstream's.
+            for s in had:
+                spans = [e if j != i else (rel, head, tail, block, tuple(x for x in had if x != s))
+                         for j, e in enumerate(patch.GROUP_CALLS_E2E_SPANS)]
+                with self.subTest(span=i, text=s), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), spans=spans)
+                    with self.assertRaisesRegex(patch.PatchError, "has no"):
+                        patch.group_calls_e2e(tree)
+
+    def test_strings(self):
+        # Pluma's own key, the one text the edits show, in the built-in
+        # English; it names no Telegram.
+        self.assertEqual(set(patch.GROUP_CALLS_E2E_STRINGS), {"lng_pluma_group_call_e2e_failed"})
+        edits = "".join(new for _, _, new in patch.GROUP_CALLS_E2E_EDITS)
+        for key, value in patch.GROUP_CALLS_E2E_STRINGS.items():
+            self.assertTrue(key.startswith("lng_pluma_"))
+            self.assertIn(f"tr::{key}(tr::now)", edits)
+            self.assertNotIn("Telegram", value)
+        self.assertEqual(re.findall(r"tr::(lng_pluma_\w+)", edits), list(patch.GROUP_CALLS_E2E_STRINGS))
+
+    def test_report_fields(self):
+        # No field of the report could carry a key, a nonce, the emoji or a
+        # frame: the list is closed, and every field is a count, a height,
+        # an error code or a prefix of a public hash.
+        self.assertEqual(len(set(patch.E2E_STATUS_FIELDS)), len(patch.E2E_STATUS_FIELDS))
+        for field in patch.E2E_STATUS_FIELDS + patch.E2E_STATUS_SENDER_FIELDS:
+            for word in ("key", "nonce", "emoji", "secret", "payload", "data"):
+                self.assertNotIn(word, field.lower(), field)
 
 
 class ServiceAccountTest(unittest.TestCase):

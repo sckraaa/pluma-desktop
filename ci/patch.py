@@ -263,7 +263,9 @@ SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.
                    ("Telegram/ThirdParty/tgcalls", "tgcalls/desktop_capturer/DesktopCaptureSourceHelper.cpp"),
                    ("Telegram/ThirdParty/tgcalls", "tgcalls/desktop_capturer/DesktopCaptureSourceHelper.h"),
                    ("Telegram/ThirdParty/tgcalls", "tgcalls/platform/tdesktop/VideoCapturerInterfaceImpl.cpp"),
-                   ("Telegram/ThirdParty/tgcalls", "tgcalls/platform/darwin/DesktopSharingCapturer.mm"))
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/platform/darwin/DesktopSharingCapturer.mm"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/group/GroupInstanceCustomImpl.cpp"),
+                   ("Telegram/ThirdParty/tgcalls", "tgcalls/group/GroupInstanceCustomImpl.h"))
 
 SOURCE_SUFFIXES = (".cpp", ".h", ".mm", ".m", ".c", ".cc", ".hpp")
 # What the scans of verify() leave out: upstream's own test harness and unit
@@ -2489,7 +2491,7 @@ def check_upstream(tree, c):
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
-                + call_parameters_edited() + service_account_edited()):
+                + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()):
         tree.lf_only(rel)
 
 
@@ -2669,6 +2671,7 @@ def patch(tree, c):
     login_code_screens(tree)
     call_parameters(tree)
     service_account(tree)
+    group_calls_e2e(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2815,6 +2818,7 @@ def verify(tree, c):
     verify_login_code_screens(tree)
     verify_call_parameters(tree)
     verify_service_account(tree)
+    verify_group_calls_e2e(tree)
 
 
 
@@ -4277,6 +4281,982 @@ def verify_service_account(tree):
 def service_account_edited():
     """The files service_account() edits."""
     return (LANG,)
+
+
+# --- End-to-end group calls (task 094) -----------------------------------------
+# Every group call of Pluma is end-to-end (ADR 0060 of the server repository,
+# the owner's decision of 2026-11-12): the call of a group or a channel keeps
+# the interface and the rights of a chat's call and takes the encryption of a
+# conference. Upstream encrypts conferences alone: GroupCall::conference() is
+# the origin of the shared call or the start of a conference
+# (calls_group_call.cpp 1236-1243), a chat's call is made with
+# GroupCallOrigin::Group (data_channel.cpp 1170-1176, data_chat.cpp 242), and
+# public_key and block go only with an _e2e (calls_group_call.cpp 1650-1667),
+# made in the constructor and in startRejoin() for a conference alone
+# (:693-698, :1559-1561). Lines are of the pinned tdesktop and tgcalls, and of
+# tde2e at td 51743df, which prepare.py builds (Telegram/build/prepare/
+# prepare.py 1978-1981). The edits:
+# - GroupCall::e2e(): a conference, or any call but a live story. Not by the
+#   server's rtmp_stream, as the task's sketch had it: the server sets that
+#   flag (calls_group_call.cpp 2364-2365, data_group_call.cpp 519), and a
+#   server must not be able to take a call out of its encryption.
+# - _e2e for every such call: in the constructor, in startRejoin(), and in
+#   rejoin() when the key of the call has gone to the server already: the
+#   chain keeps the key of a join it took (tde2e Call::create refuses a key
+#   used before, Call.cpp 608-617, and the server too), and rejoin() runs again without startRejoin()
+#   after checkGroupCall misses the ssrc (:3752-3756, checkNextJoinAction
+#   :1948-1952), a duplicate ssrc (:1876-1878) or a speaker link
+#   (rejoinWithHash :1569-1574).
+# - The last block is asked for before every join of a chat's call
+#   (refreshLastBlockAndJoin, :1632-1636): upstream skips it while a
+#   conference's version is below 2 (Data::GroupCall::blockchainMayBeEmpty),
+#   which a conference keeps. On an empty chain the answer has no block and
+#   the join is the zero block (tde2e_api.cpp 288-296); two first joins race,
+#   the second gets CONF_WRITE_CHAIN_INVALID and asks again (joinFail,
+#   :1862-1870).
+# - Members of the chain who left the call are removed from it, as a
+#   conference's are: Data::GroupCall tracks them for a chat's call too
+#   (data_group_call.cpp 71-96, checkStaleParticipants :233-255), the call
+#   gives it the members of the chain through lookupReal() and not the
+#   conference's _sharedCall (trackParticipantsWithAccess :806-820), and
+#   removes them with deleteConferenceCallParticipants(only_left) (:822-860;
+#   setupConferenceCall :799-805 for a conference).
+# - The participants list shows the emoji of the key and the members of the
+#   chain who are not in the call yet for every end-to-end call
+#   (calls_group_members.cpp 553, 1768). Not the buttons that add members
+#   and share an invite link (:1840): those are a conference's, and a chat's
+#   call keeps its own.
+# - A key that fails rejoins with a new one, as upstream does
+#   ("TdE2E: Got failure, scheduling rejoin!", :786-789), at most three times
+#   in five minutes; then the call ends with a message
+#   (lng_pluma_group_call_e2e_failed), not a loop of joins that changes the
+#   key of everyone in the call each time (ADR 0060 §5). A key counts once:
+#   tde2e's Call fires a failure for each block of a batch it fails to apply
+#   (tde2e_api.cpp 458-505), which upstream turns into one rejoin.
+# - The status report of the key: every 5 seconds the call sends the SFU of
+#   the server, over the data channel tgcalls keeps to it (which carries
+#   ReceiverVideoConstraints alone today, GroupInstanceCustomImpl.cpp
+#   3512-3580), a PlumaE2EStatus message: the heights of the chain, the
+#   prefix of the hash of the last block applied, the tde2e error the key
+#   failed with, the epochs this side encrypts with and those it could not
+#   decrypt, and per sender the frames decrypted and refused by reason
+#   (Decrypt_UnknownEpoch, "Message is too old", "Message is already
+#   processed", any other: tde2e Call.cpp 349, 482, 485). Upstream drops the
+#   result of every failed decryption (tde2e_api.cpp 91-100). No key, nonce,
+#   emoji or byte of a frame is in it (E2E_STATUS_FIELDS lists every field).
+#   tgcalls gains GroupInstanceCustomImpl::sendE2EStatus.
+# - Never as a channel: the choice of whom to join as offers the user alone,
+#   and a scheduled call of a channel is no longer joined as the channel
+#   (calls_choose_join_as.cpp 343, 412-437). tgcalls gets the user id of a
+#   sender from its peer (calls_group_call.cpp 3310, 3435), 0 for a channel,
+#   which no key can be found for; the server refuses any other join_as.
+# - No RTMP and no live stories (the owner's decisions 4 and 5 of ADR 0060):
+#   the menu's "Stream with…" (window_peer_menu.cpp 4401-4403, 4428-4433)
+#   and the process behind it (calls_instance.cpp 191, 376-385,
+#   calls_instance.h 97-99, 224), the stream URL and key of the call's
+#   settings (calls_group_settings.cpp 702-786), calls_group_rtmp.cpp out of
+#   the build, a new call never asks for a stream (:1304-1308), the answer
+#   to a join is never read as a broadcast stream (:112-122), whose parts
+#   come from the server unencrypted (InstanceMode::Stream), and a live
+#   story (messageMediaVideoStream, data_stories.cpp 78-96), the one place a
+#   GroupCallOrigin::VideoStream call is made, is left out as a story of an
+#   unknown type. tdesktop starts no live story itself (it has no
+#   stories.startLive).
+# Messages in a call (calls_group_call.cpp 2451-2484, calls_group_messages.cpp
+# 132, 173) stay upstream's: the server does not serve them.
+GROUP_CALL = SOURCES + "/calls/group/calls_group_call.cpp"
+GROUP_CALL_H = SOURCES + "/calls/group/calls_group_call.h"
+GROUP_CALL_MEMBERS = SOURCES + "/calls/group/calls_group_members.cpp"
+GROUP_CALL_SETTINGS = SOURCES + "/calls/group/calls_group_settings.cpp"
+GROUP_CALL_RTMP = SOURCES + "/calls/group/calls_group_rtmp."
+CHOOSE_JOIN_AS = SOURCES + "/calls/group/calls_choose_join_as.cpp"
+CALLS_INSTANCE = SOURCES + "/calls/calls_instance.cpp"
+CALLS_INSTANCE_H = SOURCES + "/calls/calls_instance.h"
+DATA_GROUP_CALL = SOURCES + "/data/data_group_call.cpp"
+DATA_STORIES = SOURCES + "/data/data_stories.cpp"
+PEER_MENU = SOURCES + "/window/window_peer_menu.cpp"
+TDE2E_API = SOURCES + "/tde2e/tde2e_api.cpp"
+TDE2E_API_H = SOURCES + "/tde2e/tde2e_api.h"
+TGCALLS_GROUP = TGCALLS + "/tgcalls/group/GroupInstanceCustomImpl.cpp"
+TGCALLS_GROUP_H = TGCALLS + "/tgcalls/group/GroupInstanceCustomImpl.h"
+
+# The built-in English, after this entry; other languages come from the
+# server's language pack of tdesktop.
+GROUP_CALLS_E2E_STRINGS_AFTER = '"lng_confcall_not_accessible" = "This call is no longer accessible.";\n'
+GROUP_CALLS_E2E_STRINGS = {
+    "lng_pluma_group_call_e2e_failed": "The encryption of this call keeps failing, so you left it. "
+                                       "Join it again.",
+}
+
+# Every field of the status report, which the server checks: it drops a
+# report with any other.
+E2E_STATUS_FIELDS = ("colibriClass", "version", "height", "blockHash", "pollHeights", "error", "sendEpochs",
+                     "unknownEpochs", "encrypted", "encryptFailed", "senders")
+E2E_STATUS_SENDER_FIELDS = ("userId", "decrypted", "unknownEpoch", "tooOld", "replayed", "failed",
+                            "lastDecryptedMsAgo")
+
+GROUP_CALLS_E2E_EDITS = (
+    # e2e(), next to conference().
+    (GROUP_CALL_H,
+     "\t[[nodiscard]] bool conference() const;\n",
+     "\t[[nodiscard]] bool conference() const;\n"
+     "\t[[nodiscard]] bool e2e() const; // pluma: task 094\n"),
+    (GROUP_CALL_H,
+     "\tvoid initConferenceE2E();\n",
+     "\tvoid initConferenceE2E();\n"
+     "\tvoid sendE2EStatus(); // pluma: task 094\n"),
+    (GROUP_CALL_H,
+     "\tstd::shared_ptr<TdE2E::EncryptDecrypt> _e2eEncryptDecrypt;\n",
+     "\tstd::shared_ptr<TdE2E::EncryptDecrypt> _e2eEncryptDecrypt;\n"
+     "\t// pluma: the rejoins after a failure of the key, the timer of the\n"
+     "\t// status report and whether the key went to the server (task 094).\n"
+     "\tstd::vector<crl::time> _e2eRejoins;\n"
+     "\tbase::Timer _e2eStatusTimer;\n"
+     "\tbool _e2eKeySent = false;\n"),
+    (GROUP_CALL,
+     "constexpr auto kShortPollChainBlocksPerRequest = 50;\n",
+     "constexpr auto kShortPollChainBlocksPerRequest = 50;\n"
+     "// pluma: rejoins after a failure of the end-to-end key, and how often its\n"
+     "// status goes to the server (task 094, ADR 0060 §5).\n"
+     "constexpr auto kE2ERejoinsLimit = 3;\n"
+     "constexpr auto kE2ERejoinsPeriod = 5 * 60 * crl::time(1000);\n"
+     "constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n"),
+    # The answer to a join is never a broadcast stream.
+    (GROUP_CALL,
+     "\tif (document.object().value(\"stream\").toBool()) {\n"
+     "\t\treturn JoinBroadcastStream{\n"
+     "\t\t\t.rtmp = document.object().value(\"rtmp\").toBool(),\n"
+     "\t\t\t.rtmpInfo = {\n"
+     "\t\t\t\t.url = document.object().value(\"rtmp_stream_url\").toString(),\n"
+     "\t\t\t\t.key = document.object().value(\"rtmp_stream_key\").toString(),\n"
+     "\t\t\t},\n"
+     "\t\t};\n"
+     "\t}\n",
+     "\t// pluma: never a broadcast stream, RTMP or not (task 094): its parts\n"
+     "\t// come from the server unencrypted, so \"stream\" in the answer would take\n"
+     "\t// an end-to-end call out of its encryption.\n"),
+    (GROUP_CALL,
+     "\t} else if (!_sharedCall && (startInfo.migrating || startInfo.show)) {\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t}\n",
+     "\t} else if (!_sharedCall && (startInfo.migrating || startInfo.show)) {\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t} else if (e2e()) {\n"
+     "\t\t// pluma: a call of a group or a channel takes the encryption of a\n"
+     "\t\t// conference (task 094).\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t}\n"),
+    (GROUP_CALL,
+     "\tconst auto tde2eUserId = TdE2E::MakeUserId(_peer->session().user());\n"
+     "\t_e2e = std::make_unique<TdE2E::Call>(tde2eUserId);\n",
+     "\tconst auto tde2eUserId = TdE2E::MakeUserId(_peer->session().user());\n"
+     "\t_e2e = std::make_unique<TdE2E::Call>(tde2eUserId);\n"
+     "\t_e2eKeySent = false; // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\t_e2e->failures() | rpl::on_next([=] {\n"
+     "\t\tLOG((\"TdE2E: Got failure, scheduling rejoin!\"));\n"
+     "\t\tcrl::on_main(this, [=] { startRejoin(); });\n"
+     "\t}, _e2e->lifetime());\n",
+     "\t// pluma: one failure of a key is one rejoin: a batch of blocks fires a\n"
+     "\t// failure for each block it fails to apply (TdE2E::Call::apply), and\n"
+     "\t// every one would count against the limit below (task 094).\n"
+     "\t_e2e->failures() | rpl::take(1) | rpl::on_next([=] {\n"
+     "\t\t// pluma: at most kE2ERejoinsLimit rejoins in kE2ERejoinsPeriod; a key\n"
+     "\t\t// that keeps failing ends the call with a message, not a loop of\n"
+     "\t\t// joins that changes the key of everyone in it (task 094).\n"
+     "\t\tconst auto now = crl::now();\n"
+     "\t\t_e2eRejoins.erase(ranges::remove_if(_e2eRejoins, [&](crl::time at) {\n"
+     "\t\t\treturn (at + kE2ERejoinsPeriod <= now);\n"
+     "\t\t}), end(_e2eRejoins));\n"
+     "\t\tif (int(_e2eRejoins.size()) >= kE2ERejoinsLimit) {\n"
+     "\t\t\tLOG((\"TdE2E: Got failure, too many rejoins, hanging up!\"));\n"
+     "\t\t\tcrl::on_main(this, [=] {\n"
+     "\t\t\t\tUi::Toast::Show(tr::lng_pluma_group_call_e2e_failed(tr::now));\n"
+     "\t\t\t\thangup();\n"
+     "\t\t\t});\n"
+     "\t\t\treturn;\n"
+     "\t\t}\n"
+     "\t\t_e2eRejoins.push_back(now);\n"
+     "\t\tLOG((\"TdE2E: Got failure, scheduling rejoin!\"));\n"
+     "\t\tcrl::on_main(this, [=] { startRejoin(); });\n"
+     "\t}, _e2e->lifetime());\n"),
+    (GROUP_CALL,
+     "void GroupCall::trackParticipantsWithAccess() {\n"
+     "\tif (!_sharedCall || !_e2e) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\n"
+     "\t_e2e->participantsSetValue(\n"
+     "\t) | rpl::on_next([=](const TdE2E::ParticipantsSet &set) {\n"
+     "\t\tauto users = base::flat_set<UserId>();\n"
+     "\t\tusers.reserve(set.list.size());\n"
+     "\t\tfor (const auto &id : set.list) {\n"
+     "\t\t\tusers.emplace(UserId(id.v));\n"
+     "\t\t}\n"
+     "\t\t_sharedCall->setParticipantsWithAccess(std::move(users));\n"
+     "\t}, _e2e->lifetime());\n"
+     "}\n",
+     "void GroupCall::trackParticipantsWithAccess() {\n"
+     "\tif (!_e2e) { // pluma: a call of a group or a channel too (task 094)\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\n"
+     "\t_e2e->participantsSetValue(\n"
+     "\t) | rpl::on_next([=](const TdE2E::ParticipantsSet &set) {\n"
+     "\t\tauto users = base::flat_set<UserId>();\n"
+     "\t\tusers.reserve(set.list.size());\n"
+     "\t\tfor (const auto &id : set.list) {\n"
+     "\t\t\tusers.emplace(UserId(id.v));\n"
+     "\t\t}\n"
+     "\t\t// pluma: the call's Data::GroupCall, a conference's or a chat's.\n"
+     "\t\tif (const auto real = lookupReal()) {\n"
+     "\t\t\treal->setParticipantsWithAccess(std::move(users));\n"
+     "\t\t}\n"
+     "\t}, _e2e->lifetime());\n"
+     "}\n"
+     "\n"
+     "void GroupCall::sendE2EStatus() {\n"
+     "\t// pluma: the status of the end-to-end key, to the server's SFU over the\n"
+     "\t// data channel (task 094, ADR 0060 §5).\n"
+     "\tif (_instance && _e2e && _e2eEncryptDecrypt) {\n"
+     "\t\t_instance->sendE2EStatus(TdE2E::StatusReport(\n"
+     "\t\t\t*_e2e,\n"
+     "\t\t\t*_e2eEncryptDecrypt).toStdString());\n"
+     "\t}\n"
+     "}\n"),
+    (GROUP_CALL,
+     "void GroupCall::subscribeToReal(not_null<Data::GroupCall*> real) {\n"
+     "\t_listenersHidden = real->listenersHidden();\n",
+     "void GroupCall::subscribeToReal(not_null<Data::GroupCall*> real) {\n"
+     "\t_listenersHidden = real->listenersHidden();\n"
+     "\n"
+     "\t// pluma: the members of the chain who left a call of a group or a\n"
+     "\t// channel are removed from it, as a conference's are\n"
+     "\t// (setupConferenceCall; task 094).\n"
+     "\tif (!_sharedCall) {\n"
+     "\t\treal->staleParticipantIds(\n"
+     "\t\t) | rpl::on_next([=](const base::flat_set<UserId> &staleIds) {\n"
+     "\t\t\tif (_e2e) {\n"
+     "\t\t\t\tremoveConferenceParticipants(staleIds, true);\n"
+     "\t\t\t}\n"
+     "\t\t}, _lifetime);\n"
+     "\t}\n"),
+    (GROUP_CALL,
+     "bool GroupCall::videoStream() const {\n",
+     "bool GroupCall::e2e() const {\n"
+     "\t// pluma: every group call but a live story is end-to-end, a call of a\n"
+     "\t// group or a channel by the encryption of a conference (task 094). Not\n"
+     "\t// by the server's rtmp_stream: the server may not turn it off.\n"
+     "\treturn conference() || !videoStream();\n"
+     "}\n"
+     "\n"
+     "bool GroupCall::videoStream() const {\n"),
+    # A new call is never an RTMP stream.
+    (GROUP_CALL,
+     "void GroupCall::start(TimeId scheduleDate, bool rtmp) {\n"
+     "\tusing Flag = MTPphone_CreateGroupCall::Flag;\n"
+     "\t_createRequestId = _api.request(MTPphone_CreateGroupCall(\n"
+     "\t\tMTP_flags((scheduleDate ? Flag::f_schedule_date : Flag(0))\n"
+     "\t\t\t| (rtmp ? Flag::f_rtmp_stream : Flag(0))),\n",
+     "void GroupCall::start(TimeId scheduleDate, bool) {\n"
+     "\tusing Flag = MTPphone_CreateGroupCall::Flag;\n"
+     "\t_createRequestId = _api.request(MTPphone_CreateGroupCall(\n"
+     "\t\t// pluma: never an RTMP stream (task 094).\n"
+     "\t\tMTP_flags(scheduleDate ? Flag::f_schedule_date : Flag(0)),\n"),
+    (GROUP_CALL,
+     "\tif (conference()) {\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t}\n"
+     "\tsetState(State::Joining);\n"
+     "\trejoin();\n",
+     "\tif (e2e()) { // pluma: task 094\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t}\n"
+     "\tsetState(State::Joining);\n"
+     "\trejoin();\n"),
+    (GROUP_CALL,
+     "\t_joinState.action = JoinAction::Joining;\n"
+     "\t_joinState.ssrc = 0;\n",
+     "\t// pluma: a join of an end-to-end call takes a new key once the old one\n"
+     "\t// went to the server: the chain keeps it (task 094).\n"
+     "\tif (_e2eKeySent && e2e()) {\n"
+     "\t\tinitConferenceE2E();\n"
+     "\t}\n"
+     "\t_joinState.action = JoinAction::Joining;\n"
+     "\t_joinState.ssrc = 0;\n"),
+    (GROUP_CALL,
+     "\t\t\t} else if (conference()\n"
+     "\t\t\t\t&& _sharedCall\n"
+     "\t\t\t\t&& !_sharedCall->blockchainMayBeEmpty()\n"
+     "\t\t\t\t&& !_e2e->hasLastBlock0()) {\n",
+     "\t\t\t} else if (e2e()\n"
+     "\t\t\t\t// pluma: a call of a group or a channel asks for the last\n"
+     "\t\t\t\t// block before every join; a conference skips it while its\n"
+     "\t\t\t\t// chain may be empty, as upstream does (task 094).\n"
+     "\t\t\t\t&& !(_sharedCall && _sharedCall->blockchainMayBeEmpty())\n"
+     "\t\t\t\t&& !_e2e->hasLastBlock0()) {\n"),
+    (GROUP_CALL,
+     "\t\tUi::Toast::Show(u\"Could not generate join block.\"_q);\n"
+     "\t\treturn;\n"
+     "\t}\n",
+     "\t\tUi::Toast::Show(u\"Could not generate join block.\"_q);\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_e2eKeySent = (_e2e != nullptr); // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\tconst auto joinBlock = _e2e->makeJoinBlock().data;\n"
+     "\tAssert(!joinBlock.isEmpty());\n",
+     "\tconst auto joinBlock = _e2e->makeJoinBlock().data;\n"
+     "\tAssert(!joinBlock.isEmpty());\n"
+     "\t_e2eKeySent = true; // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\tif (_e2e) {\n"
+     "\t\t_e2e->joined();\n",
+     "\tif (_e2e) {\n"
+     "\t\t_e2e->joined();\n"
+     "\t\t// pluma: the status of the key every kE2EStatusPeriod (task 094).\n"
+     "\t\tif (!_e2eStatusTimer.isActive()) {\n"
+     "\t\t\t_e2eStatusTimer.setCallback([=] { sendE2EStatus(); });\n"
+     "\t\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n"
+     "\t\t}\n"),
+    (DATA_GROUP_CALL,
+     "\tif (_conference) {\n"
+     "\t\tsession().data().registerGroupCall(this);\n"
+     "\n"
+     "\t\t_participantUpdates.events(\n",
+     "\tif (_conference || _videoStream) {\n"
+     "\t\tsession().data().registerGroupCall(this);\n"
+     "\t}\n"
+     "\t// pluma: the members of the chain who left a call of a group or a\n"
+     "\t// channel are found as a conference's are (task 094).\n"
+     "\tif (!_videoStream) {\n"
+     "\t\t_participantUpdates.events(\n"),
+    (DATA_GROUP_CALL,
+     "\t\t}, _checkStaleLifetime);\n"
+     "\t} else if (_videoStream) {\n"
+     "\t\tsession().data().registerGroupCall(this);\n"
+     "\t}\n",
+     "\t\t}, _checkStaleLifetime);\n"
+     "\t}\n"),
+    (GROUP_CALL_MEMBERS,
+     "void Members::Controller::setupWithAccessUsers() {\n"
+     "\tconst auto conference = _call->sharedCall().get();\n"
+     "\tif (!_call->conference() || !conference) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconference->participantsWithAccessValue(\n"
+     "\t) | rpl::on_next([=](base::flat_set<UserId> &&nowIds) {\n",
+     "void Members::Controller::setupWithAccessUsers() {\n"
+     "\t// pluma: the members of the chain of a call of a group or a channel\n"
+     "\t// too (task 094).\n"
+     "\tif (!_call->e2e()) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_call->real(\n"
+     "\t) | rpl::map([](not_null<Data::GroupCall*> real) {\n"
+     "\t\treturn real->participantsWithAccessValue();\n"
+     "\t}) | rpl::flatten_latest(\n"
+     "\t) | rpl::on_next([=](base::flat_set<UserId> &&nowIds) {\n"),
+    (GROUP_CALL_MEMBERS,
+     ", _fingerprint(call->conference()\n",
+     ", _fingerprint(call->e2e() // pluma: task 094\n"),
+    # Never as a channel.
+    (CHOOSE_JOIN_AS,
+     "\tconst auto self = peer->session().user();\n"
+     "\tauto info = JoinInfo{ .peer = peer, .joinAs = self };\n",
+     "\tconst auto self = peer->session().user();\n"
+     "\t// pluma: only the user joins a group call, which is end-to-end, never\n"
+     "\t// as a channel (task 094).\n"
+     "\tlist = { not_null<PeerData*>(self) };\n"
+     "\tauto info = JoinInfo{ .peer = peer, .joinAs = self };\n"),
+    (CHOOSE_JOIN_AS,
+     "\t\t\tJoinInfo{ .peer = peer, .joinAs = peer },\n",
+     "\t\t\t// pluma: never as the channel (task 094).\n"
+     "\t\t\tJoinInfo{ .peer = peer, .joinAs = peer->session().user() },\n"),
+    # No RTMP.
+    (PEER_MENU,
+     "\tconst auto rtmpCallback = [=] {\n"
+     "\t\tCore::App().calls().showStartWithRtmp(controller->uiShow(), peer);\n"
+     "\t};\n",
+     ""),
+    (PEER_MENU,
+     "\t\t\t&st::menuIconReschedule);\n"
+     "\t\taddAction(\n"
+     "\t\t\t(livestream\n"
+     "\t\t\t\t? tr::lng_menu_start_group_call_with_channel\n"
+     "\t\t\t\t: tr::lng_menu_start_group_call_with)(tr::now),\n"
+     "\t\t\trtmpCallback,\n"
+     "\t\t\t&st::menuIconStartStreamWith);\n",
+     "\t\t\t&st::menuIconReschedule);\n"
+     "\t\t// pluma: no \"Stream with...\": no RTMP (task 094).\n"),
+    (CALLS_INSTANCE,
+     ", _chooseJoinAs(std::make_unique<Group::ChooseJoinAsProcess>())\n"
+     ", _startWithRtmp(std::make_unique<Group::StartRtmpProcess>()) {\n",
+     ", _chooseJoinAs(std::make_unique<Group::ChooseJoinAsProcess>()) {\n"),
+    (CALLS_INSTANCE,
+     "void Instance::showStartWithRtmp(\n"
+     "\t\tstd::shared_ptr<Ui::Show> show,\n"
+     "\t\tnot_null<PeerData*> peer) {\n"
+     "\t_startWithRtmp->start(peer, show, [=](Group::JoinInfo info) {\n"
+     "\t\tconfirmLeaveCurrent(show, peer, {}, [=](auto) {\n"
+     "\t\t\t_startWithRtmp->close();\n"
+     "\t\t\tcreateGroupCall(std::move(info), MTP_inputGroupCall({}, {}));\n"
+     "\t\t});\n"
+     "\t});\n"
+     "}\n"
+     "\n",
+     ""),
+    (CALLS_INSTANCE_H,
+     "\tvoid showStartWithRtmp(\n"
+     "\t\tstd::shared_ptr<Ui::Show> show,\n"
+     "\t\tnot_null<PeerData*> peer);\n",
+     ""),
+    (CALLS_INSTANCE_H,
+     "\tconst std::unique_ptr<Group::StartRtmpProcess> _startWithRtmp;\n",
+     ""),
+    (CALLS_INSTANCE_H,
+     "class StartRtmpProcess;\n",
+     ""),
+    (CMAKE_APP,
+     "    calls/group/calls_group_rtmp.cpp\n"
+     "    calls/group/calls_group_rtmp.h\n",
+     ""),
+    # No live stories.
+    (DATA_STORIES,
+     "\t\tconst std::shared_ptr<GroupCall> &existingCall) {\n"
+     "\treturn media.match([&](const MTPDmessageMediaPhoto &data)\n",
+     "\t\t[[maybe_unused]] const std::shared_ptr<GroupCall> &existingCall) {\n"
+     "\treturn media.match([&](const MTPDmessageMediaPhoto &data)\n"),
+    (DATA_STORIES,
+     "\t}, [&](const MTPDmessageMediaVideoStream &data) {\n"
+     "\t\tconst auto rtmp = data.is_rtmp_stream();\n"
+     "\t\treturn std::make_optional(data.vcall().match([&](\n"
+     "\t\t\t\tconst MTPDinputGroupCall &data) {\n"
+     "\t\t\tauto call = (existingCall\n"
+     "\t\t\t\t&& existingCall->peer() == peer\n"
+     "\t\t\t\t&& existingCall->id() == data.vid().v)\n"
+     "\t\t\t\t? existingCall\n"
+     "\t\t\t\t: std::make_shared<Data::GroupCall>(\n"
+     "\t\t\t\t\tpeer,\n"
+     "\t\t\t\t\tdata.vid().v,\n"
+     "\t\t\t\t\tdata.vaccess_hash().v,\n"
+     "\t\t\t\t\tTimeId(),\n"
+     "\t\t\t\t\trtmp,\n"
+     "\t\t\t\t\tGroupCallOrigin::VideoStream);\n"
+     "\t\t\treturn StoryMedia{ std::move(call) };\n"
+     "\t\t}, [](const auto &) {\n"
+     "\t\t\treturn StoryMedia();\n"
+     "\t\t}));\n",
+     "\t}, [&](const MTPDmessageMediaVideoStream &) {\n"
+     "\t\t// pluma: no live stories (task 094): a live story is a group call\n"
+     "\t\t// without end-to-end encryption, which the server does not serve. The\n"
+     "\t\t// story is left out, as one of an unknown type.\n"
+     "\t\treturn std::optional<StoryMedia>();\n"),
+    # The counters of the frames and the status of the chain (tde2e).
+    (TDE2E_API_H,
+     "#include \"base/basic_types.h\"\n"
+     "#include \"base/flat_set.h\"\n",
+     "#include \"base/basic_types.h\"\n"
+     "#include \"base/flat_map.h\" // pluma: task 094\n"
+     "#include \"base/flat_set.h\"\n"),
+    (TDE2E_API_H,
+     "#include <crl/crl_time.h>\n",
+     "#include <crl/crl_time.h>\n"
+     "\n"
+     "#include <array> // pluma: task 094\n"
+     "#include <mutex>\n"),
+    (TDE2E_API_H,
+     "\tvoid setCallId(CallId id);\n"
+     "\tvoid clearCallId(CallId fromId);\n"
+     "\n"
+     "private:\n"
+     "\tstd::atomic<uint64> _id = 0;\n"
+     "\n"
+     "};\n",
+     "\tvoid setCallId(CallId id);\n"
+     "\tvoid clearCallId(CallId fromId);\n"
+     "\n"
+     "\t// pluma: what the frames of the call met, for the status report of the\n"
+     "\t// key (task 094): counters by sender since the call began, and the\n"
+     "\t// epochs met since the last report, by the first 8 bytes of their hash.\n"
+     "\tusing EpochPrefix = std::array<uint8, 8>;\n"
+     "\tstruct SenderFrames {\n"
+     "\t\tint64 decrypted = 0;\n"
+     "\t\tint64 unknownEpoch = 0;\n"
+     "\t\tint64 tooOld = 0;\n"
+     "\t\tint64 replayed = 0;\n"
+     "\t\tint64 failed = 0;\n"
+     "\t\tcrl::time lastDecrypted = 0;\n"
+     "\t};\n"
+     "\tstruct Frames {\n"
+     "\t\tbase::flat_map<int64, SenderFrames> senders;\n"
+     "\t\tbase::flat_set<EpochPrefix> sendEpochs;\n"
+     "\t\tbase::flat_set<EpochPrefix> unknownEpochs;\n"
+     "\t\tint64 encrypted = 0;\n"
+     "\t\tint64 encryptFailed = 0;\n"
+     "\t};\n"
+     "\t[[nodiscard]] Frames takeFrames();\n"
+     "\n"
+     "private:\n"
+     "\tvoid countEncrypted(const EncryptionBuffer *result, int32_t prefix);\n"
+     "\tvoid countDecrypted(\n"
+     "\t\tint64_t userId,\n"
+     "\t\tconst EncryptionBuffer &data,\n"
+     "\t\tstd::optional<int> errorCode,\n"
+     "\t\tconst std::string &errorMessage);\n"
+     "\n"
+     "\tstd::atomic<uint64> _id = 0;\n"
+     "\tstd::mutex _framesMutex;\n"
+     "\tFrames _frames;\n"
+     "\n"
+     "};\n"),
+    (TDE2E_API_H,
+     "\t[[nodiscard]] auto participantsSetValue() const\n"
+     "\t\t-> rpl::producer<ParticipantsSet>;\n",
+     "\t[[nodiscard]] auto participantsSetValue() const\n"
+     "\t\t-> rpl::producer<ParticipantsSet>;\n"
+     "\n"
+     "\t// pluma: this side of the chain, for the status report of the key\n"
+     "\t// (task 094): the height of the last block applied (-1 without one),\n"
+     "\t// the first 8 bytes of its hash (empty while unknown), the index each\n"
+     "\t// subchain asks for next and the tde2e error the call failed with.\n"
+     "\tstruct Status {\n"
+     "\t\tint height = -1;\n"
+     "\t\tQByteArray blockHash;\n"
+     "\t\tint pollHeights[2] = { 0, 0 };\n"
+     "\t\tint error = 0;\n"
+     "\t};\n"
+     "\t[[nodiscard]] Status status() const;\n"),
+    (TDE2E_API_H,
+     "\tstd::optional<CallFailure> _failure;\n",
+     "\tstd::optional<CallFailure> _failure;\n"
+     "\tint _failureCode = 0; // pluma: task 094\n"),
+    (TDE2E_API_H,
+     "\trpl::lifetime _lifetime;\n"
+     "\n"
+     "};\n"
+     "\n"
+     "} // namespace TdE2E\n",
+     "\trpl::lifetime _lifetime;\n"
+     "\n"
+     "};\n"
+     "\n"
+     "// pluma: the PlumaE2EStatus message of the data channel (task 094).\n"
+     "[[nodiscard]] QByteArray StatusReport(\n"
+     "\tconst Call &call,\n"
+     "\tEncryptDecrypt &frames);\n"
+     "\n"
+     "} // namespace TdE2E\n"),
+    (TDE2E_API,
+     "#include <td/e2e/e2e_api.h>\n",
+     "#include <td/e2e/e2e_api.h>\n"
+     "\n"
+     "// pluma: the status report of the key (task 094).\n"
+     "#include <QtCore/QCryptographicHash>\n"
+     "#include <QtCore/QJsonArray>\n"
+     "#include <QtCore/QJsonDocument>\n"
+     "#include <QtCore/QJsonObject>\n"),
+    (TDE2E_API,
+     "#define LOG_AND_FAIL(error, reason) \\\n"
+     "\tLOG_ERROR(error); \\\n"
+     "\tfail(reason)\n",
+     "#define LOG_AND_FAIL(error, reason) \\\n"
+     "\tLOG_ERROR(error); \\\n"
+     "\t_failureCode = int(error.code); /* pluma: task 094 */ \\\n"
+     "\tfail(reason)\n"),
+    (TDE2E_API,
+     "constexpr auto kShortPollChainBlocksWaitFor = crl::time(1000);\n",
+     "constexpr auto kShortPollChainBlocksWaitFor = crl::time(1000);\n"
+     "\n"
+     "// pluma: the status report of the key (task 094). Its version, the\n"
+     "// header of a frame of tde2e (Call.cpp 286-350: the size of the\n"
+     "// unencrypted prefix in the last 4 bytes; after the prefix a 32-bit head\n"
+     "// whose low byte counts the epochs, then their 32-byte hashes) and the\n"
+     "// limit of epochs one report names.\n"
+     "constexpr auto kStatusReportVersion = 1;\n"
+     "constexpr auto kFrameMaxEpochs = 15;\n"
+     "constexpr auto kFrameEpochHashSize = 32;\n"
+     "constexpr auto kStatusMaxUnknownEpochs = 32;\n"
+     "\n"
+     "// The first 8 bytes of the hashes of the epochs of a frame whose header\n"
+     "// starts at offset.\n"
+     "template <typename Callback>\n"
+     "void ForEachFrameEpoch(\n"
+     "\t\tconst EncryptionBuffer &frame,\n"
+     "\t\tsize_t offset,\n"
+     "\t\tCallback &&callback) {\n"
+     "\tif (offset > frame.size() || frame.size() - offset < 4) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto head = uint32(frame[offset])\n"
+     "\t\t| (uint32(frame[offset + 1]) << 8)\n"
+     "\t\t| (uint32(frame[offset + 2]) << 16)\n"
+     "\t\t| (uint32(frame[offset + 3]) << 24);\n"
+     "\tconst auto count = int(head & 0xFF);\n"
+     "\tif ((head >> 8) != 0 || count > kFrameMaxEpochs) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tauto at = offset + 4;\n"
+     "\tfor (auto i = 0; i != count; ++i, at += kFrameEpochHashSize) {\n"
+     "\t\tif (frame.size() - at < size_t(kFrameEpochHashSize)) {\n"
+     "\t\t\treturn;\n"
+     "\t\t}\n"
+     "\t\tauto prefix = EncryptDecrypt::EpochPrefix();\n"
+     "\t\tstd::copy_n(frame.begin() + at, prefix.size(), prefix.begin());\n"
+     "\t\tcallback(prefix);\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "[[nodiscard]] QString EpochPrefixHex(\n"
+     "\t\tconst EncryptDecrypt::EpochPrefix &prefix) {\n"
+     "\treturn QString::fromLatin1(QByteArray(\n"
+     "\t\treinterpret_cast<const char*>(prefix.data()),\n"
+     "\t\tint(prefix.size())).toHex());\n"
+     "}\n"),
+    (TDE2E_API,
+     "\t\tconst auto result = encrypt\n"
+     "\t\t\t? tde2e_api::call_encrypt(\n"
+     "\t\t\t\tlibId,\n"
+     "\t\t\t\tchannelId,\n"
+     "\t\t\t\tslice,\n"
+     "\t\t\t\tsize_t(unencryptedPrefixSize))\n"
+     "\t\t\t: tde2e_api::call_decrypt(libId, userId, channelId, slice);\n"
+     "\t\tif (!result.is_ok()) {\n"
+     "\t\t\treturn {};\n"
+     "\t\t}\n"
+     "\t\tconst auto &value = result.value();\n"
+     "\t\tconst auto start = reinterpret_cast<const uint8_t*>(value.data());\n"
+     "\t\tconst auto end = start + value.size();\n"
+     "\t\treturn { start, end };\n"
+     "\t};\n"
+     "}\n",
+     "\t\tconst auto result = encrypt\n"
+     "\t\t\t? tde2e_api::call_encrypt(\n"
+     "\t\t\t\tlibId,\n"
+     "\t\t\t\tchannelId,\n"
+     "\t\t\t\tslice,\n"
+     "\t\t\t\tsize_t(unencryptedPrefixSize))\n"
+     "\t\t\t: tde2e_api::call_decrypt(libId, userId, channelId, slice);\n"
+     "\t\tif (!result.is_ok()) {\n"
+     "\t\t\t// pluma: counted for the status report (task 094).\n"
+     "\t\t\tif (encrypt) {\n"
+     "\t\t\t\tthat->countEncrypted(nullptr, unencryptedPrefixSize);\n"
+     "\t\t\t} else {\n"
+     "\t\t\t\tthat->countDecrypted(\n"
+     "\t\t\t\t\tuserId,\n"
+     "\t\t\t\t\tdata,\n"
+     "\t\t\t\t\tint(result.error().code),\n"
+     "\t\t\t\t\tresult.error().message);\n"
+     "\t\t\t}\n"
+     "\t\t\treturn {};\n"
+     "\t\t}\n"
+     "\t\tconst auto &value = result.value();\n"
+     "\t\tconst auto start = reinterpret_cast<const uint8_t*>(value.data());\n"
+     "\t\tconst auto end = start + value.size();\n"
+     "\t\tauto buffer = EncryptionBuffer{ start, end };\n"
+     "\t\tif (encrypt) {\n"
+     "\t\t\tthat->countEncrypted(&buffer, unencryptedPrefixSize);\n"
+     "\t\t} else {\n"
+     "\t\t\tthat->countDecrypted(userId, data, std::nullopt, std::string());\n"
+     "\t\t}\n"
+     "\t\treturn buffer;\n"
+     "\t};\n"
+     "}\n"
+     "\n"
+     "void EncryptDecrypt::countEncrypted(\n"
+     "\t\tconst EncryptionBuffer *result,\n"
+     "\t\tint32_t prefix) {\n"
+     "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\tif (!result) {\n"
+     "\t\t++_frames.encryptFailed;\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t++_frames.encrypted;\n"
+     "\tForEachFrameEpoch(*result, size_t(prefix), [&](const EpochPrefix &p) {\n"
+     "\t\t_frames.sendEpochs.emplace(p);\n"
+     "\t});\n"
+     "}\n"
+     "\n"
+     "void EncryptDecrypt::countDecrypted(\n"
+     "\t\tint64_t userId,\n"
+     "\t\tconst EncryptionBuffer &data,\n"
+     "\t\tstd::optional<int> errorCode,\n"
+     "\t\tconst std::string &errorMessage) {\n"
+     "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\tauto &sender = _frames.senders[userId];\n"
+     "\tif (!errorCode) {\n"
+     "\t\t++sender.decrypted;\n"
+     "\t\tsender.lastDecrypted = crl::now();\n"
+     "\t} else if (*errorCode\n"
+     "\t\t== int(tde2e_api::ErrorCode::Decrypt_UnknownEpoch)) {\n"
+     "\t\t++sender.unknownEpoch;\n"
+     "\t\tif (data.size() >= 4) {\n"
+     "\t\t\tconst auto tail = data.size() - 4;\n"
+     "\t\t\tconst auto prefix = size_t(data[tail])\n"
+     "\t\t\t\t| (size_t(data[tail + 1]) << 8)\n"
+     "\t\t\t\t| (size_t(data[tail + 2]) << 16)\n"
+     "\t\t\t\t| (size_t(data[tail + 3]) << 24);\n"
+     "\t\t\tauto frame = EncryptionBuffer(data.begin(), data.begin() + tail);\n"
+     "\t\t\tForEachFrameEpoch(frame, prefix, [&](const EpochPrefix &p) {\n"
+     "\t\t\t\tif (int(_frames.unknownEpochs.size())\n"
+     "\t\t\t\t\t< kStatusMaxUnknownEpochs) {\n"
+     "\t\t\t\t\t_frames.unknownEpochs.emplace(p);\n"
+     "\t\t\t\t}\n"
+     "\t\t\t});\n"
+     "\t\t}\n"
+     "\t} else if (errorMessage == \"Message is too old\") {\n"
+     "\t\t++sender.tooOld;\n"
+     "\t} else if (errorMessage == \"Message is already processed\") {\n"
+     "\t\t++sender.replayed;\n"
+     "\t} else {\n"
+     "\t\t++sender.failed;\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "auto EncryptDecrypt::takeFrames() -> Frames {\n"
+     "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\tauto result = _frames;\n"
+     "\t_frames.sendEpochs.clear();\n"
+     "\t_frames.unknownEpochs.clear();\n"
+     "\treturn result;\n"
+     "}\n"),
+    (TDE2E_API,
+     "rpl::producer<ParticipantsSet> Call::participantsSetValue() const {\n"
+     "\treturn _participantsSet.value();\n"
+     "}\n",
+     "rpl::producer<ParticipantsSet> Call::participantsSetValue() const {\n"
+     "\treturn _participantsSet.value();\n"
+     "}\n"
+     "\n"
+     "Call::Status Call::status() const {\n"
+     "\tauto result = Status();\n"
+     "\tfor (auto i = 0; i != kSubChainsCount; ++i) {\n"
+     "\t\tresult.pollHeights[i] = _subchains[i].height;\n"
+     "\t}\n"
+     "\tif (_failure) {\n"
+     "\t\tresult.error = _failureCode\n"
+     "\t\t\t? _failureCode\n"
+     "\t\t\t: int(tde2e_api::ErrorCode::UnknownError);\n"
+     "\t}\n"
+     "\tif (!_id) {\n"
+     "\t\treturn result;\n"
+     "\t}\n"
+     "\tconst auto height = tde2e_api::call_get_height(libId());\n"
+     "\tif (!height.is_ok()) {\n"
+     "\t\treturn result;\n"
+     "\t}\n"
+     "\tresult.height = height.value();\n"
+     "\t// The last block received is the one applied when its index is the\n"
+     "\t// height; it comes in the server's form, with the magic plus 1\n"
+     "\t// (Blockchain.cpp 727-753), and the server hashes the client's form.\n"
+     "\tif (_lastBlock0\n"
+     "\t\t&& _lastBlock0Height == result.height + 1\n"
+     "\t\t&& _lastBlock0->data.size() >= 4) {\n"
+     "\t\tauto local = _lastBlock0->data;\n"
+     "\t\tauto magic = uint32();\n"
+     "\t\tmemcpy(&magic, local.constData(), sizeof(magic));\n"
+     "\t\t--magic;\n"
+     "\t\tmemcpy(local.data(), &magic, sizeof(magic));\n"
+     "\t\tresult.blockHash = QCryptographicHash::hash(\n"
+     "\t\t\tlocal,\n"
+     "\t\t\tQCryptographicHash::Sha256).left(8);\n"
+     "\t}\n"
+     "\treturn result;\n"
+     "}\n"
+     "\n"
+     "QByteArray StatusReport(const Call &call, EncryptDecrypt &frames) {\n"
+     "\tconst auto status = call.status();\n"
+     "\tconst auto taken = frames.takeFrames();\n"
+     "\tconst auto now = crl::now();\n"
+     "\tusing Epochs = base::flat_set<EncryptDecrypt::EpochPrefix>;\n"
+     "\tconst auto epochs = [](const Epochs &list) {\n"
+     "\t\tauto result = QJsonArray();\n"
+     "\t\tfor (const auto &prefix : list) {\n"
+     "\t\t\tresult.push_back(EpochPrefixHex(prefix));\n"
+     "\t\t}\n"
+     "\t\treturn result;\n"
+     "\t};\n"
+     "\tauto senders = QJsonArray();\n"
+     "\tfor (const auto &[userId, sender] : taken.senders) {\n"
+     "\t\tsenders.push_back(QJsonObject{\n"
+     "\t\t\t{ u\"userId\"_q, double(userId) },\n"
+     "\t\t\t{ u\"decrypted\"_q, double(sender.decrypted) },\n"
+     "\t\t\t{ u\"unknownEpoch\"_q, double(sender.unknownEpoch) },\n"
+     "\t\t\t{ u\"tooOld\"_q, double(sender.tooOld) },\n"
+     "\t\t\t{ u\"replayed\"_q, double(sender.replayed) },\n"
+     "\t\t\t{ u\"failed\"_q, double(sender.failed) },\n"
+     "\t\t\t{\n"
+     "\t\t\t\tu\"lastDecryptedMsAgo\"_q,\n"
+     "\t\t\t\t(sender.lastDecrypted\n"
+     "\t\t\t\t\t? double(now - sender.lastDecrypted)\n"
+     "\t\t\t\t\t: -1.),\n"
+     "\t\t\t},\n"
+     "\t\t});\n"
+     "\t}\n"
+     "\tconst auto report = QJsonObject{\n"
+     "\t\t{ u\"colibriClass\"_q, u\"PlumaE2EStatus\"_q },\n"
+     "\t\t{ u\"version\"_q, kStatusReportVersion },\n"
+     "\t\t{ u\"height\"_q, status.height },\n"
+     "\t\t{ u\"blockHash\"_q, QString::fromLatin1(status.blockHash.toHex()) },\n"
+     "\t\t{\n"
+     "\t\t\tu\"pollHeights\"_q,\n"
+     "\t\t\tQJsonArray{ status.pollHeights[0], status.pollHeights[1] },\n"
+     "\t\t},\n"
+     "\t\t{ u\"error\"_q, status.error },\n"
+     "\t\t{ u\"sendEpochs\"_q, epochs(taken.sendEpochs) },\n"
+     "\t\t{ u\"unknownEpochs\"_q, epochs(taken.unknownEpochs) },\n"
+     "\t\t{ u\"encrypted\"_q, double(taken.encrypted) },\n"
+     "\t\t{ u\"encryptFailed\"_q, double(taken.encryptFailed) },\n"
+     "\t\t{ u\"senders\"_q, senders },\n"
+     "\t};\n"
+     "\treturn QJsonDocument(report).toJson(QJsonDocument::Compact);\n"
+     "}\n"),
+    # tgcalls sends the report over its data channel to the SFU.
+    (TGCALLS_GROUP_H,
+     "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
+     "\n"
+     "private:\n",
+     "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
+     "\n"
+     "    // pluma: a status report of the call's end-to-end key to the SFU over\n"
+     "    // the data channel, dropped while it is closed (task 094).\n"
+     "    void sendE2EStatus(std::string const &report);\n"
+     "\n"
+     "private:\n"),
+    (TGCALLS_GROUP,
+     "    void maybeUpdateRemoteVideoConstraints() {\n"
+     "        if (!_isDataChannelOpen) {\n",
+     "    // pluma: the status report of the end-to-end key (task 094); while the\n"
+     "    // data channel is closed it is dropped, the next one comes in 5 seconds.\n"
+     "    void sendE2EStatus(std::string const &report) {\n"
+     "        if (!_isDataChannelOpen) {\n"
+     "            return;\n"
+     "        }\n"
+     "        _networkManager->perform([report](GroupNetworkManager *networkManager) {\n"
+     "            networkManager->sendDataChannelMessage(report);\n"
+     "        });\n"
+     "    }\n"
+     "\n"
+     "    void maybeUpdateRemoteVideoConstraints() {\n"
+     "        if (!_isDataChannelOpen) {\n"),
+    (TGCALLS_GROUP,
+     "void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"
+     "    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->internal_addCustomNetworkEvent(isRemoteConnected);\n"
+     "    });\n"
+     "}\n",
+     "void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"
+     "    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->internal_addCustomNetworkEvent(isRemoteConnected);\n"
+     "    });\n"
+     "}\n"
+     "\n"
+     "void GroupInstanceCustomImpl::sendE2EStatus(std::string const &report) {\n"
+     "    _internal->perform([report](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->sendE2EStatus(report);\n"
+     "    });\n"
+     "}\n"),
+)
+
+# Blocks removed whole: (file, head, tail, what takes their place, texts the
+# block must hold).
+GROUP_CALLS_E2E_SPANS = (
+    # The stream URL and key in the settings of a call (shown for an RTMP
+    # stream alone).
+    (GROUP_CALL_SETTINGS,
+     "\tif (rtmp && !call->rtmpInfo().url.isEmpty()) {\n",
+     "\t\tstate->data.fire(call->rtmpInfo());\n"
+     "\n"
+     "\t\taddDivider();\n"
+     "\t\tUi::AddSkip(layout);\n"
+     "\t}\n",
+     "\t// pluma: no stream URL and key: no RTMP (task 094).\n",
+     ("MTPphone_GetGroupCallStreamRtmpUrl(", "StartRtmpProcess::FillRtmpRows(")),
+)
+
+
+def group_calls_e2e_strings():
+    return "".join(f'"{key}" = "{value}";\n' for key, value in GROUP_CALLS_E2E_STRINGS.items())
+
+
+def group_calls_e2e(tree):
+    for rel, old, new in GROUP_CALLS_E2E_EDITS:
+        tree.replace(rel, old, new)
+    for rel, head, tail, block, had in GROUP_CALLS_E2E_SPANS:
+        tree.replace_block(rel, head, tail, block, must_contain=had)
+    tree.replace(LANG, GROUP_CALLS_E2E_STRINGS_AFTER, GROUP_CALLS_E2E_STRINGS_AFTER + group_calls_e2e_strings())
+
+
+# What the edits leave, each exactly so many times: another place that checks
+# conference() or joins, creates or streams a call stops the patch until it is
+# read.
+GROUP_CALLS_E2E_GUARDS = (
+    (GROUP_CALL, "conference()", 10),
+    (GROUP_CALL, "e2e()", 5),
+    (GROUP_CALL, "initConferenceE2E();", 5),
+    (GROUP_CALL, "removeConferenceParticipants(", 3),
+    (GROUP_CALL, "setInstanceMode(InstanceMode::Stream)", 1),
+    (GROUP_CALL, "JoinBroadcastStream{", 0),
+    (GROUP_CALL, 'value("stream")', 0),
+    (GROUP_CALL_MEMBERS, "conference()", 2),
+    (DATA_GROUP_CALL, "session().data().registerGroupCall(this);", 1),
+    (TDE2E_API, "tde2e_api::call_encrypt(", 1),
+    (TDE2E_API, "tde2e_api::call_decrypt(", 1),
+    (TGCALLS_GROUP, "sendDataChannelMessage(", 2),
+)
+# The same in every source: {text: {file: count}}, every other file none.
+GROUP_CALLS_E2E_SOURCES = {
+    "MTPphone_JoinGroupCall(": {GROUP_CALL: 1},
+    "MTPphone_CreateGroupCall(": {GROUP_CALL: 1},
+    "MTPphone_GetGroupCallJoinAs(": {CHOOSE_JOIN_AS: 1},
+    "f_rtmp_stream": {},
+    "showStartWithRtmp": {},
+    "StartRtmpProcess": {GROUP_CALL_RTMP + "cpp": 10, GROUP_CALL_RTMP + "h": 3},
+    "MTPphone_GetGroupCallStreamRtmpUrl(": {GROUP_CALL_RTMP + "cpp": 1},
+    "GroupCallOrigin::VideoStream": {GROUP_CALL: 1, DATA_GROUP_CALL: 2},
+    "StartLive": {},
+}
+
+
+def verify_group_calls_e2e(tree):
+    entries = [(m["key"], m["value"]) for m in lang_entries(tree.read(LANG))]
+    for key, value in GROUP_CALLS_E2E_STRINGS.items():
+        if entries.count((key, value)) != 1 or [k for k, _ in entries].count(key) != 1:
+            raise PatchError(f"{LANG}: {key} is not the text of end-to-end group calls (task 094)")
+    for rel, old, new in GROUP_CALLS_E2E_EDITS:
+        text = tree.read(rel)
+        # An edit that removes the text leaves nothing to find but its absence.
+        if (new and text.count(new) != 1) or old in (text.replace(new, "") if new else text):
+            raise PatchError(f"{rel}: the edit of end-to-end group calls (task 094) is not there")
+    for rel, head, _, block, had in GROUP_CALLS_E2E_SPANS:
+        text = tree.read(rel)
+        if head in text or text.count(block) != 1 or any(s in text for s in had):
+            raise PatchError(f"{rel}: the block removed for end-to-end group calls (task 094) is still there")
+    for rel, s, count in GROUP_CALLS_E2E_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another place decides what end-to-end group calls (task 094) should")
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        for s, allowed in GROUP_CALLS_E2E_SOURCES.items():
+            if text.count(s) != allowed.get(rel, 0):
+                raise PatchError(f"{rel}: {text.count(s)} occurrences of {s!r}, expected {allowed.get(rel, 0)}; "
+                                 "another way into a group call that is not end-to-end (task 094)")
+    if "calls_group_rtmp" in tree.read(CMAKE_APP):
+        raise PatchError(f"{CMAKE_APP}: still builds the RTMP stream of a group call (task 094)")
+    api = tree.read(TDE2E_API)
+    report = api[api.find("QByteArray StatusReport("):]
+    keys = set(re.findall(r'u"(\w+)"_q', report[:report.find("\n}\n")])) - {"PlumaE2EStatus"}
+    if keys != set(E2E_STATUS_FIELDS) | set(E2E_STATUS_SENDER_FIELDS):
+        raise PatchError(f"{TDE2E_API}: the status report holds {', '.join(sorted(keys))}, "
+                         "not the fields of E2E_STATUS_FIELDS (task 094)")
+
+
+def group_calls_e2e_edited():
+    """The files group_calls_e2e() edits."""
+    return tuple(sorted({rel for rel, _, _ in GROUP_CALLS_E2E_EDITS}
+                        | {rel for rel, _, _, _, _ in GROUP_CALLS_E2E_SPANS} | {LANG}))
 
 
 def main(argv=None):
