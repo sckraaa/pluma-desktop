@@ -1867,9 +1867,10 @@ EXPORT_USERPICS = (
 TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5288c1", "6ab3f3", "2f6ea5",
                   "4082bc", "2b5278", "6ab2f2", "72bcfd", "64b9fa", "5eb5f7")
 # Keys of the default themes that may stay blue (verify()): file type
-# colours and the Premium, statistics and call palettes.
+# colours and the Premium and statistics palettes; calls are Pluma's
+# (CALL_COLORS).
 KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
-                       r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+|groupCall\w+")
+                       r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+")
 # The verified badge, Telegram's rosette with a check, in the default themes
 # (verify()): the rosette in the accent and the check in the colour of text on
 # it, as Telegram draws it in the accent of its theme (colors.palette refers
@@ -2491,7 +2492,8 @@ def check_upstream(tree, c):
     if tree.read(ENTITLEMENTS) != (BRAND.parent / "ci" / "macos.entitlements").read_text():
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
-                + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()):
+                + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
+                + call_colors_edited()):
         tree.lf_only(rel)
 
 
@@ -2672,6 +2674,8 @@ def patch(tree, c):
     call_parameters(tree)
     service_account(tree)
     group_calls_e2e(tree)
+    # After rebrand(): it writes the themes first.
+    call_colors(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2819,6 +2823,7 @@ def verify(tree, c):
     verify_call_parameters(tree)
     verify_service_account(tree)
     verify_group_calls_e2e(tree)
+    verify_call_colors(tree)
 
 
 
@@ -4326,25 +4331,50 @@ def service_account_edited():
 #   (calls_group_members.cpp 553, 1768). Not the buttons that add members
 #   and share an invite link (:1840): those are a conference's, and a chat's
 #   call keeps its own.
-# - A key that fails rejoins with a new one, as upstream does
-#   ("TdE2E: Got failure, scheduling rejoin!", :786-789), at most three times
-#   in five minutes; then the call ends with a message
-#   (lng_pluma_group_call_e2e_failed), not a loop of joins that changes the
-#   key of everyone in the call each time (ADR 0060 §5). A key counts once:
-#   tde2e's Call fires a failure for each block of a batch it fails to apply
-#   (tde2e_api.cpp 458-505), which upstream turns into one rejoin.
-# - The status report of the key: every 5 seconds the call sends the SFU of
-#   the server, over the data channel tgcalls keeps to it (which carries
+# - Rejoins with a new key by the rules of ADR 0060 §5, one rule for the four
+#   clients. Upstream rejoins on any failure of tde2e at once ("TdE2E: Got
+#   failure, scheduling rejoin!", :786-789) and on GROUPCALL_FORBIDDEN of a
+#   write to the chain or of a poll (:848-853, 1909-1917, 1930-1934). A
+#   rejoin also follows when sub-chain 0 lags behind the server (it named a
+#   block above height + 1 and none applied) for more than 12 seconds, the
+#   window tde2e forgets an epoch in plus a margin (tde2e Call.h 98-99), and
+#   when for 15 seconds no frame of any sender was decrypted though some
+#   came while the chain is current, the watchdog of Web K
+#   (groupCallInstance.ts:51); one sender alone failing is that sender's
+#   fault, not a reason. At most three rejoins in a rolling five minutes,
+#   after 0, 2 and 5 seconds plus up to 1 second at random (each one changes
+#   the key of everyone, and members who rejoin at once collide in
+#   CONF_WRITE_CHAIN_INVALID); then the call ends with a message
+#   (lng_pluma_group_call_e2e_failed), not a loop of joins. A key counts
+#   once: tde2e's Call fires a failure for each block of a batch it fails to
+#   apply (tde2e_api.cpp 458-505). A rejoin of the transport (a duplicate
+#   ssrc, checkGroupCall) does not count, and a join refused with
+#   CONF_WRITE_CHAIN_INVALID asks for the last block again at most ten times
+#   in a row (joinFail, :1862-1870, retries it without end).
+# - The status report of the key, PlumaE2EStatus v1 of ADR 0060 §5: every 5
+#   seconds from the join the call sends the SFU of the server, over the
+#   data channel tgcalls keeps to it on the main connection (which carries
 #   ReceiverVideoConstraints alone today, GroupInstanceCustomImpl.cpp
-#   3512-3580), a PlumaE2EStatus message: the heights of the chain, the
-#   prefix of the hash of the last block applied, the tde2e error the key
-#   failed with, the epochs this side encrypts with and those it could not
-#   decrypt, and per sender the frames decrypted and refused by reason
-#   (Decrypt_UnknownEpoch, "Message is too old", "Message is already
-#   processed", any other: tde2e Call.cpp 349, 482, 485). Upstream drops the
-#   result of every failed decryption (tde2e_api.cpp 91-100). No key, nonce,
-#   emoji or byte of a frame is in it (E2E_STATUS_FIELDS lists every field).
-#   tgcalls gains GroupInstanceCustomImpl::sendE2EStatus.
+#   3512-3580), the number of the report since the join, the height of
+#   sub-chain 0 applied and the prefix of the hash of its block as the
+#   server stores it (tde2e Blockchain.cpp 742-760), the index each
+#   sub-chain is polled from, the tde2e error the key failed with
+#   (e2e_errors.h 13-40), the epochs of the last frame encrypted, those of
+#   the frames decrypted and those that could not be, and per sender the
+#   frames decrypted and refused by reason (Decrypt_UnknownEpoch, "Message
+#   is too old", "Message is already processed", any other: tde2e Call.cpp
+#   349, 482, 485) and how long ago the last was decrypted. Counters and
+#   lists of epochs count since the last report; a report is made only
+#   while the data channel is open, so what one could not send goes with
+#   the next. At most 15 epochs a list, 8 unknown ones, 100 senders and 16
+#   KiB, which the server checks (E2E_STATUS_LIMITS). Upstream drops the
+#   result of every failed decryption (tde2e_api.cpp 91-100). No key,
+#   nonce, emoji or byte of a frame is in it (E2E_STATUS_FIELDS lists every
+#   field). tgcalls gains GroupInstanceCustomImpl::sendE2EStatus.
+# - No recording: the server does not record a call, which it cannot hear
+#   (phone.toggleGroupCallRecord is not served, ADR 0060 §4), so the menu
+#   of a call never offers it (calls_group_menu.cpp 510-512, 541-577); a
+#   conference has no such entry upstream either.
 # - Never as a channel: the choice of whom to join as offers the user alone,
 #   and a scheduled call of a channel is no longer joined as the channel
 #   (calls_choose_join_as.cpp 343, 412-437). tgcalls gets the user id of a
@@ -4367,6 +4397,7 @@ def service_account_edited():
 GROUP_CALL = SOURCES + "/calls/group/calls_group_call.cpp"
 GROUP_CALL_H = SOURCES + "/calls/group/calls_group_call.h"
 GROUP_CALL_MEMBERS = SOURCES + "/calls/group/calls_group_members.cpp"
+GROUP_CALL_MENU = SOURCES + "/calls/group/calls_group_menu.cpp"
 GROUP_CALL_SETTINGS = SOURCES + "/calls/group/calls_group_settings.cpp"
 GROUP_CALL_RTMP = SOURCES + "/calls/group/calls_group_rtmp."
 CHOOSE_JOIN_AS = SOURCES + "/calls/group/calls_choose_join_as.cpp"
@@ -4388,12 +4419,31 @@ GROUP_CALLS_E2E_STRINGS = {
                                        "Join it again.",
 }
 
-# Every field of the status report, which the server checks: it drops a
-# report with any other.
-E2E_STATUS_FIELDS = ("colibriClass", "version", "height", "blockHash", "pollHeights", "error", "sendEpochs",
-                     "unknownEpochs", "encrypted", "encryptFailed", "senders")
-E2E_STATUS_SENDER_FIELDS = ("userId", "decrypted", "unknownEpoch", "tooOld", "replayed", "failed",
-                            "lastDecryptedMsAgo")
+# Every field of the status report, PlumaE2EStatus v1 of ADR 0060 §5, which
+# the server checks: it drops a report with any other, without one of these,
+# of another version or over the limits.
+E2E_STATUS_FIELDS = ("colibriClass", "v", "seq", "height", "lastBlock", "offset0", "offset1", "error",
+                     "sendEpochs", "decryptEpochs", "unknownEpochs", "encrypted", "encryptFailed", "senders")
+E2E_STATUS_SENDER_FIELDS = ("user", "ok", "unknownEpoch", "tooOld", "duplicate", "failed", "lastOkMs")
+# The limits of a report (tde2e_api.cpp) and the rules of a rejoin
+# (calls_group_call.cpp), as ADR 0060 §5 sets them: {constant: its value}.
+E2E_STATUS_LIMITS = {
+    "kStatusReportVersion": "1",
+    "kStatusMaxEpochs": "15",
+    "kStatusMaxUnknownEpochs": "8",
+    "kStatusMaxSenders": "100",
+    "kStatusMaxSize": "16 * 1024",
+}
+E2E_REJOIN_RULES = {
+    "kE2ERejoinsLimit": "3",
+    "kE2ERejoinsPeriod": "5 * 60 * crl::time(1000)",
+    "kE2ERejoinDelays[]": "{ 0, 2 * crl::time(1000), 5 * crl::time(1000) }",
+    "kE2ERejoinJitter": "crl::time(1000)",
+    "kE2ELaggingPeriod": "12 * crl::time(1000)",
+    "kE2EUndecryptablePeriod": "15 * crl::time(1000)",
+    "kE2EChainRetries": "10",
+    "kE2EStatusPeriod": "5 * crl::time(1000)",
+}
 
 GROUP_CALLS_E2E_EDITS = (
     # e2e(), next to conference().
@@ -4404,23 +4454,44 @@ GROUP_CALLS_E2E_EDITS = (
     (GROUP_CALL_H,
      "\tvoid initConferenceE2E();\n",
      "\tvoid initConferenceE2E();\n"
-     "\tvoid sendE2EStatus(); // pluma: task 094\n"),
+     "\t// pluma: the status report of the end-to-end key and the rules of a\n"
+     "\t// rejoin with a new one (task 094, ADR 0060 §5).\n"
+     "\tvoid sendE2EStatus();\n"
+     "\tvoid checkE2EHealth();\n"
+     "\tvoid scheduleE2ERejoin(const QString &reason);\n"),
     (GROUP_CALL_H,
      "\tstd::shared_ptr<TdE2E::EncryptDecrypt> _e2eEncryptDecrypt;\n",
      "\tstd::shared_ptr<TdE2E::EncryptDecrypt> _e2eEncryptDecrypt;\n"
-     "\t// pluma: the rejoins after a failure of the key, the timer of the\n"
-     "\t// status report and whether the key went to the server (task 094).\n"
+     "\t// pluma: the rejoins with a new key in the period and the one waiting,\n"
+     "\t// the timers of the status report and of the rules of a rejoin, the joins\n"
+     "\t// retried on a chain that changed meanwhile, and whether the key went to\n"
+     "\t// the server (task 094).\n"
      "\tstd::vector<crl::time> _e2eRejoins;\n"
+     "\tbase::Timer _e2eRejoinTimer;\n"
      "\tbase::Timer _e2eStatusTimer;\n"
+     "\tbase::Timer _e2eCheckTimer;\n"
+     "\tint _e2eChainRetries = 0;\n"
      "\tbool _e2eKeySent = false;\n"),
     (GROUP_CALL,
      "constexpr auto kShortPollChainBlocksPerRequest = 50;\n",
      "constexpr auto kShortPollChainBlocksPerRequest = 50;\n"
-     "// pluma: rejoins after a failure of the end-to-end key, and how often its\n"
-     "// status goes to the server (task 094, ADR 0060 §5).\n"
+     "// pluma: the rules of a rejoin with a new end-to-end key and its status\n"
+     "// report (task 094, ADR 0060 §5). At most kE2ERejoinsLimit rejoins in a\n"
+     "// rolling kE2ERejoinsPeriod, each after its delay of kE2ERejoinDelays plus up\n"
+     "// to kE2ERejoinJitter at random; sub-chain 0 lagging behind the server for\n"
+     "// kE2ELaggingPeriod, or no frame decrypted for kE2EUndecryptablePeriod, are\n"
+     "// reasons for one, checked each kE2ECheckPeriod. A join refused because the\n"
+     "// chain changed meanwhile is retried at most kE2EChainRetries times in a row.\n"
      "constexpr auto kE2ERejoinsLimit = 3;\n"
      "constexpr auto kE2ERejoinsPeriod = 5 * 60 * crl::time(1000);\n"
-     "constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n"),
+     "constexpr crl::time kE2ERejoinDelays[] = { 0, 2 * crl::time(1000), 5 * crl::time(1000) };\n"
+     "constexpr auto kE2ERejoinJitter = crl::time(1000);\n"
+     "constexpr auto kE2ELaggingPeriod = 12 * crl::time(1000);\n"
+     "constexpr auto kE2EUndecryptablePeriod = 15 * crl::time(1000);\n"
+     "constexpr auto kE2ECheckPeriod = crl::time(1000);\n"
+     "constexpr auto kE2EChainRetries = 10;\n"
+     "constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n"
+     "static_assert(std::size(kE2ERejoinDelays) == kE2ERejoinsLimit);\n"),
     # The answer to a join is never a broadcast stream.
     (GROUP_CALL,
      "\tif (document.object().value(\"stream\").toBool()) {\n"
@@ -4458,27 +4529,12 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\tcrl::on_main(this, [=] { startRejoin(); });\n"
      "\t}, _e2e->lifetime());\n",
      "\t// pluma: one failure of a key is one rejoin: a batch of blocks fires a\n"
-     "\t// failure for each block it fails to apply (TdE2E::Call::apply), and\n"
-     "\t// every one would count against the limit below (task 094).\n"
+     "\t// failure for each block it fails to apply (TdE2E::Call::apply). The\n"
+     "\t// rejoin goes by the rules of scheduleE2ERejoin (task 094).\n"
      "\t_e2e->failures() | rpl::take(1) | rpl::on_next([=] {\n"
-     "\t\t// pluma: at most kE2ERejoinsLimit rejoins in kE2ERejoinsPeriod; a key\n"
-     "\t\t// that keeps failing ends the call with a message, not a loop of\n"
-     "\t\t// joins that changes the key of everyone in it (task 094).\n"
-     "\t\tconst auto now = crl::now();\n"
-     "\t\t_e2eRejoins.erase(ranges::remove_if(_e2eRejoins, [&](crl::time at) {\n"
-     "\t\t\treturn (at + kE2ERejoinsPeriod <= now);\n"
-     "\t\t}), end(_e2eRejoins));\n"
-     "\t\tif (int(_e2eRejoins.size()) >= kE2ERejoinsLimit) {\n"
-     "\t\t\tLOG((\"TdE2E: Got failure, too many rejoins, hanging up!\"));\n"
-     "\t\t\tcrl::on_main(this, [=] {\n"
-     "\t\t\t\tUi::Toast::Show(tr::lng_pluma_group_call_e2e_failed(tr::now));\n"
-     "\t\t\t\thangup();\n"
-     "\t\t\t});\n"
-     "\t\t\treturn;\n"
-     "\t\t}\n"
-     "\t\t_e2eRejoins.push_back(now);\n"
-     "\t\tLOG((\"TdE2E: Got failure, scheduling rejoin!\"));\n"
-     "\t\tcrl::on_main(this, [=] { startRejoin(); });\n"
+     "\t\tcrl::on_main(this, [=] {\n"
+     "\t\t\tscheduleE2ERejoin(u\"Got failure\"_q);\n"
+     "\t\t});\n"
      "\t}, _e2e->lifetime());\n"),
     (GROUP_CALL,
      "void GroupCall::trackParticipantsWithAccess() {\n"
@@ -4517,12 +4573,82 @@ GROUP_CALLS_E2E_EDITS = (
      "\n"
      "void GroupCall::sendE2EStatus() {\n"
      "\t// pluma: the status of the end-to-end key, to the server's SFU over the\n"
-     "\t// data channel (task 094, ADR 0060 §5).\n"
-     "\tif (_instance && _e2e && _e2eEncryptDecrypt) {\n"
-     "\t\t_instance->sendE2EStatus(TdE2E::StatusReport(\n"
-     "\t\t\t*_e2e,\n"
-     "\t\t\t*_e2eEncryptDecrypt).toStdString());\n"
+     "\t// data channel of the main connection (task 094, ADR 0060 §5). The chain\n"
+     "\t// is read here, on the main thread; tgcalls makes the report only while\n"
+     "\t// the data channel is open, so the frames of one it could not send go\n"
+     "\t// with the next.\n"
+     "\tif (!_instance || !_e2e || !_e2eEncryptDecrypt) {\n"
+     "\t\treturn;\n"
      "\t}\n"
+     "\tconst auto status = _e2e->status();\n"
+     "\tconst auto frames = _e2eEncryptDecrypt;\n"
+     "\t_instance->sendE2EStatus([=] {\n"
+     "\t\treturn TdE2E::StatusReport(status, *frames).toStdString();\n"
+     "\t});\n"
+     "}\n"
+     "\n"
+     "void GroupCall::checkE2EHealth() {\n"
+     "\t// pluma: rules 2 and 4 of a rejoin (task 094, ADR 0060 §5); none is\n"
+     "\t// checked while a join or a rejoin goes.\n"
+     "\tconst auto state = _state.current();\n"
+     "\tif (!_e2e\n"
+     "\t\t|| !_e2eEncryptDecrypt\n"
+     "\t\t|| (state != State::Joined && state != State::Connecting)\n"
+     "\t\t|| _joinState.action != JoinAction::None\n"
+     "\t\t|| _e2eRejoinTimer.isActive()) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto now = crl::now();\n"
+     "\tconst auto lagging = _e2e->laggingSince(now);\n"
+     "\tif (lagging && now - lagging > kE2ELaggingPeriod) {\n"
+     "\t\tscheduleE2ERejoin(u\"Chain lags behind the server\"_q);\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t// Every sender who sent frames for the period failed to be decrypted,\n"
+     "\t// though the chain is current: what is wrong is on this side. One sender\n"
+     "\t// alone failing is that sender's fault, caught by its own rules.\n"
+     "\tconst auto frames = _e2eEncryptDecrypt->health();\n"
+     "\tif (!lagging\n"
+     "\t\t&& frames.failingSince\n"
+     "\t\t&& now - frames.failingSince >= kE2EUndecryptablePeriod\n"
+     "\t\t&& now - frames.lastFailure < kE2EUndecryptablePeriod) {\n"
+     "\t\tscheduleE2ERejoin(u\"No frame decrypted\"_q);\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "void GroupCall::scheduleE2ERejoin(const QString &reason) {\n"
+     "\t// pluma: a rejoin with a new key by the rules of ADR 0060 §5 (task 094),\n"
+     "\t// one at a time: at most kE2ERejoinsLimit in kE2ERejoinsPeriod, each\n"
+     "\t// after a longer delay, so that members who rejoin at once do not\n"
+     "\t// collide (each rejoin changes the key of everyone in the call). Then\n"
+     "\t// the call ends with a message, not a loop of joins.\n"
+     "\tif (_e2eRejoinTimer.isActive()) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto now = crl::now();\n"
+     "\t_e2eRejoins.erase(ranges::remove_if(_e2eRejoins, [&](crl::time at) {\n"
+     "\t\treturn (at + kE2ERejoinsPeriod <= now);\n"
+     "\t}), end(_e2eRejoins));\n"
+     "\tconst auto index = int(_e2eRejoins.size());\n"
+     "\tif (index >= kE2ERejoinsLimit) {\n"
+     "\t\tLOG((\"TdE2E: %1, too many rejoins, hanging up!\").arg(reason));\n"
+     "\t\tUi::Toast::Show(tr::lng_pluma_group_call_e2e_failed(tr::now));\n"
+     "\t\thangup();\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_e2eRejoins.push_back(now);\n"
+     "\tconst auto delay = kE2ERejoinDelays[index]\n"
+     "\t\t+ base::RandomIndex(int(kE2ERejoinJitter) + 1);\n"
+     "\tLOG((\"TdE2E: %1, scheduling rejoin in %2 ms!\").arg(reason).arg(delay));\n"
+     "\t_e2eRejoinTimer.setCallback([=] {\n"
+     "\t\tconst auto state = _state.current();\n"
+     "\t\tif (state == State::Joining\n"
+     "\t\t\t|| state == State::Joined\n"
+     "\t\t\t|| state == State::Connecting) {\n"
+     "\t\t\tstartRejoin();\n"
+     "\t\t}\n"
+     "\t});\n"
+     "\t_e2eRejoinTimer.callOnce(delay);\n"
      "}\n"),
     (GROUP_CALL,
      "void GroupCall::subscribeToReal(not_null<Data::GroupCall*> real) {\n"
@@ -4614,11 +4740,74 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\t_e2e->joined();\n",
      "\tif (_e2e) {\n"
      "\t\t_e2e->joined();\n"
-     "\t\t// pluma: the status of the key every kE2EStatusPeriod (task 094).\n"
-     "\t\tif (!_e2eStatusTimer.isActive()) {\n"
-     "\t\t\t_e2eStatusTimer.setCallback([=] { sendE2EStatus(); });\n"
-     "\t\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n"
-     "\t\t}\n"),
+     "\t\t// pluma: a new join: the report's number and its counters start\n"
+     "\t\t// again, the first report goes in kE2EStatusPeriod and the rules of a\n"
+     "\t\t// rejoin are checked from now (task 094, ADR 0060 §5).\n"
+     "\t\t_e2eChainRetries = 0;\n"
+     "\t\tif (_e2eEncryptDecrypt) {\n"
+     "\t\t\t_e2eEncryptDecrypt->reset();\n"
+     "\t\t}\n"
+     "\t\t_e2eStatusTimer.setCallback([=] { sendE2EStatus(); });\n"
+     "\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n"
+     "\t\t_e2eCheckTimer.setCallback([=] { checkE2EHealth(); });\n"
+     "\t\t_e2eCheckTimer.callEach(kE2ECheckPeriod);\n"),
+    (GROUP_CALL,
+     "\tif (_e2e) {\n"
+     "\t\tif (error.startsWith(u\"CONF_WRITE_CHAIN_INVALID\"_q)) {\n"
+     "\t\t\tif (_id) {\n"
+     "\t\t\t\trefreshLastBlockAndJoin();\n"
+     "\t\t\t} else {\n"
+     "\t\t\t\thangup();\n"
+     "\t\t\t}\n"
+     "\t\t\treturn;\n"
+     "\t\t}\n"
+     "\t}\n",
+     "\tif (_e2e) {\n"
+     "\t\tif (error.startsWith(u\"CONF_WRITE_CHAIN_INVALID\"_q)) {\n"
+     "\t\t\t// pluma: the chain changed meanwhile; asked for again at most\n"
+     "\t\t\t// kE2EChainRetries times in a row, then it is the error of a join\n"
+     "\t\t\t// (task 094, ADR 0060 §5).\n"
+     "\t\t\tif (!_id) {\n"
+     "\t\t\t\thangup();\n"
+     "\t\t\t\treturn;\n"
+     "\t\t\t} else if (++_e2eChainRetries <= kE2EChainRetries) {\n"
+     "\t\t\t\trefreshLastBlockAndJoin();\n"
+     "\t\t\t\treturn;\n"
+     "\t\t\t}\n"
+     "\t\t}\n"
+     "\t}\n"),
+    # GROUPCALL_FORBIDDEN on a write to the chain or a poll of it: a rejoin by
+    # the rules (task 094).
+    (GROUP_CALL,
+     "\t\t\t\t\"Rejoin after error '%1' in delete confcall participants\"\n"
+     "\t\t\t\t).arg(type));\n"
+     "\t\t\tstartRejoin();\n",
+     "\t\t\t\t\"Rejoin after error '%1' in delete confcall participants\"\n"
+     "\t\t\t\t).arg(type));\n"
+     "\t\t\tscheduleE2ERejoin(type); // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\t\t\tLOG((\"Call Info: Rejoin after error '%1' in get chain blocks.\"\n"
+     "\t\t\t\t).arg(error.type()));\n"
+     "\t\t\tstartRejoin();\n",
+     "\t\t\tLOG((\"Call Info: Rejoin after error '%1' in get chain blocks.\"\n"
+     "\t\t\t\t).arg(error.type()));\n"
+     "\t\t\tscheduleE2ERejoin(error.type()); // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\t\t\tLOG((\"Call Info: Rejoin after error '%1' in send confcall block.\"\n"
+     "\t\t\t\t).arg(type));\n"
+     "\t\t\tstartRejoin();\n",
+     "\t\t\tLOG((\"Call Info: Rejoin after error '%1' in send confcall block.\"\n"
+     "\t\t\t\t).arg(type));\n"
+     "\t\t\tscheduleE2ERejoin(type); // pluma: task 094\n"),
+    # No recording: the server does not record a call.
+    (GROUP_CALL_MENU,
+     "\tconst auto addEditRecording = !conference\n"
+     "\t\t&& call->canManage()\n"
+     "\t\t&& !real->scheduleDate();\n",
+     "\t// pluma: no recording: the server does not record a call, which is end\n"
+     "\t// to end (phone.toggleGroupCallRecord is not served; task 094, ADR 0060\n"
+     "\t// §4).\n"
+     "\tconst auto addEditRecording = false;\n"),
     (DATA_GROUP_CALL,
      "\tif (_conference) {\n"
      "\t\tsession().data().registerGroupCall(this);\n"
@@ -4777,25 +4966,42 @@ GROUP_CALLS_E2E_EDITS = (
      "\tvoid clearCallId(CallId fromId);\n"
      "\n"
      "\t// pluma: what the frames of the call met, for the status report of the\n"
-     "\t// key (task 094): counters by sender since the call began, and the\n"
-     "\t// epochs met since the last report, by the first 8 bytes of their hash.\n"
+     "\t// key and the rules of a rejoin (task 094, ADR 0060 §5). Epochs go by\n"
+     "\t// the first 8 bytes of their hash.\n"
      "\tusing EpochPrefix = std::array<uint8, 8>;\n"
      "\tstruct SenderFrames {\n"
-     "\t\tint64 decrypted = 0;\n"
+     "\t\tint64 ok = 0;\n"
      "\t\tint64 unknownEpoch = 0;\n"
      "\t\tint64 tooOld = 0;\n"
-     "\t\tint64 replayed = 0;\n"
+     "\t\tint64 duplicate = 0;\n"
      "\t\tint64 failed = 0;\n"
-     "\t\tcrl::time lastDecrypted = 0;\n"
      "\t};\n"
+     "\t// The frames since the last report, but sendEpochs, the epochs of the\n"
+     "\t// last frame encrypted, and lastOk, when each sender was last decrypted\n"
+     "\t// since the join; seq numbers the reports since the join.\n"
      "\tstruct Frames {\n"
+     "\t\tint64 seq = 0;\n"
      "\t\tbase::flat_map<int64, SenderFrames> senders;\n"
-     "\t\tbase::flat_set<EpochPrefix> sendEpochs;\n"
-     "\t\tbase::flat_set<EpochPrefix> unknownEpochs;\n"
+     "\t\tbase::flat_map<int64, crl::time> lastOk;\n"
+     "\t\tstd::vector<EpochPrefix> sendEpochs;\n"
+     "\t\tstd::vector<EpochPrefix> decryptEpochs;\n"
+     "\t\tstd::vector<EpochPrefix> unknownEpochs;\n"
      "\t\tint64 encrypted = 0;\n"
      "\t\tint64 encryptFailed = 0;\n"
      "\t};\n"
+     "\t// The frames of the next report, numbered; its counters start again.\n"
      "\t[[nodiscard]] Frames takeFrames();\n"
+     "\t// Since when no frame was decrypted though some were refused (with\n"
+     "\t// Decrypt_UnknownEpoch or any error but a frame too old or seen\n"
+     "\t// already), 0 while the last frame met was decrypted, and when one was\n"
+     "\t// refused last.\n"
+     "\tstruct Health {\n"
+     "\t\tcrl::time failingSince = 0;\n"
+     "\t\tcrl::time lastFailure = 0;\n"
+     "\t};\n"
+     "\t[[nodiscard]] Health health() const;\n"
+     "\t// A new join: everything starts again.\n"
+     "\tvoid reset();\n"
      "\n"
      "private:\n"
      "\tvoid countEncrypted(const EncryptionBuffer *result, int32_t prefix);\n"
@@ -4806,8 +5012,9 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\tconst std::string &errorMessage);\n"
      "\n"
      "\tstd::atomic<uint64> _id = 0;\n"
-     "\tstd::mutex _framesMutex;\n"
+     "\tmutable std::mutex _framesMutex;\n"
      "\tFrames _frames;\n"
+     "\tHealth _health;\n"
      "\n"
      "};\n"),
     (TDE2E_API_H,
@@ -4817,20 +5024,33 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\t-> rpl::producer<ParticipantsSet>;\n"
      "\n"
      "\t// pluma: this side of the chain, for the status report of the key\n"
-     "\t// (task 094): the height of the last block applied (-1 without one),\n"
-     "\t// the first 8 bytes of its hash (empty while unknown), the index each\n"
-     "\t// subchain asks for next and the tde2e error the call failed with.\n"
+     "\t// (task 094, ADR 0060 §5): the height of sub-chain 0 applied, -1\n"
+     "\t// without a state (before the join or after a failure); the first 8\n"
+     "\t// bytes of SHA-256 of the block at that height in the form the server\n"
+     "\t// stores it, empty without a state; the index each sub-chain is polled\n"
+     "\t// from next, -1 while unknown; the tde2e error the call failed with.\n"
      "\tstruct Status {\n"
      "\t\tint height = -1;\n"
-     "\t\tQByteArray blockHash;\n"
-     "\t\tint pollHeights[2] = { 0, 0 };\n"
+     "\t\tQByteArray lastBlock;\n"
+     "\t\tint offsets[2] = { -1, -1 };\n"
      "\t\tint error = 0;\n"
      "\t};\n"
-     "\t[[nodiscard]] Status status() const;\n"),
+     "\t[[nodiscard]] Status status() const;\n"
+     "\t// pluma: since when sub-chain 0 lags behind the server: the server named\n"
+     "\t// a block above the one to apply next, and none was applied since; 0\n"
+     "\t// while it does not lag (task 094, ADR 0060 §5).\n"
+     "\t[[nodiscard]] crl::time laggingSince(crl::time now);\n"),
     (TDE2E_API_H,
      "\tstd::optional<CallFailure> _failure;\n",
      "\tstd::optional<CallFailure> _failure;\n"
-     "\tint _failureCode = 0; // pluma: task 094\n"),
+     "\t// pluma: the tde2e error of the failure, the hash prefix of the block of\n"
+     "\t// sub-chain 0 applied last, the index the server named after its last\n"
+     "\t// block, and the height sub-chain 0 lags at and since when (task 094).\n"
+     "\tint _failureCode = 0;\n"
+     "\tQByteArray _appliedBlock0;\n"
+     "\tint _serverNext0 = 0;\n"
+     "\tint _laggingHeight = -1;\n"
+     "\tcrl::time _laggingSince = 0;\n"),
     (TDE2E_API_H,
      "\trpl::lifetime _lifetime;\n"
      "\n"
@@ -4841,9 +5061,11 @@ GROUP_CALLS_E2E_EDITS = (
      "\n"
      "};\n"
      "\n"
-     "// pluma: the PlumaE2EStatus message of the data channel (task 094).\n"
+     "// pluma: the PlumaE2EStatus v1 message of the data channel (task 094, ADR\n"
+     "// 0060 §5), of the status of the chain read on the main thread; it takes the\n"
+     "// frames counted since the last report.\n"
      "[[nodiscard]] QByteArray StatusReport(\n"
-     "\tconst Call &call,\n"
+     "\tconst Call::Status &status,\n"
      "\tEncryptDecrypt &frames);\n"
      "\n"
      "} // namespace TdE2E\n"),
@@ -4868,24 +5090,28 @@ GROUP_CALLS_E2E_EDITS = (
      "constexpr auto kShortPollChainBlocksWaitFor = crl::time(1000);\n",
      "constexpr auto kShortPollChainBlocksWaitFor = crl::time(1000);\n"
      "\n"
-     "// pluma: the status report of the key (task 094). Its version, the\n"
-     "// header of a frame of tde2e (Call.cpp 286-350: the size of the\n"
-     "// unencrypted prefix in the last 4 bytes; after the prefix a 32-bit head\n"
-     "// whose low byte counts the epochs, then their 32-byte hashes) and the\n"
-     "// limit of epochs one report names.\n"
+     "// pluma: the status report of the key, PlumaE2EStatus v1 of ADR 0060 §5\n"
+     "// (task 094): its version and limits, which the server checks, and the\n"
+     "// header of a frame of tde2e (Call.cpp 286-350: the size of the unencrypted\n"
+     "// prefix in the last 4 bytes; after the prefix a 32-bit head whose low byte\n"
+     "// counts the epochs, at most 15, then their 32-byte hashes).\n"
      "constexpr auto kStatusReportVersion = 1;\n"
+     "constexpr auto kStatusMaxEpochs = 15;\n"
+     "constexpr auto kStatusMaxUnknownEpochs = 8;\n"
+     "constexpr auto kStatusMaxSenders = 100;\n"
+     "constexpr auto kStatusMaxSize = 16 * 1024;\n"
      "constexpr auto kFrameMaxEpochs = 15;\n"
      "constexpr auto kFrameEpochHashSize = 32;\n"
-     "constexpr auto kStatusMaxUnknownEpochs = 32;\n"
      "\n"
-     "// The first 8 bytes of the hashes of the epochs of a frame whose header\n"
-     "// starts at offset.\n"
+     "// The first 8 bytes of the hashes of the epochs of a frame of size bytes\n"
+     "// whose header starts at offset.\n"
      "template <typename Callback>\n"
      "void ForEachFrameEpoch(\n"
      "\t\tconst EncryptionBuffer &frame,\n"
+     "\t\tsize_t size,\n"
      "\t\tsize_t offset,\n"
      "\t\tCallback &&callback) {\n"
-     "\tif (offset > frame.size() || frame.size() - offset < 4) {\n"
+     "\tif (offset > size || size - offset < 4) {\n"
      "\t\treturn;\n"
      "\t}\n"
      "\tconst auto head = uint32(frame[offset])\n"
@@ -4898,7 +5124,7 @@ GROUP_CALLS_E2E_EDITS = (
      "\t}\n"
      "\tauto at = offset + 4;\n"
      "\tfor (auto i = 0; i != count; ++i, at += kFrameEpochHashSize) {\n"
-     "\t\tif (frame.size() - at < size_t(kFrameEpochHashSize)) {\n"
+     "\t\tif (size - at < size_t(kFrameEpochHashSize)) {\n"
      "\t\t\treturn;\n"
      "\t\t}\n"
      "\t\tauto prefix = EncryptDecrypt::EpochPrefix();\n"
@@ -4907,11 +5133,55 @@ GROUP_CALLS_E2E_EDITS = (
      "\t}\n"
      "}\n"
      "\n"
+     "// The epochs of an encrypted frame as it comes to be decrypted: the size of\n"
+     "// its unencrypted prefix in its last 4 bytes.\n"
+     "template <typename Callback>\n"
+     "void ForEachIncomingFrameEpoch(\n"
+     "\t\tconst EncryptionBuffer &frame,\n"
+     "\t\tCallback &&callback) {\n"
+     "\tif (frame.size() < 4) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto tail = frame.size() - 4;\n"
+     "\tconst auto prefix = size_t(frame[tail])\n"
+     "\t\t| (size_t(frame[tail + 1]) << 8)\n"
+     "\t\t| (size_t(frame[tail + 2]) << 16)\n"
+     "\t\t| (size_t(frame[tail + 3]) << 24);\n"
+     "\tForEachFrameEpoch(frame, tail, prefix, callback);\n"
+     "}\n"
+     "\n"
+     "void AddEpoch(\n"
+     "\t\tstd::vector<EncryptDecrypt::EpochPrefix> &list,\n"
+     "\t\tconst EncryptDecrypt::EpochPrefix &prefix,\n"
+     "\t\tint limit) {\n"
+     "\tif (int(list.size()) < limit\n"
+     "\t\t&& std::find(begin(list), end(list), prefix) == end(list)) {\n"
+     "\t\tlist.push_back(prefix);\n"
+     "\t}\n"
+     "}\n"
+     "\n"
      "[[nodiscard]] QString EpochPrefixHex(\n"
      "\t\tconst EncryptDecrypt::EpochPrefix &prefix) {\n"
      "\treturn QString::fromLatin1(QByteArray(\n"
      "\t\treinterpret_cast<const char*>(prefix.data()),\n"
      "\t\tint(prefix.size())).toHex());\n"
+     "}\n"
+     "\n"
+     "// The first 8 bytes of SHA-256 of a block of sub-chain 0 in the form the\n"
+     "// server stores it, as the client sent it: the server gives a block out with\n"
+     "// its magic plus 1 (tde2e Blockchain.cpp 742-760).\n"
+     "[[nodiscard]] QByteArray StoredBlockPrefix(const QByteArray &block) {\n"
+     "\tif (block.size() < 4) {\n"
+     "\t\treturn QByteArray();\n"
+     "\t}\n"
+     "\tauto local = block;\n"
+     "\tauto magic = uint32();\n"
+     "\tmemcpy(&magic, local.constData(), sizeof(magic));\n"
+     "\t--magic;\n"
+     "\tmemcpy(local.data(), &magic, sizeof(magic));\n"
+     "\treturn QCryptographicHash::hash(\n"
+     "\t\tlocal,\n"
+     "\t\tQCryptographicHash::Sha256).left(8);\n"
      "}\n"),
     (TDE2E_API,
      "\t\tconst auto result = encrypt\n"
@@ -4972,9 +5242,14 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\treturn;\n"
      "\t}\n"
      "\t++_frames.encrypted;\n"
-     "\tForEachFrameEpoch(*result, size_t(prefix), [&](const EpochPrefix &p) {\n"
-     "\t\t_frames.sendEpochs.emplace(p);\n"
-     "\t});\n"
+     "\t_frames.sendEpochs.clear();\n"
+     "\tForEachFrameEpoch(\n"
+     "\t\t*result,\n"
+     "\t\tresult->size(),\n"
+     "\t\tsize_t(prefix),\n"
+     "\t\t[&](const EpochPrefix &p) {\n"
+     "\t\t\tAddEpoch(_frames.sendEpochs, p, kStatusMaxEpochs);\n"
+     "\t\t});\n"
      "}\n"
      "\n"
      "void EncryptDecrypt::countDecrypted(\n"
@@ -4982,44 +5257,113 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\tconst EncryptionBuffer &data,\n"
      "\t\tstd::optional<int> errorCode,\n"
      "\t\tconst std::string &errorMessage) {\n"
+     "\tconst auto now = crl::now();\n"
      "\tconst auto lock = std::lock_guard(_framesMutex);\n"
      "\tauto &sender = _frames.senders[userId];\n"
      "\tif (!errorCode) {\n"
-     "\t\t++sender.decrypted;\n"
-     "\t\tsender.lastDecrypted = crl::now();\n"
+     "\t\t++sender.ok;\n"
+     "\t\t_frames.lastOk[userId] = now;\n"
+     "\t\t_health.failingSince = 0;\n"
+     "\t\tForEachIncomingFrameEpoch(data, [&](const EpochPrefix &p) {\n"
+     "\t\t\tAddEpoch(_frames.decryptEpochs, p, kStatusMaxEpochs);\n"
+     "\t\t});\n"
+     "\t\treturn;\n"
      "\t} else if (*errorCode\n"
      "\t\t== int(tde2e_api::ErrorCode::Decrypt_UnknownEpoch)) {\n"
      "\t\t++sender.unknownEpoch;\n"
-     "\t\tif (data.size() >= 4) {\n"
-     "\t\t\tconst auto tail = data.size() - 4;\n"
-     "\t\t\tconst auto prefix = size_t(data[tail])\n"
-     "\t\t\t\t| (size_t(data[tail + 1]) << 8)\n"
-     "\t\t\t\t| (size_t(data[tail + 2]) << 16)\n"
-     "\t\t\t\t| (size_t(data[tail + 3]) << 24);\n"
-     "\t\t\tauto frame = EncryptionBuffer(data.begin(), data.begin() + tail);\n"
-     "\t\t\tForEachFrameEpoch(frame, prefix, [&](const EpochPrefix &p) {\n"
-     "\t\t\t\tif (int(_frames.unknownEpochs.size())\n"
-     "\t\t\t\t\t< kStatusMaxUnknownEpochs) {\n"
-     "\t\t\t\t\t_frames.unknownEpochs.emplace(p);\n"
-     "\t\t\t\t}\n"
-     "\t\t\t});\n"
-     "\t\t}\n"
+     "\t\tForEachIncomingFrameEpoch(data, [&](const EpochPrefix &p) {\n"
+     "\t\t\tAddEpoch(_frames.unknownEpochs, p, kStatusMaxUnknownEpochs);\n"
+     "\t\t});\n"
      "\t} else if (errorMessage == \"Message is too old\") {\n"
      "\t\t++sender.tooOld;\n"
+     "\t\treturn;\n"
      "\t} else if (errorMessage == \"Message is already processed\") {\n"
-     "\t\t++sender.replayed;\n"
+     "\t\t++sender.duplicate;\n"
+     "\t\treturn;\n"
      "\t} else {\n"
      "\t\t++sender.failed;\n"
      "\t}\n"
+     "\tif (!_health.failingSince) {\n"
+     "\t\t_health.failingSince = now;\n"
+     "\t}\n"
+     "\t_health.lastFailure = now;\n"
      "}\n"
      "\n"
      "auto EncryptDecrypt::takeFrames() -> Frames {\n"
      "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\t++_frames.seq;\n"
      "\tauto result = _frames;\n"
-     "\t_frames.sendEpochs.clear();\n"
+     "\t_frames.senders.clear();\n"
+     "\t_frames.decryptEpochs.clear();\n"
      "\t_frames.unknownEpochs.clear();\n"
+     "\t_frames.encrypted = 0;\n"
+     "\t_frames.encryptFailed = 0;\n"
      "\treturn result;\n"
+     "}\n"
+     "\n"
+     "auto EncryptDecrypt::health() const -> Health {\n"
+     "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\treturn _health;\n"
+     "}\n"
+     "\n"
+     "void EncryptDecrypt::reset() {\n"
+     "\tconst auto lock = std::lock_guard(_framesMutex);\n"
+     "\t_frames = Frames();\n"
+     "\t_health = Health();\n"
      "}\n"),
+    # The block of sub-chain 0 applied last, and the index the server named
+    # after its last block (task 094).
+    (TDE2E_API,
+     "\t\tconst auto result = tde2e_api::call_apply_block(\n"
+     "\t\t\tlibId(),\n"
+     "\t\t\tSlice(last.data));\n"
+     "\t\tif (!result.is_ok()) {\n"
+     "\t\t\tLOG_AND_FAIL(result.error(), CallFailure::Unknown);\n"
+     "\t\t} else {\n"
+     "\t\t\t_participantsSet = ParseParticipantsSet(result.value());\n"
+     "\t\t}\n",
+     "\t\tconst auto result = tde2e_api::call_apply_block(\n"
+     "\t\t\tlibId(),\n"
+     "\t\t\tSlice(last.data));\n"
+     "\t\tif (!result.is_ok()) {\n"
+     "\t\t\tLOG_AND_FAIL(result.error(), CallFailure::Unknown);\n"
+     "\t\t} else {\n"
+     "\t\t\t_appliedBlock0 = StoredBlockPrefix(last.data); // pluma: task 094\n"
+     "\t\t\t_participantsSet = ParseParticipantsSet(result.value());\n"
+     "\t\t}\n"),
+    (TDE2E_API,
+     "\tsetId({ uint64(id.value()) });\n",
+     "\tsetId({ uint64(id.value()) });\n"
+     "\t_appliedBlock0 = StoredBlockPrefix(last.data); // pluma: task 094\n"),
+    (TDE2E_API,
+     "\t\t\t\tconst auto result = tde2e_api::call_apply_block(\n"
+     "\t\t\t\t\tlibId(),\n"
+     "\t\t\t\t\tslice);\n"
+     "\t\t\t\tif (!result.is_ok()) {\n"
+     "\t\t\t\t\tLOG_AND_FAIL(result.error(), CallFailure::Unknown);\n"
+     "\t\t\t\t\treturn;\n"
+     "\t\t\t\t}\n"
+     "\t\t\t\t_participantsSet = ParseParticipantsSet(result.value());\n",
+     "\t\t\t\tconst auto result = tde2e_api::call_apply_block(\n"
+     "\t\t\t\t\tlibId(),\n"
+     "\t\t\t\t\tslice);\n"
+     "\t\t\t\tif (!result.is_ok()) {\n"
+     "\t\t\t\t\tLOG_AND_FAIL(result.error(), CallFailure::Unknown);\n"
+     "\t\t\t\t\treturn;\n"
+     "\t\t\t\t}\n"
+     "\t\t\t\t// pluma: task 094.\n"
+     "\t\t\t\t_appliedBlock0 = StoredBlockPrefix(waiting.begin()->second.data);\n"
+     "\t\t\t\t_participantsSet = ParseParticipantsSet(result.value());\n"),
+    (TDE2E_API,
+     "\tExpects(subchain >= 0 && subchain < kSubChainsCount);\n"
+     "\n"
+     "\tif (!subchain && !blocks.empty() && indexAfterLast > _lastBlock0Height) {\n",
+     "\tExpects(subchain >= 0 && subchain < kSubChainsCount);\n"
+     "\n"
+     "\tif (!subchain) {\n"
+     "\t\t_serverNext0 = std::max(_serverNext0, indexAfterLast); // pluma: task 094\n"
+     "\t}\n"
+     "\tif (!subchain && !blocks.empty() && indexAfterLast > _lastBlock0Height) {\n"),
     (TDE2E_API,
      "rpl::producer<ParticipantsSet> Call::participantsSetValue() const {\n"
      "\treturn _participantsSet.value();\n"
@@ -5030,86 +5374,121 @@ GROUP_CALLS_E2E_EDITS = (
      "\n"
      "Call::Status Call::status() const {\n"
      "\tauto result = Status();\n"
-     "\tfor (auto i = 0; i != kSubChainsCount; ++i) {\n"
-     "\t\tresult.pollHeights[i] = _subchains[i].height;\n"
+     "\tif (_id) {\n"
+     "\t\tfor (auto i = 0; i != kSubChainsCount; ++i) {\n"
+     "\t\t\tresult.offsets[i] = _subchains[i].height;\n"
+     "\t\t}\n"
      "\t}\n"
      "\tif (_failure) {\n"
      "\t\tresult.error = _failureCode\n"
      "\t\t\t? _failureCode\n"
      "\t\t\t: int(tde2e_api::ErrorCode::UnknownError);\n"
-     "\t}\n"
-     "\tif (!_id) {\n"
+     "\t\treturn result;\n"
+     "\t} else if (!_id || _appliedBlock0.isEmpty()) {\n"
      "\t\treturn result;\n"
      "\t}\n"
      "\tconst auto height = tde2e_api::call_get_height(libId());\n"
-     "\tif (!height.is_ok()) {\n"
-     "\t\treturn result;\n"
-     "\t}\n"
-     "\tresult.height = height.value();\n"
-     "\t// The last block received is the one applied when its index is the\n"
-     "\t// height; it comes in the server's form, with the magic plus 1\n"
-     "\t// (Blockchain.cpp 727-753), and the server hashes the client's form.\n"
-     "\tif (_lastBlock0\n"
-     "\t\t&& _lastBlock0Height == result.height + 1\n"
-     "\t\t&& _lastBlock0->data.size() >= 4) {\n"
-     "\t\tauto local = _lastBlock0->data;\n"
-     "\t\tauto magic = uint32();\n"
-     "\t\tmemcpy(&magic, local.constData(), sizeof(magic));\n"
-     "\t\t--magic;\n"
-     "\t\tmemcpy(local.data(), &magic, sizeof(magic));\n"
-     "\t\tresult.blockHash = QCryptographicHash::hash(\n"
-     "\t\t\tlocal,\n"
-     "\t\t\tQCryptographicHash::Sha256).left(8);\n"
+     "\tif (height.is_ok()) {\n"
+     "\t\tresult.height = height.value();\n"
+     "\t\tresult.lastBlock = _appliedBlock0;\n"
      "\t}\n"
      "\treturn result;\n"
      "}\n"
      "\n"
-     "QByteArray StatusReport(const Call &call, EncryptDecrypt &frames) {\n"
-     "\tconst auto status = call.status();\n"
+     "crl::time Call::laggingSince(crl::time now) {\n"
+     "\tauto height = std::optional<int>();\n"
+     "\tif (!failed() && _id) {\n"
+     "\t\tconst auto result = tde2e_api::call_get_height(libId());\n"
+     "\t\tif (result.is_ok()) {\n"
+     "\t\t\theight = result.value();\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\tif (!height || _serverNext0 <= *height + 1) {\n"
+     "\t\t_laggingSince = 0;\n"
+     "\t} else if (!_laggingSince || _laggingHeight != *height) {\n"
+     "\t\t_laggingSince = now;\n"
+     "\t\t_laggingHeight = *height;\n"
+     "\t}\n"
+     "\treturn _laggingSince;\n"
+     "}\n"
+     "\n"
+     "QByteArray StatusReport(\n"
+     "\t\tconst Call::Status &status,\n"
+     "\t\tEncryptDecrypt &frames) {\n"
      "\tconst auto taken = frames.takeFrames();\n"
      "\tconst auto now = crl::now();\n"
-     "\tusing Epochs = base::flat_set<EncryptDecrypt::EpochPrefix>;\n"
-     "\tconst auto epochs = [](const Epochs &list) {\n"
+     "\tconst auto epochs = [](\n"
+     "\t\t\tconst std::vector<EncryptDecrypt::EpochPrefix> &list) {\n"
      "\t\tauto result = QJsonArray();\n"
      "\t\tfor (const auto &prefix : list) {\n"
      "\t\t\tresult.push_back(EpochPrefixHex(prefix));\n"
      "\t\t}\n"
      "\t\treturn result;\n"
      "\t};\n"
-     "\tauto senders = QJsonArray();\n"
-     "\tfor (const auto &[userId, sender] : taken.senders) {\n"
-     "\t\tsenders.push_back(QJsonObject{\n"
-     "\t\t\t{ u\"userId\"_q, double(userId) },\n"
-     "\t\t\t{ u\"decrypted\"_q, double(sender.decrypted) },\n"
-     "\t\t\t{ u\"unknownEpoch\"_q, double(sender.unknownEpoch) },\n"
-     "\t\t\t{ u\"tooOld\"_q, double(sender.tooOld) },\n"
-     "\t\t\t{ u\"replayed\"_q, double(sender.replayed) },\n"
-     "\t\t\t{ u\"failed\"_q, double(sender.failed) },\n"
-     "\t\t\t{\n"
-     "\t\t\t\tu\"lastDecryptedMsAgo\"_q,\n"
-     "\t\t\t\t(sender.lastDecrypted\n"
-     "\t\t\t\t\t? double(now - sender.lastDecrypted)\n"
-     "\t\t\t\t\t: -1.),\n"
-     "\t\t\t},\n"
+     "\tstruct Sender {\n"
+     "\t\tint64 user = 0;\n"
+     "\t\tEncryptDecrypt::SenderFrames frames;\n"
+     "\t\tint64 lastOkMs = -1;\n"
+     "\t};\n"
+     "\tauto senders = std::vector<Sender>();\n"
+     "\tsenders.reserve(taken.senders.size());\n"
+     "\tfor (const auto &[user, counted] : taken.senders) {\n"
+     "\t\tconst auto i = taken.lastOk.find(user);\n"
+     "\t\tsenders.push_back({\n"
+     "\t\t\t.user = user,\n"
+     "\t\t\t.frames = counted,\n"
+     "\t\t\t.lastOkMs = (i != end(taken.lastOk)) ? (now - i->second) : -1,\n"
      "\t\t});\n"
      "\t}\n"
-     "\tconst auto report = QJsonObject{\n"
-     "\t\t{ u\"colibriClass\"_q, u\"PlumaE2EStatus\"_q },\n"
-     "\t\t{ u\"version\"_q, kStatusReportVersion },\n"
-     "\t\t{ u\"height\"_q, status.height },\n"
-     "\t\t{ u\"blockHash\"_q, QString::fromLatin1(status.blockHash.toHex()) },\n"
-     "\t\t{\n"
-     "\t\t\tu\"pollHeights\"_q,\n"
-     "\t\t\tQJsonArray{ status.pollHeights[0], status.pollHeights[1] },\n"
-     "\t\t},\n"
-     "\t\t{ u\"error\"_q, status.error },\n"
-     "\t\t{ u\"sendEpochs\"_q, epochs(taken.sendEpochs) },\n"
-     "\t\t{ u\"unknownEpochs\"_q, epochs(taken.unknownEpochs) },\n"
-     "\t\t{ u\"encrypted\"_q, double(taken.encrypted) },\n"
-     "\t\t{ u\"encryptFailed\"_q, double(taken.encryptFailed) },\n"
-     "\t\t{ u\"senders\"_q, senders },\n"
+     "\t// Over the limits, the senders decrypted longest ago are left out; the\n"
+     "\t// rest stay in the order of their ids.\n"
+     "\tconst auto leaveOutOldest = [&] {\n"
+     "\t\tsenders.erase(std::max_element(\n"
+     "\t\t\tbegin(senders),\n"
+     "\t\t\tend(senders),\n"
+     "\t\t\t[](const Sender &a, const Sender &b) {\n"
+     "\t\t\t\treturn a.lastOkMs < b.lastOkMs;\n"
+     "\t\t\t}));\n"
      "\t};\n"
-     "\treturn QJsonDocument(report).toJson(QJsonDocument::Compact);\n"
+     "\twhile (int(senders.size()) > kStatusMaxSenders) {\n"
+     "\t\tleaveOutOldest();\n"
+     "\t}\n"
+     "\tconst auto serialize = [&] {\n"
+     "\t\tauto list = QJsonArray();\n"
+     "\t\tfor (const auto &sender : senders) {\n"
+     "\t\t\tlist.push_back(QJsonObject{\n"
+     "\t\t\t\t{ u\"user\"_q, qint64(sender.user) },\n"
+     "\t\t\t\t{ u\"ok\"_q, qint64(sender.frames.ok) },\n"
+     "\t\t\t\t{ u\"unknownEpoch\"_q, qint64(sender.frames.unknownEpoch) },\n"
+     "\t\t\t\t{ u\"tooOld\"_q, qint64(sender.frames.tooOld) },\n"
+     "\t\t\t\t{ u\"duplicate\"_q, qint64(sender.frames.duplicate) },\n"
+     "\t\t\t\t{ u\"failed\"_q, qint64(sender.frames.failed) },\n"
+     "\t\t\t\t{ u\"lastOkMs\"_q, qint64(sender.lastOkMs) },\n"
+     "\t\t\t});\n"
+     "\t\t}\n"
+     "\t\treturn QJsonDocument(QJsonObject{\n"
+     "\t\t\t{ u\"colibriClass\"_q, u\"PlumaE2EStatus\"_q },\n"
+     "\t\t\t{ u\"v\"_q, kStatusReportVersion },\n"
+     "\t\t\t{ u\"seq\"_q, qint64(taken.seq) },\n"
+     "\t\t\t{ u\"height\"_q, status.height },\n"
+     "\t\t\t{ u\"lastBlock\"_q, QString::fromLatin1(status.lastBlock.toHex()) },\n"
+     "\t\t\t{ u\"offset0\"_q, status.offsets[0] },\n"
+     "\t\t\t{ u\"offset1\"_q, status.offsets[1] },\n"
+     "\t\t\t{ u\"error\"_q, status.error },\n"
+     "\t\t\t{ u\"sendEpochs\"_q, epochs(taken.sendEpochs) },\n"
+     "\t\t\t{ u\"decryptEpochs\"_q, epochs(taken.decryptEpochs) },\n"
+     "\t\t\t{ u\"unknownEpochs\"_q, epochs(taken.unknownEpochs) },\n"
+     "\t\t\t{ u\"encrypted\"_q, qint64(taken.encrypted) },\n"
+     "\t\t\t{ u\"encryptFailed\"_q, qint64(taken.encryptFailed) },\n"
+     "\t\t\t{ u\"senders\"_q, list },\n"
+     "\t\t}).toJson(QJsonDocument::Compact);\n"
+     "\t};\n"
+     "\tauto result = serialize();\n"
+     "\twhile (result.size() > kStatusMaxSize && !senders.empty()) {\n"
+     "\t\tleaveOutOldest();\n"
+     "\t\tresult = serialize();\n"
+     "\t}\n"
+     "\treturn result;\n"
      "}\n"),
     # tgcalls sends the report over its data channel to the SFU.
     (TGCALLS_GROUP_H,
@@ -5119,20 +5498,25 @@ GROUP_CALLS_E2E_EDITS = (
      "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
      "\n"
      "    // pluma: a status report of the call's end-to-end key to the SFU over\n"
-     "    // the data channel, dropped while it is closed (task 094).\n"
-     "    void sendE2EStatus(std::string const &report);\n"
+     "    // the data channel, made only while it is open (task 094).\n"
+     "    void sendE2EStatus(std::function<std::string()> makeReport);\n"
      "\n"
      "private:\n"),
     (TGCALLS_GROUP,
      "    void maybeUpdateRemoteVideoConstraints() {\n"
      "        if (!_isDataChannelOpen) {\n",
-     "    // pluma: the status report of the end-to-end key (task 094); while the\n"
-     "    // data channel is closed it is dropped, the next one comes in 5 seconds.\n"
-     "    void sendE2EStatus(std::string const &report) {\n"
+     "    // pluma: the status report of the end-to-end key (task 094, ADR 0060\n"
+     "    // §5). It is made only while the data channel is open: the frames it\n"
+     "    // counts stay for the next one otherwise.\n"
+     "    void sendE2EStatus(std::function<std::string()> const &makeReport) {\n"
      "        if (!_isDataChannelOpen) {\n"
      "            return;\n"
      "        }\n"
-     "        _networkManager->perform([report](GroupNetworkManager *networkManager) {\n"
+     "        auto report = makeReport();\n"
+     "        if (report.empty()) {\n"
+     "            return;\n"
+     "        }\n"
+     "        _networkManager->perform([report = std::move(report)](GroupNetworkManager *networkManager) {\n"
      "            networkManager->sendDataChannelMessage(report);\n"
      "        });\n"
      "    }\n"
@@ -5151,9 +5535,9 @@ GROUP_CALLS_E2E_EDITS = (
      "    });\n"
      "}\n"
      "\n"
-     "void GroupInstanceCustomImpl::sendE2EStatus(std::string const &report) {\n"
-     "    _internal->perform([report](GroupInstanceCustomInternal *internal) {\n"
-     "        internal->sendE2EStatus(report);\n"
+     "void GroupInstanceCustomImpl::sendE2EStatus(std::function<std::string()> makeReport) {\n"
+     "    _internal->perform([makeReport = std::move(makeReport)](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->sendE2EStatus(makeReport);\n"
      "    });\n"
      "}\n"),
 )
@@ -5195,6 +5579,13 @@ GROUP_CALLS_E2E_GUARDS = (
     (GROUP_CALL, "e2e()", 5),
     (GROUP_CALL, "initConferenceE2E();", 5),
     (GROUP_CALL, "removeConferenceParticipants(", 3),
+    # A rejoin with a new key goes by the rules (scheduleE2ERejoin); the
+    # rejoins left are those of the transport and of membership.
+    (GROUP_CALL, "scheduleE2ERejoin(", 7),
+    (GROUP_CALL, "startRejoin();", 9),
+    # The report goes over the main connection alone.
+    (GROUP_CALL, "sendE2EStatus(", 3),
+    (GROUP_CALL, "_instance->sendE2EStatus(", 1),
     (GROUP_CALL, "setInstanceMode(InstanceMode::Stream)", 1),
     (GROUP_CALL, "JoinBroadcastStream{", 0),
     (GROUP_CALL, 'value("stream")', 0),
@@ -5215,6 +5606,9 @@ GROUP_CALLS_E2E_SOURCES = {
     "MTPphone_GetGroupCallStreamRtmpUrl(": {GROUP_CALL_RTMP + "cpp": 1},
     "GroupCallOrigin::VideoStream": {GROUP_CALL: 1, DATA_GROUP_CALL: 2},
     "StartLive": {},
+    # No recording but in the menu's entry that never shows.
+    "toggleRecording(": {GROUP_CALL: 1, GROUP_CALL_H: 1, GROUP_CALL_MENU: 1},
+    "Box(StartGroupCallRecordingBox": {GROUP_CALL_MENU: 1},
 }
 
 
@@ -5251,12 +5645,380 @@ def verify_group_calls_e2e(tree):
     if keys != set(E2E_STATUS_FIELDS) | set(E2E_STATUS_SENDER_FIELDS):
         raise PatchError(f"{TDE2E_API}: the status report holds {', '.join(sorted(keys))}, "
                          "not the fields of E2E_STATUS_FIELDS (task 094)")
+    for rel, values in ((TDE2E_API, E2E_STATUS_LIMITS), (GROUP_CALL, E2E_REJOIN_RULES)):
+        text = tree.read(rel)
+        for name, value in values.items():
+            found = re.findall(rf"^constexpr [\w:]+ {re.escape(name)} = (.*);$", text, re.M)
+            if found != [value]:
+                raise PatchError(f"{rel}: {name} is {', '.join(found) or 'missing'}, not {value} "
+                                 "of ADR 0060 §5 (task 094)")
 
 
 def group_calls_e2e_edited():
     """The files group_calls_e2e() edits."""
     return tuple(sorted({rel for rel, _, _ in GROUP_CALLS_E2E_EDITS}
                         | {rel for rel, _, _, _, _ in GROUP_CALLS_E2E_SPANS} | {LANG}))
+
+
+# The colours of calls (task 094 of the server repository; the owner's
+# decision of 2026-11-12, variant A "sage"). Telegram's iOS app draws its
+# call screen in three gradients of four points, by the state of the call
+# (CallBackgroundLayer.swift 108-124, PrivateCallScreen.swift 799-812 of the
+# pinned iOS): connecting 568FD6/626ED5/A667D5/7664DA, connected
+# ACBD65/459F8D/53A4D1/3E917A, weak signal C0508D/F09536/CE5081/FC7C4C.
+# Pluma's, the same points in the same order: connecting #3a4a3c #4f6e52
+# #2c3a2d #5b7a5e, connected #5b7a5e #6f8f72 #4f6e52 #7fa082, weak signal
+# #8a5a44 #a86b4c #7a4e3b #b97a55. Telegram Desktop has no such gradients:
+# its one-to-one call fills the background with callBgOpaque, or with the
+# peer's colours of their profile (calls_panel_background.cpp 62-95), and its
+# group call draws in the call palette of lib_ui's colors.palette, the same
+# in every theme the theme does not override. So:
+# - the one-to-one call takes the gradients of the iOS app, in Pluma's
+#   colours, where it filled callBgOpaque (new keys callBgConnecting1-4,
+#   callBgConnected1-4, callBgWeak1-4; PanelBackground::setState from the
+#   call's state and signal bars, as iOS chooses it); the peer's own colours
+#   stay upstream's;
+# - the call palette takes Pluma's colours by meaning: the backgrounds of the
+#   one-to-one and group calls, their lists and menus the dark sage of the
+#   connecting gradient and of the palette of task 017 (#2c3a2d, #36473a,
+#   #3a4a3c, #4f6e52); Telegram's blue and purple (muted, the members'
+#   status) the connecting gradient or the sage accent of the dark themes
+#   (#9dbb9f); green (speaking, live) the connected gradient and the light
+#   sage #b2ceb4; red and pink (muted by an admin, a raised hand, the bar
+#   of a scheduled call) the weak signal's;
+# - the answer and hang-up buttons and leaving a call keep the green and
+#   red every call app has, the ones of Classic in every theme (Telegram's
+#   Night and the night base answer in blue);
+# - the volume of a member, red to blue in the code (calls_volume_item.cpp
+#   262-267), the weak signal's to the accent.
+# Every theme the app carries takes them: Classic (colors.palette), Tinted
+# (night.tdesktop-theme) and Telegram's themes and bases (TELEGRAM_THEMES),
+# which leave the new keys to Classic. verify_call_colors() stops a call
+# palette with any other colour (but white and grey) and any of Telegram's
+# call colours in the sources of calls.
+# As (key, Telegram's value in Classic or None for a new key, Pluma's value).
+CALL_COLORS = (
+    ("callBg", "#26282cf2", "#2c3a2df2"),
+    ("callBgOpaque", "#1b1f23", "#2c3a2d"),
+    ("callBgButton", "#1b1f237f", "#2c3a2d7f"),
+    ("callAnswerBg", "#66c95b", "#66c95b"),
+    ("callAnswerRipple", "#52b149", "#52b149"),
+    ("callAnswerBgOuter", "#50eb4126", "#50eb4126"),
+    ("callHangupBg", "#d75a5a", "#d75a5a"),
+    ("callHangupRipple", "#c04646", "#c04646"),
+    ("groupCallBg", "#1a2026", "#2c3a2d"),
+    ("groupCallActiveFg", "#4db8ff", "#9dbb9f"),
+    ("groupCallMembersBg", "#2c333d", "#36473a"),
+    ("groupCallMembersBgOver", "#323a45", "#3a4a3c"),
+    ("groupCallMembersBgRipple", "#39424f", "#4f6e52"),
+    ("groupCallMemberActiveIcon", "#8deb90", "#b2ceb4"),
+    ("groupCallMemberActiveStatus", "#8deb90", "#b2ceb4"),
+    ("groupCallMemberInactiveStatus", "#61c0ff", "#9dbb9f"),
+    ("groupCallMemberMutedIcon", "#ed7372", "#b97a55"),
+    ("groupCallLive1", "#0dcc39", "#6f8f72"),
+    ("groupCallLive2", "#0bb6bd", "#7fa082"),
+    ("groupCallMuted1", "#0992ef", "#4f6e52"),
+    ("groupCallMuted2", "#16ccfb", "#5b7a5e"),
+    ("groupCallForceMutedBar1", "#c65493", "#8a5a44"),
+    ("groupCallForceMutedBar2", "#7a6af1", "#5b7a5e"),
+    ("groupCallForceMutedBar3", "#5f95e8", "#4f6e52"),
+    ("groupCallForceMuted1", "#4f9cff", "#4f6e52"),
+    ("groupCallForceMuted2", "#9b52e9", "#5b7a5e"),
+    ("groupCallForceMuted3", "#eb5353", "#a86b4c"),
+    ("groupCallMenuBg", "#292d33", "#36473a"),
+    ("groupCallMenuBgOver", "#343940", "#3a4a3c"),
+    ("groupCallMenuBgRipple", "#3a4047", "#4f6e52"),
+    ("groupCallLeaveBg", "#f75c5c7f", "#f75c5c7f"),
+    ("groupCallLeaveBgRipple", "#f75c5c9e", "#f75c5c9e"),
+    ("callBgConnecting1", None, "#3a4a3c"),
+    ("callBgConnecting2", None, "#4f6e52"),
+    ("callBgConnecting3", None, "#2c3a2d"),
+    ("callBgConnecting4", None, "#5b7a5e"),
+    ("callBgConnected1", None, "#5b7a5e"),
+    ("callBgConnected2", None, "#6f8f72"),
+    ("callBgConnected3", None, "#4f6e52"),
+    ("callBgConnected4", None, "#7fa082"),
+    ("callBgWeak1", None, "#8a5a44"),
+    ("callBgWeak2", None, "#a86b4c"),
+    ("callBgWeak3", None, "#7a4e3b"),
+    ("callBgWeak4", None, "#b97a55"),
+)
+# The keys of colors.palette that draw calls: the one-to-one call and the
+# group call, their top bars and buttons. Not the arrows of the list of calls
+# (callArrow*) or the bar of a call in the main window (callBar*), which
+# follow the theme's accent.
+CALL_KEYS = re.compile(r"(?:call|groupCall)\w+")
+CALL_KEYS_OUTSIDE = re.compile(r"callArrow\w*|callBar\w*")
+# Telegram's colours of calls, which no source of calls may hold: the
+# gradients of its iOS app, the volume colours of tdesktop and the colours
+# CALL_COLORS replaces.
+TELEGRAM_CALL_COLORS = ("568fd6", "626ed5", "a667d5", "7664da", "acbd65", "459f8d", "53a4d1", "3e917a",
+                        "c0508d", "f09536", "ce5081", "fc7c4c", "f66464", "d0b738", "24cd80", "3bbcec")
+PANEL_BACKGROUND = SOURCES + "/calls/calls_panel_background.cpp"
+PANEL_BACKGROUND_H = SOURCES + "/calls/calls_panel_background.h"
+CALLS_PANEL = SOURCES + "/calls/calls_panel.cpp"
+VOLUME_ITEM = SOURCES + "/calls/group/calls_volume_item.cpp"
+
+CALL_COLORS_EDITS = (
+    (PANEL_BACKGROUND_H,
+     "\t[[nodiscard]] QColor cardOverlay() const;\n"
+     "\n"
+     "private:\n",
+     "\t[[nodiscard]] QColor cardOverlay() const;\n"
+     "\n"
+     "\t// pluma: the state of the call the background shows when the peer has\n"
+     "\t// no colours of their own, as Telegram's iOS app shows it (task 094).\n"
+     "\tenum class State {\n"
+     "\t\tConnecting,\n"
+     "\t\tConnected,\n"
+     "\t\tWeakSignal,\n"
+     "\t};\n"
+     "\tvoid setState(State state);\n"
+     "\n"
+     "private:\n"),
+    (PANEL_BACKGROUND_H,
+     "\tstd::optional<Data::ColorProfileSet> _colors;\n",
+     "\tstd::optional<Data::ColorProfileSet> _colors;\n"
+     "\tState _state = State::Connecting; // pluma: task 094\n"),
+    (PANEL_BACKGROUND,
+     "constexpr auto kDarkOverlayOpacity = 0.14;\n"
+     "constexpr auto kDarkenAboveLightness = 0.3;\n"
+     "\n"
+     "} // namespace\n",
+     "constexpr auto kDarkOverlayOpacity = 0.14;\n"
+     "constexpr auto kDarkenAboveLightness = 0.3;\n"
+     "\n"
+     "// pluma: the gradient of each state of the call, in Pluma's colours of\n"
+     "// calls (task 094): Telegram's iOS app draws its call screen in three such\n"
+     "// gradients, while connecting, connected and on a weak signal\n"
+     "// (CallBackgroundLayer.swift 108-124), where Telegram Desktop fills one\n"
+     "// colour. The last colour is the middle of the gradient (updateBrush).\n"
+     "[[nodiscard]] std::vector<QColor> StateColors(PanelBackground::State state) {\n"
+     "\tswitch (state) {\n"
+     "\tcase PanelBackground::State::Connected: return {\n"
+     "\t\tst::callBgConnected1->c,\n"
+     "\t\tst::callBgConnected2->c,\n"
+     "\t\tst::callBgConnected3->c,\n"
+     "\t\tst::callBgConnected4->c,\n"
+     "\t};\n"
+     "\tcase PanelBackground::State::WeakSignal: return {\n"
+     "\t\tst::callBgWeak1->c,\n"
+     "\t\tst::callBgWeak2->c,\n"
+     "\t\tst::callBgWeak3->c,\n"
+     "\t\tst::callBgWeak4->c,\n"
+     "\t};\n"
+     "\tcase PanelBackground::State::Connecting: break;\n"
+     "\t}\n"
+     "\treturn {\n"
+     "\t\tst::callBgConnecting1->c,\n"
+     "\t\tst::callBgConnecting2->c,\n"
+     "\t\tst::callBgConnecting3->c,\n"
+     "\t\tst::callBgConnecting4->c,\n"
+     "\t};\n"
+     "}\n"
+     "\n"
+     "} // namespace\n"),
+    (PANEL_BACKGROUND,
+     "\tupdateColors();\n"
+     "\tupdateEmojiId();\n"
+     "\n"
+     "\t_peer->session().changes().peerFlagsValue(\n",
+     "\tupdateColors();\n"
+     "\tupdateEmojiId();\n"
+     "\n"
+     "\t// pluma: the gradient of the call's state is made of the palette, which\n"
+     "\t// upstream's fill of callBgOpaque read on each paint (task 094).\n"
+     "\tstyle::PaletteChanged(\n"
+     "\t) | rpl::on_next([=] {\n"
+     "\t\t_brushSize = QSize();\n"
+     "\t\tif (_updateCallback) {\n"
+     "\t\t\t_updateCallback();\n"
+     "\t\t}\n"
+     "\t}, _lifetime);\n"
+     "\n"
+     "\t_peer->session().changes().peerFlagsValue(\n"),
+    (PANEL_BACKGROUND,
+     "\tif (!_colors || _colors->bg.empty()) {\n"
+     "\t\tfor (const auto &rect : region) {\n"
+     "\t\t\tp.fillRect(rect, st::callBgOpaque);\n"
+     "\t\t}\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\n"
+     "\tconst auto &colors = _colors->bg;\n"
+     "\tif (colors.size() == 1) {\n",
+     "\t// pluma: without colours of the peer's own, the gradient of the call's\n"
+     "\t// state (task 094).\n"
+     "\tconst auto own = _colors && !_colors->bg.empty();\n"
+     "\tconst auto colors = own ? _colors->bg : StateColors(_state);\n"
+     "\tif (colors.size() == 1) {\n"),
+    (PANEL_BACKGROUND,
+     "\t\tfor (const auto &rect : region) {\n"
+     "\t\t\tp.fillRect(rect, _brush);\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\n"
+     "\tconst auto emojiId = _currentEmojiId;\n",
+     "\t\tfor (const auto &rect : region) {\n"
+     "\t\t\tp.fillRect(rect, _brush);\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\tif (!own) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\n"
+     "\tconst auto emojiId = _currentEmojiId;\n"),
+    (PANEL_BACKGROUND,
+     "rpl::lifetime &PanelBackground::lifetime() {\n"
+     "\treturn _lifetime;\n"
+     "}\n",
+     "void PanelBackground::setState(State state) {\n"
+     "\tif (_state == state) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_state = state;\n"
+     "\t_brushSize = QSize();\n"
+     "\tif (_updateCallback) {\n"
+     "\t\t_updateCallback();\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "rpl::lifetime &PanelBackground::lifetime() {\n"
+     "\treturn _lifetime;\n"
+     "}\n"),
+    (CALLS_PANEL,
+     "\t_background = std::make_unique<PanelBackground>(\n"
+     "\t\t_user,\n"
+     "\t\t[=] {\n"
+     "\t\t\tupdateTextColors();\n"
+     "\t\t\twidget()->update();\n"
+     "\t\t});\n",
+     "\t_background = std::make_unique<PanelBackground>(\n"
+     "\t\t_user,\n"
+     "\t\t[=] {\n"
+     "\t\t\tupdateTextColors();\n"
+     "\t\t\twidget()->update();\n"
+     "\t\t});\n"
+     "\n"
+     "\t// pluma: the background shows the state of the call as Telegram's iOS\n"
+     "\t// app does (PrivateCallScreen.swift 799-812): connecting until the call\n"
+     "\t// is established and after it ends, then connected, or a weak signal\n"
+     "\t// with no bar of it, which iOS takes as a quality of 0.2 or less of 4\n"
+     "\t// bars (CallControllerNodeV2.swift 484) (task 094).\n"
+     "\trpl::combine(\n"
+     "\t\t_call->stateValue(),\n"
+     "\t\t_call->signalBarCountValue()\n"
+     "\t) | rpl::on_next([=](State state, int bars) {\n"
+     "\t\tusing BackgroundState = PanelBackground::State;\n"
+     "\t\t_background->setState((state != State::Established)\n"
+     "\t\t\t? BackgroundState::Connecting\n"
+     "\t\t\t: (bars == 0)\n"
+     "\t\t\t? BackgroundState::WeakSignal\n"
+     "\t\t\t: BackgroundState::Connected);\n"
+     "\t}, _callLifetime);\n"),
+    (VOLUME_ITEM,
+     "\tconst auto colors = std::array<QColor, 4>{ {\n"
+     "\t\tUi::ColorFromSerialized(0xF66464),\n"
+     "\t\tUi::ColorFromSerialized(0xD0B738),\n"
+     "\t\tUi::ColorFromSerialized(0x24CD80),\n"
+     "\t\tUi::ColorFromSerialized(0x3BBCEC),\n"
+     "\t} };\n",
+     "\t// pluma: Pluma's colours of calls from quiet to loud, as Telegram's red,\n"
+     "\t// yellow, green and blue: those of a weak signal, of a connected call and\n"
+     "\t// the accent (task 094).\n"
+     "\tconst auto colors = std::array<QColor, 4>{ {\n"
+     "\t\tUi::ColorFromSerialized(0xB97A55),\n"
+     "\t\tUi::ColorFromSerialized(0xA86B4C),\n"
+     "\t\tUi::ColorFromSerialized(0x7FA082),\n"
+     "\t\tUi::ColorFromSerialized(0x9DBB9F),\n"
+     "\t} };\n"),
+)
+
+
+def call_colors_table():
+    """The rows of CALL_COLORS as brand tables have them: key, Telegram's
+    value ("-" for a new key), Pluma's."""
+    return [(key, old or "-", new) for key, old, new in CALL_COLORS]
+
+
+def theme_call_colors(text, where):
+    """The colours of a theme with every key of CALL_COLORS it sets made
+    Pluma's; a key it leaves out stays to Classic."""
+    for key, _, new in CALL_COLORS:
+        line = re.compile(rf"^{key}:[^;\n]*;", re.M)
+        found = len(line.findall(text))
+        if found > 1:
+            raise PatchError(f"{where}: {found} occurrences of '{key}:', expected one or none")
+        text = line.sub(f"{key}: {new};", text)
+    return text
+
+
+def call_colors(tree):
+    """Pluma's colours of calls (task 094): CALL_COLORS in every theme, the
+    gradients of the one-to-one call and the volume (CALL_COLORS_EDITS)."""
+    tree.write(PALETTE, recolor(tree.read(PALETTE), call_colors_table(), PALETTE))
+    night = night_colors(tree.read_bytes(NIGHT_THEME))
+    tree.write_bytes(NIGHT_THEME, night_theme(theme_call_colors(night, NIGHT_THEME)))
+    for rel in TELEGRAM_THEMES:
+        data = tree.read_bytes(rel)
+        tree.write_bytes(rel, with_colors(data, theme_call_colors(zipped_colors(data, rel), rel)))
+    for rel, old, new in CALL_COLORS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def is_neutral(value):
+    """White, black or a grey: #rrggbb(aa) whose channels differ by less than
+    an eighth."""
+    m = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", value)
+    if not m:
+        return False
+    channels = [int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4)]
+    return max(channels) - min(channels) < 0.12 * 255
+
+
+def call_sources(tree):
+    """The sources that draw calls: those of calls/ and the call controls
+    and bars of ui/."""
+    return [rel for rel in tree.sources()
+            if rel.startswith(SOURCES + "/calls/")
+            or re.match(re.escape(SOURCES) + r"/ui/(?:controls/call_|chat/group_call_)", rel)]
+
+
+def verify_call_colors(tree):
+    """Pluma's colours of calls in every theme the app carries and nothing of
+    Telegram's in the sources of calls (task 094)."""
+    day = palette_values(tree.read(PALETTE))
+    themes = [(PALETTE, day), (NIGHT_THEME, {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))})]
+    themes += [(rel, {**day, **palette_values(zipped_colors(tree.read_bytes(rel), rel))}) for rel in TELEGRAM_THEMES]
+    pluma = {key: new for key, _, new in CALL_COLORS}
+    keys = [key for key in day if CALL_KEYS.fullmatch(key) and not CALL_KEYS_OUTSIDE.fullmatch(key)]
+    for key in pluma:
+        if key not in keys:
+            raise PatchError(f"{PALETTE}: no {key} of the colours of calls (task 094)")
+    for where, values in themes:
+        for key in keys:
+            color = resolve(values, key)
+            if key in pluma:
+                if color.lower() != pluma[key]:
+                    raise PatchError(f"{where}: {key} of calls is {color}, not Pluma's {pluma[key]} (task 094)")
+            elif not is_neutral(color):
+                raise PatchError(f"{where}: {key} of calls is {color}, not a colour of CALL_COLORS (task 094)")
+    for rel, old, new in CALL_COLORS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the colours of calls (task 094) is not there")
+    telegram = re.compile(r"(?:#|0x)(" + "|".join(TELEGRAM_CALL_COLORS + tuple(
+        old[1:7] for _, old, new in CALL_COLORS if old and old != new)) + r")(?![0-9a-fA-F])", re.I)
+    styles = [p.relative_to(tree.root).as_posix() for p in sorted((tree.root / SOURCES / "calls").rglob("*.style"))]
+    for rel in call_sources(tree) + styles:
+        m = telegram.search(tree.read(rel))
+        if m:
+            raise PatchError(f"{rel}: Telegram's colour of calls {m.group(0)} (task 094)")
+
+
+def call_colors_edited():
+    """The text files call_colors() edits."""
+    return tuple(dict.fromkeys((PALETTE,) + tuple(rel for rel, _, _ in CALL_COLORS_EDITS)))
 
 
 def main(argv=None):

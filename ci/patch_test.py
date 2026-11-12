@@ -749,6 +749,11 @@ DAMAGE += tuple((rel, s, s.replace("TranscribeButton", "TranscribeButton2")) for
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.GROUP_CALLS_E2E_EDITS)
 DAMAGE += tuple((rel, s, s[:-2] + "~" + s[-1]) for rel, head, tail, _, _ in patch.GROUP_CALLS_E2E_SPANS for s in (head, tail))
 DAMAGE += ((patch.LANG, patch.GROUP_CALLS_E2E_STRINGS_AFTER, patch.GROUP_CALLS_E2E_STRINGS_AFTER.replace("no longer", "not")),)
+# The colours of calls: every edit, damaged in the pinned upstream, and a
+# colour of calls upstream changed in Classic, stop the patch with the file's
+# name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CALL_COLORS_EDITS)
+DAMAGE += ((patch.PALETTE, "\ngroupCallMuted1: #0992ef;", "\ngroupCallMuted1: #0992ee;"),)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -998,8 +1003,10 @@ class UpstreamTest(unittest.TestCase):
                     if name != patch.THEME_COLORS:
                         self.assertEqual(pinned[name], patched[name])
                 before, after = (patch.palette_values(f[patch.THEME_COLORS].decode("utf-8")) for f in (pinned, patched))
+                # And the colours of calls (CALL_COLORS) of those the theme sets.
+                calls = {key: color for key, _, color in patch.CALL_COLORS if key in before and before[key] != color}
                 self.assertEqual({key: after[key] for key in after if after[key] != before[key]},
-                                 {key: color for key, color in people.items() if color})
+                                 {**{key: color for key, color in people.items() if color}, **calls})
         # The avatars of Saved Messages, Replies and My Notes: Classic and
         # Tinted take the palettes' sage; Day, Night and the bases refer to
         # the blue slot for the second colour (the day base for the first too)
@@ -1566,19 +1573,45 @@ class UpstreamTest(unittest.TestCase):
         # condition, on the _e2e every such call has.
         self.assertIn("| (_e2e ? (Flag::f_public_key | Flag::f_block) : Flag());\n", call)
         # A failing key counts once against the limit of rejoins, however
-        # many blocks of a batch fail with it.
-        self.assertIn("\t_e2e->failures() | rpl::take(1) | rpl::on_next([=] {\n", call)
-        self.assertIn("\t\tif (int(_e2eRejoins.size()) >= kE2ERejoinsLimit) {\n", call)
+        # many blocks of a batch fail with it; every rejoin with a new key
+        # goes by the rules of ADR 0060 §5: at most 3 in 5 minutes, after 0, 2
+        # and 5 seconds plus up to 1 at random, then the call ends.
+        self.assertIn("\t_e2e->failures() | rpl::take(1) | rpl::on_next([=] {\n"
+                      "\t\tcrl::on_main(this, [=] {\n\t\t\tscheduleE2ERejoin(u\"Got failure\"_q);\n", call)
+        self.assertNotIn("TdE2E: Got failure, scheduling rejoin!", call)
+        self.assertIn("\tif (index >= kE2ERejoinsLimit) {\n", call)
+        self.assertIn("\tconst auto delay = kE2ERejoinDelays[index]\n"
+                      "\t\t+ base::RandomIndex(int(kE2ERejoinJitter) + 1);\n", call)
+        for name, value in patch.E2E_REJOIN_RULES.items():
+            self.assertRegex(call, rf"\nconstexpr [\w:]+ {re.escape(name)} = {re.escape(value)};\n")
+        # GROUPCALL_FORBIDDEN on a write to the chain or a poll of it, a
+        # chain lagging behind the server and frames no one decrypts are
+        # reasons for one; a join refused on a changed chain is retried ten
+        # times at most.
+        self.assertEqual(call.count("scheduleE2ERejoin(type); // pluma: task 094\n"), 2)
+        self.assertEqual(call.count("scheduleE2ERejoin(error.type()); // pluma: task 094\n"), 1)
+        self.assertIn("\tif (lagging && now - lagging > kE2ELaggingPeriod) {\n", call)
+        self.assertIn("\t\t&& now - frames.failingSince >= kE2EUndecryptablePeriod\n", call)
+        self.assertIn("\t\t\t} else if (++_e2eChainRetries <= kE2EChainRetries) {\n", call)
         self.assertNotIn('value("stream")', call)
         self.assertNotIn("f_rtmp_stream", call)
-        # The report goes every 5 seconds once joined, over tgcalls' data channel.
-        self.assertIn("constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n", call)
-        self.assertIn("\t\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n", call)
-        self.assertIn("    void sendE2EStatus(std::string const &report);\n", tree.read(patch.TGCALLS_GROUP_H))
+        # The report goes every 5 seconds from each join, which numbers it
+        # from 1 again, over the data channel of the main connection while it
+        # is open.
+        self.assertIn("\t\t_e2eEncryptDecrypt->reset();\n\t\t}\n"
+                      "\t\t_e2eStatusTimer.setCallback([=] { sendE2EStatus(); });\n"
+                      "\t\t_e2eStatusTimer.callEach(kE2EStatusPeriod);\n", call)
+        self.assertIn("\t_instance->sendE2EStatus([=] {\n", call)
+        self.assertIn("    void sendE2EStatus(std::function<std::string()> makeReport);\n",
+                      tree.read(patch.TGCALLS_GROUP_H))
         group = tree.read(patch.TGCALLS_GROUP)
         self.assertIn("        if (!_isDataChannelOpen) {\n            return;\n        }\n"
-                      "        _networkManager->perform([report](GroupNetworkManager *networkManager) {\n"
-                      "            networkManager->sendDataChannelMessage(report);\n", group)
+                      "        auto report = makeReport();\n", group)
+        # No recording.
+        menu = tree.read(patch.GROUP_CALL_MENU)
+        self.assertIn("\tconst auto addEditRecording = false;\n", menu)
+        self.assertEqual(self.files[patch.GROUP_CALL_MENU].decode("utf-8").count("addEditRecording"), 2)
+        self.assertEqual(menu.count("addEditRecording"), 2)
         # Data::GroupCall tracks who left the chain for a chat's call too.
         data = tree.read(patch.DATA_GROUP_CALL)
         self.assertIn("\tif (!_videoStream) {\n\t\t_participantUpdates.events(\n", data)
@@ -1602,6 +1635,16 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(set(re.findall(r'u"(\w+)"_q', report)) - {"PlumaE2EStatus"},
                          set(patch.E2E_STATUS_FIELDS) | set(patch.E2E_STATUS_SENDER_FIELDS))
         self.assertIn('{ u"colibriClass"_q, u"PlumaE2EStatus"_q },', report)
+        for name, value in patch.E2E_STATUS_LIMITS.items():
+            self.assertIn(f"\nconstexpr auto {name} = {value};\n", api)
+        # Counters since the last report: takeFrames() clears them, but the
+        # epochs of the last frame encrypted and when each sender was last
+        # decrypted.
+        take = api[api.index("auto EncryptDecrypt::takeFrames() -> Frames {\n"):]
+        take = take[:take.index("\n}\n")]
+        self.assertEqual(re.findall(r"_frames\.(\w+)\.clear\(\)|_frames\.(\w+) = 0;", take),
+                         [("senders", ""), ("decryptEpochs", ""), ("unknownEpochs", ""), ("", "encrypted"),
+                          ("", "encryptFailed")])
 
     def test_group_calls_e2e_changes_nothing_else(self):
         """Every file differs from the patch without task 094 by the edits of
@@ -1670,13 +1713,144 @@ class UpstreamTest(unittest.TestCase):
         # A field more in the report, even with the edit that makes it.
         i, (rel, old, new) = next((i, e) for i, e in enumerate(patch.GROUP_CALLS_E2E_EDITS)
                                   if e[0] == patch.TDE2E_API and "QByteArray StatusReport(" in e[2])
-        more = new.replace('\t\t{ u"senders"_q, senders },\n', '\t\t{ u"senders"_q, senders },\n\t\t{ u"nonce"_q, 0 },\n')
+        more = new.replace('\t\t\t{ u"senders"_q, list },\n', '\t\t\t{ u"senders"_q, list },\n\t\t\t{ u"nonce"_q, 0 },\n')
         self.assertNotEqual(more, new)
         edits = patch.GROUP_CALLS_E2E_EDITS[:i] + ((rel, old, more),) + patch.GROUP_CALLS_E2E_EDITS[i + 1:]
         with self.subTest(report="a field more"), unittest.mock.patch.object(patch, "GROUP_CALLS_E2E_EDITS", edits):
             stops(patch.TDE2E_API, lambda t: t.replace(new, more), "E2E_STATUS_FIELDS")
         with self.subTest(cmake="rtmp"):
             stops(patch.CMAKE_APP, lambda t: t + "    calls/group/calls_group_rtmp.cpp\n", "RTMP stream")
+        # A limit of the report or a rule of a rejoin other than ADR 0060's,
+        # even with the edit that makes it.
+        for rel, old_value, new_value in ((patch.TDE2E_API, "constexpr auto kStatusMaxSenders = 100;\n",
+                                           "constexpr auto kStatusMaxSenders = 128;\n"),
+                                          (patch.GROUP_CALL, "constexpr auto kE2ERejoinsLimit = 3;\n",
+                                           "constexpr auto kE2ERejoinsLimit = 5;\n")):
+            i, (r, old, new) = next((i, e) for i, e in enumerate(patch.GROUP_CALLS_E2E_EDITS)
+                                    if e[0] == rel and old_value in e[2])
+            other = new.replace(old_value, new_value)
+            edits = patch.GROUP_CALLS_E2E_EDITS[:i] + ((r, old, other),) + patch.GROUP_CALLS_E2E_EDITS[i + 1:]
+            with self.subTest(limit=new_value), unittest.mock.patch.object(patch, "GROUP_CALLS_E2E_EDITS", edits):
+                stops(rel, lambda t: t.replace(new, other), "ADR 0060")
+        patch.verify(tree, c)
+
+    def test_call_colors(self):
+        """The colours of calls are Pluma's (task 094): the call palette in
+        every theme, the gradients of the one-to-one call by its state and
+        the volume of a member."""
+        tree, _ = self.run_patch()
+        day = patch.palette_values(tree.read(patch.PALETTE))
+        themes = {patch.PALETTE: day,
+                  patch.NIGHT_THEME: {**day, **patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))}}
+        for rel in patch.TELEGRAM_THEMES:
+            themes[rel] = {**day, **patch.palette_values(patch.zipped_colors(tree.read_bytes(rel), rel))}
+        for where, values in themes.items():
+            for key, _, pluma in patch.CALL_COLORS:
+                with self.subTest(theme=where, key=key):
+                    self.assertEqual(patch.resolve(values, key), pluma)
+        # Telegram's values were there before: in Classic, and in the themes
+        # that set the key (Telegram's Night answers in blue).
+        before = patch.palette_values(self.files[patch.PALETTE].decode("utf-8"))
+        for key, telegram, _ in patch.CALL_COLORS:
+            self.assertEqual(before.get(key), telegram, key)
+        night = patch.palette_values(patch.night_colors(self.files[patch.NIGHT_THEME]))
+        self.assertEqual(night["callAnswerBg"], "#488fc9")
+        self.assertEqual(night["callBg"], "#14191ff5")
+        # The one-to-one call: the gradient of its state where upstream
+        # filled callBgOpaque, chosen as Telegram's iOS app chooses it.
+        background = tree.read(patch.PANEL_BACKGROUND)
+        self.assertNotIn("p.fillRect(rect, st::callBgOpaque);", background)
+        self.assertIn("\tconst auto colors = own ? _colors->bg : StateColors(_state);\n", background)
+        for state in ("Connecting", "Connected", "Weak"):
+            for i in range(1, 5):
+                self.assertEqual(background.count(f"st::callBg{state}{i}->c"), 1, (state, i))
+        self.assertIn("\t\t_background->setState((state != State::Established)\n"
+                      "\t\t\t? BackgroundState::Connecting\n\t\t\t: (bars == 0)\n"
+                      "\t\t\t? BackgroundState::WeakSignal\n\t\t\t: BackgroundState::Connected);\n",
+                      tree.read(patch.CALLS_PANEL))
+        volume = tree.read(patch.VOLUME_ITEM)
+        for color in ("0xB97A55", "0xA86B4C", "0x7FA082", "0x9DBB9F"):
+            self.assertIn(f"Ui::ColorFromSerialized({color}),", volume)
+
+    def test_call_colors_change_nothing_else(self):
+        """Every file differs from the patch without Pluma's colours of calls
+        by those colours alone."""
+        # Without them the call palette is Telegram's blue, which
+        # verify_brand() stops too.
+        with unittest.mock.patch.object(patch, "call_colors"), \
+                unittest.mock.patch.object(patch, "verify_call_colors"), \
+                unittest.mock.patch.object(patch, "verify_brand"):
+            self.run_patch()
+        names = sorted(set(self.files) | self.written)
+        before = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
+        self.tearDown()
+        self.run_patch()
+        after = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
+        changed = sorted(rel for rel in names if before.get(rel) != after.get(rel))
+        pluma = {key: value for key, _, value in patch.CALL_COLORS}
+
+        def colors(rel, data):
+            return patch.palette_values(patch.night_colors(data) if rel == patch.NIGHT_THEME
+                                        else patch.zipped_colors(data, rel))
+        # The themes that set a key of calls; Day (day-blue) sets none.
+        themes = [rel for rel in (patch.NIGHT_THEME, *patch.TELEGRAM_THEMES)
+                  if any(pluma.get(key, value) != value for key, value in colors(rel, before[rel]).items())]
+        self.assertNotIn(patch.DAY_BLUE_THEME, themes)
+        self.assertEqual(changed, sorted(patch.call_colors_edited() + tuple(themes)))
+        for rel in patch.call_colors_edited():
+            text = before[rel].decode("utf-8")
+            if rel == patch.PALETTE:
+                text = patch.recolor(text, patch.call_colors_table(), rel)
+            for r, old, new in patch.CALL_COLORS_EDITS:
+                if r == rel:
+                    text = text.replace(old, new)
+            self.assertEqual(after[rel].decode("utf-8"), text, rel)
+        # The themes differ in the keys of calls they set, nothing else.
+        for rel in themes:
+            old, new = colors(rel, before[rel]), colors(rel, after[rel])
+            self.assertEqual(set(old), set(new), rel)
+            self.assertEqual({key for key in old if old[key] != new[key]},
+                             {key for key in old if key in pluma and old[key] != pluma[key]}, rel)
+
+    def test_call_colors_are_verified(self):
+        """verify() stops Telegram's colour of calls in any theme or source of
+        calls, a colour of calls not in CALL_COLORS, and an edit undone."""
+        tree, c = self.run_patch()
+        patch.verify_call_colors(tree)
+
+        def stops(rel, change, message):
+            self.written.add(rel)
+            data = tree.read_bytes(rel)
+            tree.write_bytes(rel, change(data))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_call_colors(tree)
+            finally:
+                tree.write_bytes(rel, data)
+
+        def text(f):
+            return lambda data: f(data.decode("utf-8")).encode("utf-8")
+
+        stops(patch.PALETTE, text(lambda t: t.replace("\ngroupCallBg: #2c3a2d;", "\ngroupCallBg: #1a2026;")),
+              "groupCallBg of calls is #1a2026")
+        stops(patch.PALETTE, text(lambda t: t.replace("\ncallBgWeak2: #a86b4c;", "\ncallBgWeak2: #f09536;")),
+              "callBgWeak2")
+        stops(patch.PALETTE, text(lambda t: t.replace("\ngroupCallMembersFg: #ffffff;", "\ngroupCallMembersFg: #61c0ff;")),
+              "groupCallMembersFg of calls is #61c0ff, not a colour of CALL_COLORS")
+        stops(patch.PALETTE, text(lambda t: t + "groupCallSpeaking: #8deb90;\n"), "groupCallSpeaking")
+        stops(patch.NIGHT_THEME, lambda data: patch.night_theme(patch.night_colors(data) + "callAnswerBg: #488fc9;\n"),
+              "callAnswerBg of calls is #488fc9")
+        base = patch.DAY_BASE_THEME
+        self.assertIn("\ngroupCallLive1: #6f8f72;", patch.zipped_colors(tree.read_bytes(base), base))
+        stops(base, lambda data: patch.with_colors(data, patch.zipped_colors(data, base).replace(
+            "\ngroupCallLive1: #6f8f72;", "\ngroupCallLive1: #0dcc39;")), "groupCallLive1")
+        for rel, old, new in patch.CALL_COLORS_EDITS:
+            with self.subTest(edit=new[:60]):
+                stops(rel, text(lambda t: t.replace(new, old)), "task 094")
+        for rel, hex_ in ((S + "/calls/calls_top_bar.cpp", "0x568FD6"), (S + "/calls/group/calls_group_panel.cpp", "#7664da"),
+                          (S + "/calls/calls.style", "#0992ef"), (S + "/ui/controls/call_mute_button.cpp", "0xf66464")):
+            with self.subTest(source=rel):
+                stops(rel, text(lambda t: t + f"// {hex_}\n"), "Telegram's colour of calls")
         patch.verify(tree, c)
 
     def test_transcribe_button(self):
@@ -2273,6 +2447,25 @@ class GroupCallsE2ETest(unittest.TestCase):
             self.assertNotIn("Telegram", value)
         self.assertEqual(re.findall(r"tr::(lng_pluma_\w+)", edits), list(patch.GROUP_CALLS_E2E_STRINGS))
 
+    def test_report_is_v1(self):
+        # The fields are those of the example of PlumaE2EStatus v1 in ADR 0060
+        # §5, all of them and no other.
+        example = json.loads(
+            '{"colibriClass":"PlumaE2EStatus","v":1,"seq":12,"height":41,"lastBlock":"9f3c0a1b2c3d4e5f",'
+            '"offset0":42,"offset1":17,"error":0,"sendEpochs":["9f3c0a1b2c3d4e5f"],'
+            '"decryptEpochs":["9f3c0a1b2c3d4e5f"],"unknownEpochs":[],"encrypted":250,"encryptFailed":0,'
+            '"senders":[{"user":1000002,"ok":248,"unknownEpoch":0,"tooOld":0,"duplicate":1,"failed":0,'
+            '"lastOkMs":40}]}')
+        self.assertEqual(set(example), set(patch.E2E_STATUS_FIELDS))
+        self.assertEqual(set(example["senders"][0]), set(patch.E2E_STATUS_SENDER_FIELDS))
+        self.assertEqual(patch.E2E_STATUS_LIMITS, {
+            "kStatusReportVersion": "1", "kStatusMaxEpochs": "15", "kStatusMaxUnknownEpochs": "8",
+            "kStatusMaxSenders": "100", "kStatusMaxSize": "16 * 1024"})
+        edits = "".join(new for _, _, new in patch.GROUP_CALLS_E2E_EDITS)
+        for name, value in {**patch.E2E_STATUS_LIMITS, **patch.E2E_REJOIN_RULES}.items():
+            self.assertEqual(len(re.findall(rf"\nconstexpr [\w:]+ {re.escape(name)} = {re.escape(value)};\n", edits)), 1,
+                             name)
+
     def test_report_fields(self):
         # No field of the report could carry a key, a nonce, the emoji or a
         # frame: the list is closed, and every field is a count, a height,
@@ -2281,6 +2474,62 @@ class GroupCallsE2ETest(unittest.TestCase):
         for field in patch.E2E_STATUS_FIELDS + patch.E2E_STATUS_SENDER_FIELDS:
             for word in ("key", "nonce", "emoji", "secret", "payload", "data"):
                 self.assertNotIn(word, field.lower(), field)
+
+
+class CallColorsTest(unittest.TestCase):
+    """The table of Pluma's colours of calls (task 094)."""
+
+    # The owner's gradients (2026-11-12) and the palette of task 017 of the
+    # server repository, the dark one first.
+    CONNECTING = ("#3a4a3c", "#4f6e52", "#2c3a2d", "#5b7a5e")
+    CONNECTED = ("#5b7a5e", "#6f8f72", "#4f6e52", "#7fa082")
+    WEAK = ("#8a5a44", "#a86b4c", "#7a4e3b", "#b97a55")
+    SAGE = ("#131513", "#232623", "#2c3a2d", "#36473a", "#9dbb9f", "#7fa082", "#b2ceb4", "#5b7a5e", "#6f8f72",
+            "#4f6e52", "#e3eae2")
+
+    def test_table(self):
+        keys = [key for key, _, _ in patch.CALL_COLORS]
+        self.assertEqual(len(keys), len(set(keys)))
+        new = {key: value for key, telegram, value in patch.CALL_COLORS if telegram is None}
+        gradients = {f"callBg{state}{i + 1}": colors[i] for state, colors in
+                     (("Connecting", self.CONNECTING), ("Connected", self.CONNECTED), ("Weak", self.WEAK))
+                     for i in range(4)}
+        self.assertEqual(new, gradients)
+        allowed = set(self.CONNECTING + self.CONNECTED + self.WEAK + self.SAGE)
+        for key, telegram, value in patch.CALL_COLORS:
+            with self.subTest(key=key):
+                self.assertRegex(value, r"^#[0-9a-f]{6}([0-9a-f]{2})?$")
+                self.assertTrue(patch.CALL_KEYS.fullmatch(key) and not patch.CALL_KEYS_OUTSIDE.fullmatch(key))
+                if telegram == value:
+                    # The answer, hang-up and leave buttons keep their colours.
+                    self.assertRegex(key, r"callAnswer\w+|callHangup\w+|groupCallLeave\w+")
+                else:
+                    self.assertIn(value[:7], allowed)
+                    self.assertFalse(patch.is_blue(value))
+                    self.assertNotIn(value[1:7], patch.TELEGRAM_BLUES)
+        # The gradients of Telegram's iOS app, as CallBackgroundLayer.swift
+        # 108-124 has them, are among Telegram's colours of calls.
+        for color in ("568FD6", "626ED5", "A667D5", "7664DA", "ACBD65", "459F8D", "53A4D1", "3E917A",
+                      "C0508D", "F09536", "CE5081", "FC7C4C"):
+            self.assertIn(color.lower(), patch.TELEGRAM_CALL_COLORS)
+
+    def test_theme_call_colors(self):
+        text = "windowBg: #ffffff;\ncallBg: #14191ff5; // popup\ngroupCallBg: groupCallMembersBg;\n"
+        result = patch.theme_call_colors(text, "theme")
+        self.assertEqual(result, "windowBg: #ffffff;\ncallBg: #2c3a2df2; // popup\ngroupCallBg: #2c3a2d;\n")
+        # A key the theme leaves out stays to Classic.
+        self.assertNotIn("callBgWeak1", result)
+        with self.assertRaisesRegex(patch.PatchError, "theme: 2 occurrences of 'callBg:'"):
+            patch.theme_call_colors(text + "callBg: #000000;\n", "theme")
+        # A new key upstream added to Classic stops the patch.
+        with self.assertRaisesRegex(patch.PatchError, "callBgWeak1 is there already"):
+            patch.recolor("callBgWeak1: #000000;\n", [("callBgWeak1", "-", "#8a5a44")], "palette")
+
+    def test_neutral(self):
+        for value in ("#ffffff", "#000000", "#aaabac", "#84888f", "#91979e", "#ffffff1f", "#222222"):
+            self.assertTrue(patch.is_neutral(value), value)
+        for value in ("#61c0ff", "#8deb90", "#5b7a5e", "#b97a55", "windowBg"):
+            self.assertFalse(patch.is_neutral(value), value)
 
 
 class ServiceAccountTest(unittest.TestCase):
