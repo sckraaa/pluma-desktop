@@ -4318,7 +4318,7 @@ def service_account_edited():
 #   which a conference keeps. On an empty chain the answer has no block and
 #   the join is the zero block (tde2e_api.cpp 288-296); two first joins race,
 #   the second gets CONF_WRITE_CHAIN_INVALID and asks again (joinFail,
-#   :1862-1870).
+#   :1863-1872).
 # - Members of the chain who left the call are removed from it, as a
 #   conference's are: Data::GroupCall tracks them for a chat's call too
 #   (data_group_call.cpp 71-96, checkStaleParticipants :233-255), the call
@@ -4348,9 +4348,13 @@ def service_account_edited():
 #   (lng_pluma_group_call_e2e_failed), not a loop of joins. A key counts
 #   once: tde2e's Call fires a failure for each block of a batch it fails to
 #   apply (tde2e_api.cpp 458-505). A rejoin of the transport (a duplicate
-#   ssrc, checkGroupCall) does not count, and a join refused with
-#   CONF_WRITE_CHAIN_INVALID asks for the last block again at most ten times
-#   in a row (joinFail, :1862-1870, retries it without end).
+#   ssrc, checkGroupCall) does not count. A join refused with
+#   CONF_WRITE_CHAIN_INVALID asks for the last block again and joins on it
+#   (joinFail, :1863-1872, retries it without end): it gives up after ten
+#   refusals in a row while the last block stays the same, a chain that
+#   stands, and after a hundred joins while it moves, the race of everyone
+#   joining again at once after a restart of the SFU, where the last of N
+#   loses up to N - 1 times in a row (the server's TestChainJoinsHerd).
 # - The status report of the key, PlumaE2EStatus v1 of ADR 0060 §5: every 5
 #   seconds from the join the call sends the SFU of the server, over the
 #   data channel tgcalls keeps to it on the main connection (which carries
@@ -4442,6 +4446,7 @@ E2E_REJOIN_RULES = {
     "kE2ELaggingPeriod": "12 * crl::time(1000)",
     "kE2EUndecryptablePeriod": "15 * crl::time(1000)",
     "kE2EChainRetries": "10",
+    "kE2EChainAttempts": "100",
     "kE2EStatusPeriod": "5 * crl::time(1000)",
 }
 
@@ -4464,13 +4469,18 @@ GROUP_CALLS_E2E_EDITS = (
      "\tstd::shared_ptr<TdE2E::EncryptDecrypt> _e2eEncryptDecrypt;\n"
      "\t// pluma: the rejoins with a new key in the period and the one waiting,\n"
      "\t// the timers of the status report and of the rules of a rejoin, the joins\n"
-     "\t// retried on a chain that changed meanwhile, and whether the key went to\n"
-     "\t// the server (task 094).\n"
+     "\t// refused on a chain that changed meanwhile (in a row on the same last\n"
+     "\t// block, and in all), the last block read for a join and the one the\n"
+     "\t// last refused join was on, and whether the key went to the server\n"
+     "\t// (task 094).\n"
      "\tstd::vector<crl::time> _e2eRejoins;\n"
      "\tbase::Timer _e2eRejoinTimer;\n"
      "\tbase::Timer _e2eStatusTimer;\n"
      "\tbase::Timer _e2eCheckTimer;\n"
      "\tint _e2eChainRetries = 0;\n"
+     "\tint _e2eChainAttempts = 0;\n"
+     "\tQByteArray _e2eChainBlock;\n"
+     "\tstd::optional<QByteArray> _e2eChainRefusedOn;\n"
      "\tbool _e2eKeySent = false;\n"),
     (GROUP_CALL,
      "constexpr auto kShortPollChainBlocksPerRequest = 50;\n",
@@ -4481,7 +4491,8 @@ GROUP_CALLS_E2E_EDITS = (
      "// to kE2ERejoinJitter at random; sub-chain 0 lagging behind the server for\n"
      "// kE2ELaggingPeriod, or no frame decrypted for kE2EUndecryptablePeriod, are\n"
      "// reasons for one, checked each kE2ECheckPeriod. A join refused because the\n"
-     "// chain changed meanwhile is retried at most kE2EChainRetries times in a row.\n"
+     "// chain changed meanwhile is retried until kE2EChainRetries refusals in a row\n"
+     "// on the same last block, and at most kE2EChainAttempts joins in all.\n"
      "constexpr auto kE2ERejoinsLimit = 3;\n"
      "constexpr auto kE2ERejoinsPeriod = 5 * 60 * crl::time(1000);\n"
      "constexpr crl::time kE2ERejoinDelays[] = { 0, 2 * crl::time(1000), 5 * crl::time(1000) };\n"
@@ -4490,6 +4501,7 @@ GROUP_CALLS_E2E_EDITS = (
      "constexpr auto kE2EUndecryptablePeriod = 15 * crl::time(1000);\n"
      "constexpr auto kE2ECheckPeriod = crl::time(1000);\n"
      "constexpr auto kE2EChainRetries = 10;\n"
+     "constexpr auto kE2EChainAttempts = 100;\n"
      "constexpr auto kE2EStatusPeriod = 5 * crl::time(1000);\n"
      "static_assert(std::size(kE2ERejoinDelays) == kE2ERejoinsLimit);\n"),
     # The answer to a join is never a broadcast stream.
@@ -4744,6 +4756,8 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\t// again, the first report goes in kE2EStatusPeriod and the rules of a\n"
      "\t\t// rejoin are checked from now (task 094, ADR 0060 §5).\n"
      "\t\t_e2eChainRetries = 0;\n"
+     "\t\t_e2eChainAttempts = 0;\n"
+     "\t\t_e2eChainRefusedOn = std::nullopt;\n"
      "\t\tif (_e2eEncryptDecrypt) {\n"
      "\t\t\t_e2eEncryptDecrypt->reset();\n"
      "\t\t}\n"
@@ -4764,18 +4778,36 @@ GROUP_CALLS_E2E_EDITS = (
      "\t}\n",
      "\tif (_e2e) {\n"
      "\t\tif (error.startsWith(u\"CONF_WRITE_CHAIN_INVALID\"_q)) {\n"
-     "\t\t\t// pluma: the chain changed meanwhile; asked for again at most\n"
-     "\t\t\t// kE2EChainRetries times in a row, then it is the error of a join\n"
-     "\t\t\t// (task 094, ADR 0060 §5).\n"
+     "\t\t\t// pluma: another join took the height first; the last block is\n"
+     "\t\t\t// read again and joined on (task 094, ADR 0060 §5). Refusals count\n"
+     "\t\t\t// against kE2EChainRetries only in a row on the same last block, a\n"
+     "\t\t\t// chain that stands; while it moves, as when everyone joins again\n"
+     "\t\t\t// after a restart of the SFU, a join is retried up to\n"
+     "\t\t\t// kE2EChainAttempts times. Then it is the error of a join.\n"
      "\t\t\tif (!_id) {\n"
      "\t\t\t\thangup();\n"
      "\t\t\t\treturn;\n"
-     "\t\t\t} else if (++_e2eChainRetries <= kE2EChainRetries) {\n"
+     "\t\t\t}\n"
+     "\t\t\tif (_e2eChainRefusedOn != _e2eChainBlock) {\n"
+     "\t\t\t\t_e2eChainRetries = 0;\n"
+     "\t\t\t}\n"
+     "\t\t\t_e2eChainRefusedOn = _e2eChainBlock;\n"
+     "\t\t\tif (++_e2eChainRetries < kE2EChainRetries\n"
+     "\t\t\t\t&& ++_e2eChainAttempts < kE2EChainAttempts) {\n"
      "\t\t\t\trefreshLastBlockAndJoin();\n"
      "\t\t\t\treturn;\n"
      "\t\t\t}\n"
      "\t\t}\n"
      "\t}\n"),
+    # The last block a join is made on, which joinFail() compares (task 094).
+    (GROUP_CALL,
+     "\t\t_e2e->refreshLastBlock0({});\n",
+     "\t\t_e2e->refreshLastBlock0({});\n"
+     "\t\t_e2eChainBlock = QByteArray(); // pluma: task 094\n"),
+    (GROUP_CALL,
+     "\t\t\t\t_e2e->refreshLastBlock0(TdE2E::Block{ blocks.back().v });\n",
+     "\t\t\t\t_e2e->refreshLastBlock0(TdE2E::Block{ blocks.back().v });\n"
+     "\t\t\t\t_e2eChainBlock = blocks.back().v; // pluma: task 094\n"),
     # GROUPCALL_FORBIDDEN on a write to the chain or a poll of it: a rejoin by
     # the rules (task 094).
     (GROUP_CALL,

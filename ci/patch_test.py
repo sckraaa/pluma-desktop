@@ -1586,13 +1586,24 @@ class UpstreamTest(unittest.TestCase):
             self.assertRegex(call, rf"\nconstexpr [\w:]+ {re.escape(name)} = {re.escape(value)};\n")
         # GROUPCALL_FORBIDDEN on a write to the chain or a poll of it, a
         # chain lagging behind the server and frames no one decrypts are
-        # reasons for one; a join refused on a changed chain is retried ten
-        # times at most.
+        # reasons for one.
         self.assertEqual(call.count("scheduleE2ERejoin(type); // pluma: task 094\n"), 2)
         self.assertEqual(call.count("scheduleE2ERejoin(error.type()); // pluma: task 094\n"), 1)
         self.assertIn("\tif (lagging && now - lagging > kE2ELaggingPeriod) {\n", call)
         self.assertIn("\t\t&& now - frames.failingSince >= kE2EUndecryptablePeriod\n", call)
-        self.assertIn("\t\t\t} else if (++_e2eChainRetries <= kE2EChainRetries) {\n", call)
+        # A refused join counts against the limit only on the same last block
+        # as the refusal before it: while the chain moves, a hundred joins.
+        self.assertIn("\t\t\tif (_e2eChainRefusedOn != _e2eChainBlock) {\n\t\t\t\t_e2eChainRetries = 0;\n\t\t\t}\n"
+                      "\t\t\t_e2eChainRefusedOn = _e2eChainBlock;\n"
+                      "\t\t\tif (++_e2eChainRetries < kE2EChainRetries\n"
+                      "\t\t\t\t&& ++_e2eChainAttempts < kE2EChainAttempts) {\n"
+                      "\t\t\t\trefreshLastBlockAndJoin();\n", call)
+        self.assertIn("\t\t_e2e->refreshLastBlock0({});\n\t\t_e2eChainBlock = QByteArray(); // pluma: task 094\n", call)
+        self.assertIn("\t\t\t\t_e2e->refreshLastBlock0(TdE2E::Block{ blocks.back().v });\n"
+                      "\t\t\t\t_e2eChainBlock = blocks.back().v; // pluma: task 094\n", call)
+        self.assertIn("\t\t_e2eChainRetries = 0;\n\t\t_e2eChainAttempts = 0;\n"
+                      "\t\t_e2eChainRefusedOn = std::nullopt;\n", call)
+        self.assertNotIn("<= kE2EChainRetries", call)
         self.assertNotIn('value("stream")', call)
         self.assertNotIn("f_rtmp_stream", call)
         # The report goes every 5 seconds from each join, which numbers it
