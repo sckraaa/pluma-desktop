@@ -533,7 +533,8 @@ DAMAGE = (
     (patch.SPECIAL_CONFIG, 'constexpr auto kPublicKey = "', 'constexpr auto kSpecialConfigKey = "'),
     (patch.PROXY_DATA, "return (type == Type::Socks5 || type == Type::Mtproto)", "return (type == Type::Mtproto)"),
     # Updates: the keys, the file names of the feed, the universal package
-    # for armac, the version compared, the empty MTProto checker.
+    # for armac, the version compared, the empty MTProto checker, the wait
+    # between checks.
     (patch.UPDATE_ROOT, "MCowBQYDK2VwAyEARgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR0=", "MCowBQYDK2VwAyEARgB8IFZWA08OzifsbPQ3SRdGbON2ecPVsMm1Qo7QNR1="),
     (patch.UPDATE_MANIFEST, '"manifest_version":2', '"manifest_version":3'),
     (patch.UPDATE_CHECKER, "\t\t\tstd::make_unique<MtpChecker>(\n", "\t\t\tstd::make_unique<MtpUpdateChecker>(\n"),
@@ -543,6 +544,7 @@ DAMAGE = (
     (patch.UPDATE_CHANNEL, "\t\tquint32(AppVersion),\n", "\t\tquint32(AppVersion + 1),\n"),
     (patch.UPDATE_UNPACK, "\t\t|| sourceSize != compressedSize\n", ""),
     (patch.UPDATE_VERIFY, '\t} else if (key == "armac") {\n\t\treturn Target{ Os::Mac, Arch::Arm };\n', '\t} else if (key == "armac") {\n\t\treturn Target{ Os::Mac, Arch::X86 };\n'),
+    (patch.CONFIG_H, "\tUpdateDelayConstPart = 8 * 3600,", "\tUpdateDelayConstPart = 12 * 3600,"),
     (patch.CMAKE_OPTIONS, "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)\n",
      "    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE=1)\n"),
     (patch.APPLICATION, "\t\tInvokeQueued(this, [] { RegisterUrlScheme(); });\n", "\t\tInvokeQueued(this, [] { RegisterUrlSchemes(); });\n"),
@@ -828,6 +830,17 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('const WCHAR *appURL = L"https://pluma.chat";', win)
         self.assertNotIn('L"Telegram Desktop"', win)
         self.assertIn('L"Failed to update Pluma :(', win)
+        config_h = tree.read(patch.CONFIG_H)
+        self.assertIn("\tUpdateDelayConstPart = 50 * 60, // pluma: 50 minutes min time between update check requests\n", config_h)
+        self.assertIn("\tUpdateDelayRandPart = 20 * 60, // pluma: 20 minutes max - min time between update check requests\n", config_h)
+        self.assertNotIn("8 * 3600", config_h)
+
+    def test_update_delay_is_verified(self):
+        """verify() stops on upstream's 8 to 16 hours between checks."""
+        tree, c = self.run_patch()
+        tree.write(patch.CONFIG_H, tree.read(patch.CONFIG_H).replace(patch.UPDATE_DELAY_NEW, patch.UPDATE_DELAY_OLD))
+        with self.assertRaisesRegex(patch.PatchError, "every hour"):
+            patch.verify(tree, c)
 
     def test_update_keys_are_verified(self):
         """verify() looks at the keys on their own: Telegram's left in the

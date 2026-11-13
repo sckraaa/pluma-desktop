@@ -41,6 +41,7 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - The Windows package is raw LZMA from Python's `lzma`, which ends with an end marker the SDK's `LzmaUncompress` leaves unread: the app no longer insists that every byte is read (`core/update_unpack.cpp`); the payload is authenticated before this.
   - The Updater looks for `Pluma.app` on macOS, and on Windows writes the uninstall entry under Pluma's GUID and name, not Telegram's (next to an installed Telegram Desktop it would have rewritten that one).
   - The updater compares Pluma's build number, `PlumaBuild` (the run number of CI), where upstream compares `AppVersion`: in `/current4`, in `RunningUpdateVersion` and in the downloaded update. `AppVersion` stays upstream's, which tdesktop keys its local data and settings migrations by. A release is `7.4.1.NNNNN`, its package `t*upd<N>`.
+  - The updater asks the feed every hour or so, every 50 to 70 minutes: 50 minutes and a random part of up to 20 (`UpdateDelayConstPart` and `UpdateDelayRandPart` of `config.h`), where upstream waits 8 to 16 hours. A release on the site reaches running apps within about an hour; an app whose last check is older than that asks at its next start.
   - A development build asks `https://127.0.0.1/dl/desktop` and carries a root key whose private half nobody keeps ([`config/dev/update`](config/dev/update)): it never updates itself.
 - **Brand:** the name, the icons and the colours of Pluma ([Branding](#branding)).
 
