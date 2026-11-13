@@ -9,7 +9,8 @@
 # The rest keeps upstream's values: file type colours, red and orange alerts,
 # greys. People's colours are those of every theme (IDENTITY_COLORS in
 # ci/patch.py): blue sage, cyan teal with Telegram's cyan names, the rest
-# Telegram's.
+# Telegram's. The colours of the call screens are those of every theme too
+# (CALL_COLORS in ci/patch.py).
 #
 # Background #131513, text #e8ece8, secondary text #9aa29a; accent #9dbb9f
 # with #131513 on it (buttons, switches, counters); soft accent #7fa082 and
@@ -194,10 +195,6 @@ mainMenuCoverBg: #276899 -> #2c3a2d
 mainMenuCloudBg: #185680 -> #3a4c3c
 mediaPlayerDisabledFg: #9dd1ef -> #8fa891
 mediaviewTextLinkFg: #70baf5 -> #b2ceb4
-callBg: #14191ff5 -> #0f100ff5
-callAnswerBg: #488fc9 -> #66c95b
-callAnswerRipple: #4286c2 -> #52b149
-callAnswerBgOuter: #3f95eb26 -> #50eb4126
 callCancelFg: #536271 -> #5d675d
 callCancelRipple: #435363 -> #4e564e
 callBarBg: #366693 -> #3a4c3c
