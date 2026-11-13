@@ -616,6 +616,12 @@ class Config:
 #   settings migrations by it, and a Pluma version above a later upstream's
 #   would make the next upstream misread them. The release is 7.4.1.NNNNN, the
 #   package's version is <N> << 32, its inner version <N>.
+# - The updater asks the feed every hour or so, where upstream waits 8 to 16
+#   hours (config.h 27-28, read by Updater::start, update_checker.cpp
+#   1726-1739): a release on the site reaches the apps within about an hour
+#   (the owner's decision of 2026-11-13). The wait is 50 minutes and a
+#   random part of up to 20, so that the apps do not ask all at once; an app
+#   whose last check is older than that asks at its next start.
 UPDATE_CHECKER = SOURCES + "/core/update_checker.cpp"
 UPDATE_CHANNEL = SOURCES + "/core/update_channel.h"
 UPDATE_VERIFY = SOURCES + "/core/update_verify.cpp"
@@ -669,6 +675,10 @@ UPDATE_LZMA_OLD = ("\tif (status != SZ_OK\n"
 UPDATE_LZMA_NEW = ("\t// pluma: the package was verified before this; the end marker of\n"
                    "\t// ci/pack_update.py's LZMA stays unread.\n"
                    "\tif (status != SZ_OK || resultSize != size_t(originalSize)) {\n")
+UPDATE_DELAY_OLD = ("\tUpdateDelayConstPart = 8 * 3600, // 8 hour min time between update check requests\n"
+                    "\tUpdateDelayRandPart = 8 * 3600, // 8 hour max - min time between update check requests\n")
+UPDATE_DELAY_NEW = ("\tUpdateDelayConstPart = 50 * 60, // pluma: 50 minutes min time between update check requests\n"
+                    "\tUpdateDelayRandPart = 20 * 60, // pluma: 20 minutes max - min time between update check requests\n")
 UPDATE_RUNNING_OLD = "\t\tquint32(AppVersion),\n\t\tCanaryBuildCounter);\n"
 UPDATE_RUNNING_NEW = "\t\tquint32(PlumaBuild), // pluma: Pluma's build number\n\t\tCanaryBuildCounter);\n"
 # Where the updater compares versions: upstream's text, Pluma's.
@@ -759,6 +769,7 @@ def patch_updates(tree, c):
     tree.replace(UPDATE_CHANNEL, UPDATE_RUNNING_OLD, UPDATE_RUNNING_NEW)
     for old, new in UPDATE_VERSION_EDITS:
         tree.replace(UPDATE_CHECKER, old, new)
+    tree.replace(CONFIG_H, UPDATE_DELAY_OLD, UPDATE_DELAY_NEW)
 
 
 def verify_updates(tree, c):
@@ -795,6 +806,9 @@ def verify_updates(tree, c):
             raise PatchError(f"{UPDATE_CHECKER}: the updater does not compare PlumaBuild ({new.strip()})")
     if "startImplementation(&_mtpImplementation, nullptr);" not in checker:
         raise PatchError(f"{UPDATE_CHECKER}: the empty MTProto checker is not there")
+    config_h = tree.read(CONFIG_H)
+    if config_h.count(UPDATE_DELAY_NEW) != 1 or "8 * 3600" in config_h:
+        raise PatchError(f"{CONFIG_H}: the updater does not ask the feed every hour")
 
 
 # --- the patch ---------------------------------------------------------------
