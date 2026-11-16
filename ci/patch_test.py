@@ -209,6 +209,8 @@ class ConfigTest(unittest.TestCase):
             {"app": {"PLUMA_UPDATE_PREFIX": "https://td.telegram.org"}},
             {"build": -1},
             {"build": 100000},
+            {"dev_cdn_http": "pluma.chat"},
+            {"dev_cdn_http": "http://127.0.0.1"},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
@@ -756,6 +758,12 @@ DAMAGE += ((patch.LANG, patch.GROUP_CALLS_E2E_STRINGS_AFTER, patch.GROUP_CALLS_E
 # name.
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CALL_COLORS_EDITS)
 DAMAGE += ((patch.PALETTE, "\ngroupCallMuted1: #0992ef;", "\ngroupCallMuted1: #0992ee;"),)
+# The HTTPS CDN (task 107): every edit, damaged in the pinned upstream, and
+# cdn_supported asked for in another source, stop the patch with the file's
+# name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CDN_HTTPS_EDITS)
+DAMAGE += ((S + "/storage/file_download_web.cpp", "namespace {\n",
+            "namespace {\n// MTPupload_GetFile::Flag::f_cdn_supported\n"),)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -1876,6 +1884,122 @@ class UpstreamTest(unittest.TestCase):
             with self.subTest(source=rel):
                 stops(rel, text(lambda t: t + f"// {hex_}\n"), "Telegram's colour of calls")
         patch.verify(tree, c)
+
+    def test_cdn_https(self):
+        tree, c = self.run_patch()
+        self.assertIsNone(c.dev_cdn_http)
+        header, source = tree.read(patch.CDN_HTTPS_H), tree.read(patch.CDN_HTTPS)
+        self.assertEqual(header, patch.CDN_HTTPS_HEADER)
+        self.assertEqual(source, patch.cdn_https_source(None))
+        # The token of the server (ADR 0071): "PLH1", 32 bytes of id, 4 of
+        # expiry, the address; https:// alone in a build for the real server.
+        self.assertIn('constexpr auto kTokenTag = "PLH1";\n', source)
+        self.assertIn("constexpr auto kTokenHeaderSize = 4 + 32 + 4;\n", source)
+        self.assertIn('\tif (result.startsWith(u"https://"_q)) {\n\t\treturn result;\n\t}\n\treturn QString();\n', source)
+        self.assertNotIn("http://", source.replace("https://", ""))
+        self.assertNotIn(patch.CDN_HTTPS_DEV_MARK.strip(), source)
+        # The contract of the clients: one range a request, 206 alone, no
+        # cache, no redirects, the timeouts, one retry, the pause.
+        for s in ('u"bytes=%1-%2"_q', 'u"bytes %1-%2/%3"_q', '"Accept-Encoding", "identity"', '"User-Agent", "Pluma"',
+                  "QNetworkRequest::AlwaysNetwork", "QNetworkRequest::ManualRedirectPolicy",
+                  "constexpr auto kSendTimeout = 5 * crl::time(1000);",
+                  "constexpr auto kSilenceTimeout = 10 * crl::time(1000);",
+                  "constexpr auto kRequestTimeout = 30 * crl::time(1000);",
+                  "constexpr auto kRetryDelayMin = crl::time(300);", "constexpr auto kRetryDelayMax = crl::time(800);",
+                  "constexpr auto kPauseAfterFailures = 3;", "constexpr auto kPause = 10 * 60 * crl::time(1000);",
+                  "(code == 403 || code == 410)", "code != 206", "(type == MTP::ProxyData::Type::Socks5)"):
+            self.assertEqual(source.count(s), 1, s)
+        self.assertNotIn("QNetworkDiskCache", source)
+        # The whole request's timeout is not retried; a body the network
+        # broke off is, though its status came.
+        self.assertEqual(source.count("stop(requestId, reply, Stop::TooSlow);"), 1)
+        self.assertEqual(source.count("stop(requestId, reply, Stop::Timeout);"), 1)
+        self.assertIn("\t\t} else if (!code\n\t\t\t|| (error != QNetworkReply::NoError\n"
+                      "\t\t\t\t&& error < QNetworkReply::ContentAccessDenied)) {\n", source)
+        manager = tree.read(patch.DOWNLOAD_MANAGER)
+        # A wrong hash among the checked blocks falls back from that block:
+        # the offset the hashes were asked for may be in the file already.
+        hashes_done = manager[manager.index("void DownloadMtprotoTask::getCdnFileHashesDone("):]
+        hashes_done = hashes_done[:hashes_done.index("\n}\n")]
+        self.assertIn("\t\t\t\tfallBackToMaster(uncheckedData);\n", hashes_done)
+        self.assertEqual(hashes_done.count("fallBackToMaster(requestData)"), 1)
+        self.assertIn("\t\t\tMTP_flags(cdnHttpsSupported()\n\t\t\t\t? MTPupload_GetFile::Flag::f_cdn_supported\n", manager)
+        self.assertIn("constexpr auto kMaxCdnHttpsRefreshes = 3;\n", manager)
+        self.assertNotIn("MTPupload_ReuploadCdnFile(\n", manager[manager.index("void DownloadMtprotoTask::cdnHttpsFailed("):])
+        session = tree.read(patch.SESSION_PRIVATE)
+        self.assertIn('\t\t\tMTP_string("pluma_cdn"),\n\t\t\tMTP_jsonNumber(MTP_double(1))),\n', session)
+        self.assertIn('\t\t\tMTP_string("tz_offset"),\n', session)
+        cmake = tree.read(patch.CMAKE_APP)
+        self.assertIn("    storage/download_cdn_https.cpp\n    storage/download_cdn_https.h\n"
+                      "    storage/download_manager_mtproto.cpp\n", cmake)
+        self.assertIn("\t\treturn fullSize();\n", tree.read(patch.FILE_DOWNLOAD_MTPROTO_H))
+        self.assertIn("\t\treturn _size;\n", tree.read(patch.STREAMING_LOADER_MTPROTO_H))
+
+    def test_cdn_https_of_a_development_build(self):
+        dev = patch.load_env(ROOT / "config/dev/server.env")
+        tree, c = self.run_patch(dev_cdn_http=dev["PLUMA_SERVER_IPV4"])
+        self.assertEqual(c.dev_cdn_http, "127.0.0.1")
+        source = tree.read(patch.CDN_HTTPS)
+        self.assertEqual(source, patch.cdn_https_source("127.0.0.1"))
+        self.assertIn('\tif (result.startsWith(u"http://"_q) && url.host() == u"127.0.0.1"_q) {\n\t\treturn result;\n', source)
+        # The same tree is no build for the real server.
+        server = config()
+        with self.assertRaisesRegex(patch.PatchError, "download_cdn_https.cpp.*plain HTTP"):
+            patch.verify_cdn_https(tree, server)
+        # Only configure.sh dev passes the address.
+        script = (ROOT / "ci/configure.sh").read_text()
+        dev_case = script[script.index("dev)\n"):script.index("server)\n")]
+        self.assertIn("\tdev_cdn_http=$PLUMA_SERVER_IPV4\n", dev_case)
+        self.assertEqual(script.count("dev_cdn_http="), 1)
+        self.assertIn('${dev_cdn_http:+--dev-cdn-http "$dev_cdn_http"}', script)
+
+    def test_cdn_https_is_verified(self):
+        """verify() stops a tree where an edit of task 107 is undone, the new
+        files differ or are not built, another place asks for cdn_supported
+        or cancels a request in MTProto alone, or a log line of downloads
+        writes the address, the token or the key."""
+        tree, c = self.run_patch()
+        patch.verify_cdn_https(tree, c)
+
+        def stops(rel, text, message):
+            patched = tree.read(rel)
+            self.written.add(rel)
+            tree.write(rel, text(patched))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_cdn_https(tree, c)
+            finally:
+                tree.write(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.CDN_HTTPS_EDITS):
+            with self.subTest(edit=i):
+                stops(rel, lambda t: t.replace(new, old), "task 107")
+        with self.subTest(source="plain HTTP"):
+            stops(patch.CDN_HTTPS, lambda _: patch.cdn_https_source("127.0.0.1"), "plain HTTP")
+        with self.subTest(source="changed"):
+            stops(patch.CDN_HTTPS, lambda t: t.replace("kPauseAfterFailures = 3;", "kPauseAfterFailures = 5;"),
+                  "not the HTTPS CDN")
+            stops(patch.CDN_HTTPS_H, lambda t: t + "\n", "not the HTTPS CDN")
+        for rel, s, _ in patch.CDN_HTTPS_GUARDS:
+            with self.subTest(guard=s):
+                stops(rel, lambda t: t + "// " + s + "\n", "another place decides")
+        with self.subTest(flag="elsewhere"):
+            stops(S + "/apiwrap.cpp", lambda t: t + "// MTPupload_GetFile::Flag::f_cdn_supported\n",
+                  "outside the HTTPS CDN")
+        for line in ('\tLOG(("CDN Error: %1").arg(request.url));\n',
+                     '\tLOG(("CDN Error: %1").arg(QString::fromLatin1(_cdnToken.toHex())));\n',
+                     '\tDEBUG_LOG(("CDN: %1").arg(_cdnHttpsUrl));\n'):
+            with self.subTest(log=line):
+                head = "void DownloadMtprotoTask::loadPart(int sessionIndex) {\n"
+                stops(patch.DOWNLOAD_MANAGER, lambda t: t.replace(head, head + line), "log line")
+        patch.verify(tree, c)
+
+    def test_cdn_https_files_are_new(self):
+        """The patch stops when upstream comes with a file of the new names."""
+        self.written.add(patch.CDN_HTTPS)
+        (self.root / patch.CDN_HTTPS).write_text("// upstream\n")
+        with self.assertRaisesRegex(patch.PatchError, "download_cdn_https.cpp.*upstream has a file"):
+            self.run_patch()
 
     def test_transcribe_button(self):
         """Voice and round messages have upstream's transcribe button again

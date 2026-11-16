@@ -30,6 +30,9 @@ dev)
 	update_prefix=https://127.0.0.1/dl/desktop
 	update_keys=config/dev/update
 	data_name=$PLUMA_DATA_NAME
+	# The HTTPS CDN of the development stand may be plain HTTP at the
+	# development server (task 107); never in a build for the real one.
+	dev_cdn_http=$PLUMA_SERVER_IPV4
 	;;
 server)
 	# Half a configuration would build a client that cannot sign in.
@@ -56,5 +59,5 @@ $python -I ci/patch.py --source "$dir" --upstream upstream.env --app config/app.
 	--server-ipv4 "$SERVER_IPV4" --server-port "$SERVER_PORT" --server-ipv6 "${SERVER_IPV6:-}" \
 	--rsa-public-key "$tmp/key.pem" --update-keys "$update_keys" \
 	--build "${PLUMA_BUILD:-0}" ${update_prefix:+--update-prefix "$update_prefix"} \
-	${data_name:+--data-name "$data_name"}
+	${data_name:+--data-name "$data_name"} ${dev_cdn_http:+--dev-cdn-http "$dev_cdn_http"}
 echo "configure: $target build"
