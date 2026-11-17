@@ -770,6 +770,14 @@ DAMAGE += ((S + "/storage/file_download_web.cpp", "namespace {\n",
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.BUSINESS_EDITS)
 DAMAGE += tuple((rel, kept, kept[:-2] + "~" + kept[-1]) for rel, kept in patch.BUSINESS_KEPT)
 
+# The picker on MapLibre (task 112): every edit, the geocoder's wait for a
+# token and upstream's page, damaged in the pinned upstream, stop the patch
+# with the file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.LOCATION_PICKER_EDITS)
+DAMAGE += ((patch.MAPBOX_GEOCODER_GUARD[0], patch.MAPBOX_GEOCODER_GUARD[1],
+            patch.MAPBOX_GEOCODER_GUARD[1].replace("!result && ", "")),
+           (patch.PICKER_JS, "\tflySpeed: 2.4,\n", "\tflySpeed: 2.5,\n"))
+
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
                  "no checkout of the pinned upstream (ci/fetch-upstream.sh sparse)")
@@ -2006,6 +2014,87 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(patch.PatchError, "download_cdn_https.cpp.*upstream has a file"):
             self.run_patch()
 
+    def test_maplibre_picker(self):
+        tree, _ = self.run_patch()
+        for rel, data in patch.maplibre_files().items():
+            self.assertEqual(tree.read_bytes(rel), data, rel)
+        self.assertEqual(tree.read_bytes(patch.PICKER_JS), (patch.PICKER_DIR / "picker.js").read_bytes())
+        self.assertEqual(tree.read_bytes(patch.PICKER_HTML + "/picker.css"),
+                         self.files[patch.PICKER_HTML + "/picker.css"])
+        source = tree.read(patch.LOCATION_PICKER)
+        self.assertNotIn("api.mapbox.com", source)
+        self.assertNotIn("mapbox-gl", source)
+        # The page loads MapLibre from the resources, by names the data
+        # handler serves (location_picker.cpp, ^[a-zA-Z\\.\\-_0-9]+$).
+        for name in ("maplibre-gl.js", "maplibre-gl.css"):
+            self.assertEqual(source.count(f'"/location/{name}"'), 1, name)
+            self.assertRegex(name, r"^[a-zA-Z.\-_0-9]+\.(js|css)$")
+        self.assertIn("\t\t&& !MapsBase(config.mapsToken).isEmpty(); // pluma: the server's maps\n", source)
+        self.assertIn("\t\t\t.dataRequestRedirectHost = MapsBase(_config.mapsToken).host(\n\t\t\t\tQUrl::FullyEncoded),\n",
+                      source)
+        self.assertIn("\t\t&& result.port() == -1\n", source)
+        self.assertIn("\tconst auto params = \"base: '\" + EscapeForScriptString(base) + \"'\"\n"
+                      "\t\t+ \", style: '\" + EscapeForScriptString(style) + \"'\"\n"
+                      "\t\t+ \", center: \" + center\n", source)
+        # A map that cannot start closes the webview before the error shows,
+        # and the button that would call into it goes first.
+        error = source[source.index('} else if (event == u"error"_q) {'):]
+        error = error[:error.index('} else if (event == u"move_start"_q) {')]
+        self.assertLess(error.index("delete base::take(_mapButton);"), error.index("base::take(_webview);"))
+        self.assertLess(error.index("base::take(_webview);"), error.index("showWebviewError();"))
+        # Every place that opens the picker passes the server's styles.
+        for rel in (patch.BOT_ATTACH_WEB_VIEW, patch.IV_EDITOR_SESSION, patch.CREATE_POLL_BOX, patch.BUSINESS_LOCATION):
+            self.assertEqual(tree.read(rel).count('u"pluma_maps_styles"_q'), 1, rel)
+        self.assertIn("\tstd::vector<QString> mapsStyles;", tree.read(patch.LOCATION_PICKER_H))
+        qrc = tree.read(patch.PICKER_QRC)
+        for _, name, _ in patch.MAPLIBRE_FILES:
+            self.assertEqual(qrc.count(f'<file alias="{name}">../../picker_html/{name}</file>'), 1, name)
+        # The geocoder of Mapbox stays, behind the token the server does not send.
+        self.assertEqual(tree.read(patch.GEO_LOCATION).count("api.mapbox.com"), 1)
+
+    def test_maplibre_picker_is_verified(self):
+        """verify() stops a tree where an edit of task 112 is undone, a file of
+        the page differs, another place makes the picker's config or names
+        api.mapbox.com, or the geocoder of Mapbox no longer waits for a token."""
+        tree, c = self.run_patch()
+        patch.verify_maplibre_picker(tree)
+
+        def stops(rel, text, message):
+            patched = tree.read_bytes(rel)
+            self.written.add(rel)
+            tree.write_bytes(rel, text(patched.decode("utf-8")).encode("utf-8"))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_maplibre_picker(tree)
+            finally:
+                tree.write_bytes(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.LOCATION_PICKER_EDITS):
+            with self.subTest(edit=i):
+                stops(rel, lambda t: t.replace(new, old), "task 112")
+        for rel in patch.maplibre_files():
+            with self.subTest(file=rel):
+                stops(rel, lambda t: t + "\n", "not the page")
+        with self.subTest(page="mapbox"):
+            stops(patch.PICKER_HTML + "/picker.css", lambda t: t + "/* mapbox */\n", "names Mapbox")
+        with self.subTest(place="another config"):
+            stops(S + "/history/history_widget.cpp",
+                  lambda t: t + '\t\t.mapsToken = map[u"maps"_q],\n', "config of the location picker")
+        with self.subTest(place="another Mapbox"):
+            stops(S + "/apiwrap.cpp", lambda t: t + '// https://api.mapbox.com/\n', "api.mapbox.com is named")
+        with self.subTest(geocoder="no token"):
+            rel, s = patch.MAPBOX_GEOCODER_GUARD
+            stops(rel, lambda t: t.replace(s, s.replace("!result && !token.isEmpty()", "!result")), "geo token")
+        patch.verify(tree, c)
+
+    def test_maplibre_files_are_new(self):
+        """The patch stops when upstream comes with a file of the page's names."""
+        rel = patch.PICKER_HTML + "/maplibre-gl.js"
+        self.written.add(rel)
+        (self.root / rel).write_text("// upstream\n")
+        with self.assertRaisesRegex(patch.PatchError, "maplibre-gl.js.*upstream has a file"):
+            self.run_patch()
+
     def test_transcribe_button(self):
         """Voice and round messages have upstream's transcribe button again
         (task 080), which a view-once message does not show; no source is
@@ -2860,6 +2949,58 @@ class ServiceAccountTest(unittest.TestCase):
 
     def test_lf_only_covers_the_edits(self):
         self.assertEqual(patch.service_account_edited(), (patch.LANG,))
+
+
+
+class MapLibrePickerTest(unittest.TestCase):
+    """The files of the page (location-picker/), without upstream."""
+
+    def test_files_are_the_pinned_release(self):
+        files = patch.maplibre_files()
+        self.assertEqual(sorted(files), sorted([patch.PICKER_JS] + [patch.PICKER_HTML + "/" + name
+                                                                    for _, name, _ in patch.MAPLIBRE_FILES]))
+        js = files[patch.PICKER_HTML + "/maplibre-gl.js"].decode("utf-8")
+        self.assertIn(f"/maplibre-gl-js/blob/v{patch.MAPLIBRE_VERSION}/LICENSE.txt", js[:300])
+        # One file that carries its worker (MapLibre GL JS 5), not the
+        # module of version 6 with a worker beside it.
+        self.assertIn("maplibregl.setWorkerUrl(window.URL.createObjectURL(new Blob(", js)
+        self.assertIn("Redistributions in binary form must reproduce the above copyright notice",
+                      files[patch.PICKER_HTML + "/maplibre-gl-license.txt"].decode("utf-8"))
+        self.assertIn(f"MapLibre GL JS {patch.MAPLIBRE_VERSION}", (patch.PICKER_DIR / "README.md").read_text())
+
+    def test_changed_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            copy = pathlib.Path(d)
+            for source, _, _ in patch.MAPLIBRE_FILES:
+                (copy / source).write_bytes((patch.PICKER_DIR / source).read_bytes())
+            (copy / "picker.js").write_bytes((patch.PICKER_DIR / "picker.js").read_bytes())
+            with open(copy / "maplibre-gl.css", "ab") as f:
+                f.write(b"\n")
+            with unittest.mock.patch.object(patch, "PICKER_DIR", copy), \
+                    self.assertRaisesRegex(patch.PatchError, "maplibre-gl.css: not MapLibre GL JS 5.24.0"):
+                patch.maplibre_files()
+
+    def test_page(self):
+        js = (patch.PICKER_DIR / "picker.js").read_text()
+        self.assertNotIn("mapbox", js.lower())
+        # The functions the app calls (location_picker.cpp) and the events it
+        # takes, upstream's and the error of a map that cannot start.
+        for s in ("\tinit: function (params) {\n", "\tupdateStyles: function (styles) {\n",
+                  "\tnarrowTo: function (point) {\n", "\tsend: function () {\n",
+                  "event: 'move_start'", "event: 'move_end'", "event: 'send'", "event: 'error'"):
+            self.assertIn(s, js)
+        self.assertIn("if (location.hostname != 'desktop-app-resource') {", js)
+        self.assertIn("transformRequest: LocationPicker.request,", js)
+        self.assertIn("attributionControl: { compact: false },", js)
+
+    def test_upstream_paths(self):
+        self.assertIn(patch.PICKER_HTML, patch.UPSTREAM_PATHS)
+        self.assertIn(patch.PICKER_QRC, patch.UPSTREAM_PATHS)
+
+    def test_lf_only_covers_the_edits(self):
+        self.assertEqual(set(patch.maplibre_picker_edited()),
+                         {patch.LOCATION_PICKER, patch.LOCATION_PICKER_H, patch.BOT_ATTACH_WEB_VIEW,
+                          patch.IV_EDITOR_SESSION, patch.CREATE_POLL_BOX, patch.BUSINESS_LOCATION, patch.PICKER_QRC})
 
 
 if __name__ == "__main__":
