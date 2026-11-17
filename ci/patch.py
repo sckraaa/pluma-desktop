@@ -7124,6 +7124,16 @@ CDN_HTTPS_EDITS = (
      "    storage/download_cdn_https.h\n"
      "    storage/download_manager_mtproto.cpp\n"
      "    storage/download_manager_mtproto.h\n"),
+    # The loader's QNetworkAccessManager brings QtNetwork's DNS lookups into
+    # the static Windows link, and they need the system's dnsapi.
+    (CMAKE_APP,
+     "        target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)\n"
+     "    endif()\n",
+     "        target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)\n"
+     "    endif()\n"
+     "\n"
+     "    # pluma: QtNetwork's DNS lookups of the HTTPS CDN loader (task 107).\n"
+     "    target_link_libraries(Telegram PRIVATE dnsapi)\n"),
 )
 
 # What the edits leave, each exactly so many times: another request for
@@ -7141,6 +7151,7 @@ CDN_HTTPS_GUARDS = (
     (DOWNLOAD_MANAGER, "changeCDNParams(", 3),
     (SESSION_PRIVATE, '"pluma_cdn"', 1),
     (CMAKE_APP, "storage/download_cdn_https.", 2),
+    (CMAKE_APP, "target_link_libraries(Telegram PRIVATE dnsapi)", 1),
 )
 # Sources that may set cdn_supported: the download task alone.
 CDN_HTTPS_FLAG = "f_cdn_supported"
