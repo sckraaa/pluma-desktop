@@ -470,7 +470,8 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, update_keys, build=0):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, update_keys, build=0,
+                 dev_cdn_http=""):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -571,6 +572,16 @@ class Config:
         self.fingerprint = key_fingerprint(self.n, self.e)
         if self.fingerprint in TELEGRAM_FINGERPRINTS:
             raise PatchError("RSA key: this is Telegram's key")
+
+        # A development build (ci/configure.sh dev) also takes the HTTPS CDN
+        # in plain HTTP from its server (task 107); a build for the real
+        # server never does.
+        self.dev_cdn_http = None
+        if dev_cdn_http:
+            try:
+                self.dev_cdn_http = str(ipaddress.ip_address(dev_cdn_http))
+            except ValueError:
+                raise PatchError(f"development HTTP host {dev_cdn_http!r} is not an IP address")
 
 
 # --- updates -----------------------------------------------------------------
@@ -2507,7 +2518,7 @@ def check_upstream(tree, c):
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
                 + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
-                + call_colors_edited()):
+                + call_colors_edited() + cdn_https_edited()):
         tree.lf_only(rel)
 
 
@@ -2681,6 +2692,7 @@ def patch(tree, c):
 
     rebrand(tree, c)
     premium_for_everyone(tree)
+    business(tree)
     transcription(tree)
     no_ai_editor(tree)
     # After rebrand(): the texts name the real Telegram.
@@ -2690,6 +2702,7 @@ def patch(tree, c):
     group_calls_e2e(tree)
     # After rebrand(): it writes the themes first.
     call_colors(tree)
+    cdn_https(tree, c)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2831,6 +2844,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
+    verify_business(tree)
     verify_transcription(tree)
     verify_no_ai_editor(tree)
     verify_login_code_screens(tree)
@@ -2838,6 +2852,7 @@ def verify(tree, c):
     verify_service_account(tree)
     verify_group_calls_e2e(tree)
     verify_call_colors(tree)
+    verify_cdn_https(tree, c)
 
 
 
@@ -2856,9 +2871,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/main/main_session.cpp",
      "bool Session::premiumBadgesShown() const {\n\treturn supportMode() || premiumPossible();\n}\n",
      "bool Session::premiumBadgesShown() const {\n\t// pluma: no star by a name: everybody has Premium (ADR 0041).\n\treturn supportMode();\n}\n"),
-    ("Telegram/SourceFiles/settings/sections/settings_main.cpp",
-     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\tif (!session->premiumPossible()) {\n",
-     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\t// pluma: the section is the purchase; everybody has Premium.\n\tif (!session->premiumCanBuy()) {\n"),
     ("Telegram/SourceFiles/window/window_main_menu.cpp",
      "void MainMenu::setupSetEmojiStatus() {\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n",
      "void MainMenu::setupSetEmojiStatus() {\n\t// pluma: the server does not serve account.updateEmojiStatus.\n\t_setEmojiStatus->hide();\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n"),
@@ -2920,6 +2932,63 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Telegram Business --------------------------------------------------------
+# Task 105 (ADR 0067): the server serves Telegram Business to everybody with
+# Premium (everybody, ADR 0041). The Business button of the settings sits in
+# BuildPremiumSection, which task 071 hid whole while Premium cannot be bought;
+# now only the purchase buttons (Premium, Stars, TON) are hidden and Business
+# shows, with the section's divider. The gift button keeps upstream's own
+# premiumCanBuy check. The Business section, for a Premium user, opens the
+# editors; its "Do not hide ads" switch (BuildSponsoredSection, with its
+# search entry) is not added: Pluma has no ads and does not serve
+# account.toggleSponsoredMessages. The settings/business/do-not-hide-ads link
+# then only opens the section (checkHighlightControl skips a null button).
+SETTINGS_BUSINESS = f"{SOURCES}/settings/sections/settings_business.cpp"
+BUSINESS_EDITS = (
+    (SETTINGS_MAIN,
+     "\tbuilder.addDivider();\n\tbuilder.addSkip();\n\n\tbuilder.addPremiumButton({\n\t\t.id = u\"main/premium\"_q,\n",
+     "\tbuilder.addDivider();\n\tbuilder.addSkip();\n\n"
+     "\t// pluma: Premium, Stars and TON are the purchase; everybody has Premium\n"
+     "\t// (ADR 0041). Business stays (ADR 0067).\n"
+     "\tif (session->premiumCanBuy()) {\n"
+     "\tbuilder.addPremiumButton({\n\t\t.id = u\"main/premium\"_q,\n"),
+    (SETTINGS_MAIN,
+     "\t});\n\n\tbuilder.addButton({\n\t\t.id = u\"main/business\"_q,\n",
+     "\t});\n\t} // pluma: the purchase buttons end here\n\n\tbuilder.addButton({\n\t\t.id = u\"main/business\"_q,\n"),
+    (SETTINGS_BUSINESS,
+     "void BuildSponsoredSection(\n\t\tSectionBuilder &builder,\n",
+     "// pluma: no ads to hide (ADR 0067), the section is not added.\n"
+     "[[maybe_unused]] void BuildSponsoredSection(\n\t\tSectionBuilder &builder,\n"),
+    (SETTINGS_BUSINESS,
+     "\t}\n\n\tBuildSponsoredSection(builder, state);\n}\n",
+     "\t}\n\t// pluma: no ads to hide (ADR 0067), no sponsored section.\n}\n"),
+)
+# Upstream's text the edits rely on: the section shows for a Premium user, and
+# the business button is the one after the purchase buttons.
+BUSINESS_KEPT = (
+    (SETTINGS_MAIN, "\tif (!session->premiumPossible()) {\n\t\treturn;\n\t}\n"),
+    (SETTINGS_MAIN, "\t\t.title = tr::lng_business_title(),\n\t\t.icon = { .icon = &st::menuIconShop },\n"
+                    "\t\t.onClick = [=] { showOther(BusinessId()); },\n"),
+)
+
+
+def business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the Business edit of task 105 is not there")
+    for rel, kept in BUSINESS_KEPT:
+        if tree.read(rel).count(kept) != 1:
+            raise PatchError(f"{rel}: the Business button is not upstream's; read it")
+    if "BuildSponsoredSection(builder" in tree.read(SETTINGS_BUSINESS):
+        raise PatchError(f"{SETTINGS_BUSINESS}: the ads switch is still added")
 
 
 # --- Transcription of voice and round messages ---------------------------------
@@ -6067,6 +6136,1076 @@ def call_colors_edited():
     return tuple(dict.fromkeys((PALETTE,) + tuple(rel for rel, _, _ in CALL_COLORS_EDITS)))
 
 
+# --- HTTPS CDN (task 107) ------------------------------------------------------
+# Large files of the Pluma server come over HTTPS from its CDN (task 107, ADR
+# 0071 of the server repository). The server marks nothing by cdn_supported,
+# which tdesktop sets on every cloud file (download_manager_mtproto.cpp
+# 580-582): a session that can take the HTTPS CDN says so with pluma_cdn = 1
+# in the params of initConnection (prepareInitParams, session_private.cpp
+# 549-570, beside tz_offset). The server then answers upload.getFile with
+# upload.fileCdnRedirect whose file_token is "PLH1" | id (32 bytes) | expiry
+# (uint32, big-endian) | the URL (UTF-8, to the end); the key, the IV and the
+# hashes come in the redirect and from upload.getCdnFileHashes of the master,
+# as for Telegram's CDN. The client fetches the encrypted blocks itself and
+# decrypts and checks them as upstream does for upload.getCdnFile. The edits
+# (lines of the pinned tdesktop):
+# - storage/download_cdn_https.{h,cpp}, new: CdnHttpsLoader, one
+#   QNetworkAccessManager in its own thread, as WebLoadManager keeps it
+#   (file_download_web.cpp 154-169), with the results on the main thread
+#   (crl::on_main). A request is GET of one block, "Range: bytes=a-b", no
+#   cache (AlwaysNetwork; the manager has no cache), no redirects, no
+#   cookies, "Accept-Encoding: identity", "User-Agent: Pluma". It takes only
+#   206 with exactly "Content-Range: bytes a-b/total" of the block and the
+#   file's size, and a body of b - a + 1 bytes. Timeouts: 5 seconds to send
+#   the request (requestSent), 10 seconds of silence (setTransferTimeout), 30
+#   seconds for the whole request. A network error (a body broken off
+#   included), a timeout or a 5xx is retried once after 300 to 800 ms;
+#   TLS and the whole request's timeout are not. Its ids are negative, so
+#   that they never meet the ids of MTProto requests (GetNextRequestId,
+#   mtp_instance.cpp 45-51, counts up from 1).
+# - The HTTPS CDN is allowed while no proxy is on or the proxy is SOCKS5 or
+#   HTTP, which carry the app's HTTP too (Sandbox::refreshGlobalProxy,
+#   core/sandbox.cpp 714-731); an MTProto or WEB proxy would leave it going
+#   around the proxy (the owner's decision of 2026-11-16). Three transport
+#   failures in a row stop asking for it in the whole app for 10 minutes.
+# - DownloadMtprotoTask (download_manager_mtproto.{h,cpp}): cdn_supported
+#   only while the HTTPS CDN is allowed, this download has not fallen back
+#   and the size of the file is known (mtpFileLoader's fullSize,
+#   LoaderMtproto's size). switchToCDN (982-992) takes a "PLH1" token as the
+#   HTTPS address and makes no session to the CDN's datacenter; a fresh
+#   address for the same key keeps what is on the way. sendRequest (519-528)
+#   sends the HTTPS request for a block while the address is there. The
+#   decryption and the hash check of cdnPartLoaded (685-721) serve both, as
+#   cdnBytesReceived: a block reaches the file only with its hash, asked of
+#   the master (upload.getCdnFileHashes) when the redirect did not bring it.
+# - 403 or 410 asks the master for a fresh address (getFile with
+#   cdn_supported), at most 3 times a download. Anything else, a wrong hash
+#   included (cancelOnFail upstream, 710-714, 768-773, 790-796), falls back:
+#   the rest of the download, and the blocks that wait for their hashes,
+#   from the master without cdn_supported; the blocks already in the file
+#   stay. upload.reuploadCdnFile is never asked for HTTPS.
+# - cancelRequest (898-909) and the resend of changeCDNParams (1033-1035)
+#   cancel an HTTPS request in the loader, not in MTProto.
+# A development build (ci/configure.sh dev, --dev-cdn-http) also takes plain
+# http:// to the development server alone; verify_cdn_https() stops a build
+# for the real server that has it.
+DOWNLOAD_MANAGER = SOURCES + "/storage/download_manager_mtproto.cpp"
+DOWNLOAD_MANAGER_H = SOURCES + "/storage/download_manager_mtproto.h"
+FILE_DOWNLOAD_MTPROTO_H = SOURCES + "/storage/file_download_mtproto.h"
+STREAMING_LOADER_MTPROTO_H = SOURCES + "/media/streaming/media_streaming_loader_mtproto.h"
+SESSION_PRIVATE = SOURCES + "/mtproto/session_private.cpp"
+CDN_HTTPS = SOURCES + "/storage/download_cdn_https.cpp"
+CDN_HTTPS_H = SOURCES + "/storage/download_cdn_https.h"
+
+CDN_HTTPS_HEADER = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#pragma once
+
+#include "base/weak_ptr.h"
+
+#include <QtNetwork/QNetworkReply>
+
+class QNetworkAccessManager;
+
+namespace Storage {
+
+enum class CdnHttpsError {
+\tRefresh, // 403 or 410: the address expired, the master gives a new one.
+\tTransport, // The network, a timeout, TLS, a 5xx after the retry.
+\tResponse, // Any other answer, or the block cannot go over HTTPS now.
+};
+
+// Blocks of large files from the HTTPS CDN of the Pluma server (task 107 of
+// the server repository). The address comes in the file_token of
+// upload.fileCdnRedirect; the key, the IV and the hashes over MTProto.
+class CdnHttpsLoader final : public base::has_weak_ptr {
+public:
+\tusing Done = Fn<void(mtpRequestId, QByteArray)>;
+\tusing Fail = Fn<void(mtpRequestId, CdnHttpsError)>;
+
+\tCdnHttpsLoader();
+\t~CdnHttpsLoader();
+
+\t[[nodiscard]] static std::shared_ptr<CdnHttpsLoader> Instance();
+
+\t// Main thread: whether a download may ask the master for the HTTPS CDN
+\t// now, and what came of the last request.
+\t[[nodiscard]] static bool Allowed();
+\tstatic void ReportSuccess();
+\tstatic void ReportTransportFailure();
+
+\t// The address in a file_token of the Pluma server ("PLH1"), or an empty
+\t// one when the token is malformed or the address is not allowed.
+\t[[nodiscard]] static bool IsHttpsToken(const QByteArray &token);
+\t[[nodiscard]] static QString UrlFromToken(const QByteArray &token);
+
+\t// Main thread. The block [offset, offset + limit) of a file of total
+\t// bytes, cut at its end; done or fail come on the main thread unless
+\t// the request is cancelled first.
+\t[[nodiscard]] mtpRequestId get(
+\t\tconst QString &url,
+\t\tint64 offset,
+\t\tint limit,
+\t\tint64 total,
+\t\tDone done,
+\t\tFail fail);
+\tvoid cancel(mtpRequestId requestId);
+
+private:
+\tstruct Request {
+\t\tQString url;
+\t\tint64 offset = 0;
+\t\tint limit = 0;
+\t\tint64 total = 0;
+\t};
+\tenum class Stop {
+\t\tNone,
+\t\tTimeout,
+\t\tTooSlow,
+\t\tTooLong,
+\t};
+\tstruct Sent {
+\t\tRequest request;
+\t\tQPointer<QNetworkReply> reply;
+\t\tbool retried = false;
+\t\tbool started = false;
+\t\tStop stopped = Stop::None;
+\t};
+\tstruct Handlers {
+\t\tDone done;
+\t\tFail fail;
+\t};
+\tusing Result = std::variant<QByteArray, CdnHttpsError>;
+
+\t// Worker thread.
+\tvoid send(mtpRequestId requestId, Request request, bool retried);
+\t[[nodiscard]] Sent *findSent(
+\t\tmtpRequestId requestId,
+\t\tnot_null<QNetworkReply*> reply);
+\tvoid stop(
+\t\tmtpRequestId requestId,
+\t\tnot_null<QNetworkReply*> reply,
+\t\tStop reason);
+\tvoid finished(mtpRequestId requestId, not_null<QNetworkReply*> reply);
+\tvoid resend(mtpRequestId requestId);
+\tvoid abort(mtpRequestId requestId);
+\tvoid clear();
+\tvoid queueResult(mtpRequestId requestId, Result result);
+
+\t// Main thread.
+\tvoid deliver(mtpRequestId requestId, Result &&result);
+
+\tQThread _thread;
+\tstd::unique_ptr<QNetworkAccessManager> _network;
+
+\t// Main thread.
+\tbase::flat_map<mtpRequestId, Handlers> _handlers;
+
+\t// Worker thread.
+\tbase::flat_map<mtpRequestId, Sent> _sent;
+
+};
+
+} // namespace Storage
+"""
+
+CDN_HTTPS_DEV_MARK = "@DEV_HTTP@\n"
+CDN_HTTPS_SOURCE = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#include "storage/download_cdn_https.h"
+
+#include "base/random.h"
+#include "core/application.h"
+#include "core/core_settings.h"
+#include "mtproto/mtproto_proxy_data.h"
+
+#include <QtCore/QTimer>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QtNetwork/QNetworkRequest>
+
+namespace Storage {
+namespace {
+
+// The file_token of the Pluma server's redirect: "PLH1", the id of the
+// file (32 bytes), the expiry (uint32, big-endian) and the address (UTF-8)
+// to the end.
+constexpr auto kTokenTag = "PLH1";
+constexpr auto kTokenHeaderSize = 4 + 32 + 4;
+
+constexpr auto kSendTimeout = 5 * crl::time(1000);
+constexpr auto kSilenceTimeout = 10 * crl::time(1000);
+constexpr auto kRequestTimeout = 30 * crl::time(1000);
+constexpr auto kRetryDelayMin = crl::time(300);
+constexpr auto kRetryDelayMax = crl::time(800);
+constexpr auto kPauseAfterFailures = 3;
+constexpr auto kPause = 10 * 60 * crl::time(1000);
+
+std::weak_ptr<CdnHttpsLoader> GlobalLoader;
+
+// Main thread.
+int TransportFailures = 0;
+crl::time PausedTill = 0;
+mtpRequestId LastRequestId = 0;
+
+[[nodiscard]] mtpRequestId NextRequestId() {
+\t// Negative: the ids of MTProto requests are positive.
+\tLastRequestId = (LastRequestId
+\t\t<= std::numeric_limits<mtpRequestId>::min() / 2)
+\t\t? -1
+\t\t: (LastRequestId - 1);
+\treturn LastRequestId;
+}
+
+// The HTTPS CDN goes through the proxy of the app (Sandbox::
+// refreshGlobalProxy): a SOCKS5 or HTTP proxy carries it, with an MTProto
+// or WEB proxy it would go around the proxy.
+[[nodiscard]] bool ProxyAllows() {
+\tif (!Core::IsAppLaunched()) {
+\t\treturn false;
+\t}
+\tconst auto &settings = Core::App().settings().proxy();
+\tif (!settings.isEnabled()) {
+\t\treturn true;
+\t}
+\tconst auto type = settings.selected().type;
+\treturn (type == MTP::ProxyData::Type::Socks5)
+\t\t|| (type == MTP::ProxyData::Type::Http);
+}
+
+// The logs name the host alone: the address carries the signature.
+[[nodiscard]] QString HostOf(const QString &url) {
+\treturn QUrl(url).host();
+}
+
+} // namespace
+
+CdnHttpsLoader::CdnHttpsLoader()
+: _network(std::make_unique<QNetworkAccessManager>()) {
+\t// No cache: the manager has none, and every request asks the network.
+\t// No redirects: any answer but 206 is refused.
+\t_network->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
+\t_network->setTransferTimeout(int(kSilenceTimeout));
+\t_network->moveToThread(&_thread);
+\tQObject::connect(&_thread, &QThread::finished, [=] {
+\t\tclear();
+\t\t_network = nullptr;
+\t});
+\t_thread.start();
+}
+
+CdnHttpsLoader::~CdnHttpsLoader() {
+\t_thread.quit();
+\t_thread.wait();
+}
+
+std::shared_ptr<CdnHttpsLoader> CdnHttpsLoader::Instance() {
+\tauto result = GlobalLoader.lock();
+\tif (!result) {
+\t\tGlobalLoader = result = std::make_shared<CdnHttpsLoader>();
+\t}
+\treturn result;
+}
+
+bool CdnHttpsLoader::Allowed() {
+\treturn (crl::now() >= PausedTill) && ProxyAllows();
+}
+
+void CdnHttpsLoader::ReportSuccess() {
+\tTransportFailures = 0;
+}
+
+void CdnHttpsLoader::ReportTransportFailure() {
+\tif (++TransportFailures < kPauseAfterFailures) {
+\t\treturn;
+\t}
+\tTransportFailures = 0;
+\tPausedTill = crl::now() + kPause;
+\tLOG(("CDN Info: %1 HTTPS failures in a row, "
+\t\t"downloads go to the master for %2 minutes."
+\t\t).arg(kPauseAfterFailures
+\t\t).arg(kPause / (60 * crl::time(1000))));
+}
+
+bool CdnHttpsLoader::IsHttpsToken(const QByteArray &token) {
+\treturn token.startsWith(kTokenTag);
+}
+
+QString CdnHttpsLoader::UrlFromToken(const QByteArray &token) {
+\tif (!IsHttpsToken(token) || token.size() <= kTokenHeaderSize) {
+\t\treturn QString();
+\t}
+\tconst auto raw = token.mid(kTokenHeaderSize);
+\tconst auto result = QString::fromUtf8(raw);
+\tconst auto url = QUrl(result, QUrl::StrictMode);
+\tif (result.toUtf8() != raw
+\t\t|| !url.isValid()
+\t\t|| url.host().isEmpty()
+\t\t|| !url.userInfo().isEmpty()) {
+\t\treturn QString();
+\t}
+\tif (result.startsWith(u"https://"_q)) {
+\t\treturn result;
+\t}
+@DEV_HTTP@
+\treturn QString();
+}
+
+mtpRequestId CdnHttpsLoader::get(
+\t\tconst QString &url,
+\t\tint64 offset,
+\t\tint limit,
+\t\tint64 total,
+\t\tDone done,
+\t\tFail fail) {
+\tconst auto requestId = NextRequestId();
+\t_handlers.emplace(
+\t\trequestId,
+\t\tHandlers{ std::move(done), std::move(fail) });
+\tif (!ProxyAllows() || limit <= 0 || offset < 0 || offset >= total) {
+\t\t// The proxy is one that does not carry it now, or the block is not
+\t\t// of the file: the download goes on from the master.
+\t\tcrl::on_main(this, [=] {
+\t\t\tdeliver(requestId, CdnHttpsError::Response);
+\t\t});
+\t\treturn requestId;
+\t}
+\tconst auto request = Request{ url, offset, limit, total };
+\tInvokeQueued(_network.get(), [=] {
+\t\tsend(requestId, request, false);
+\t});
+\treturn requestId;
+}
+
+void CdnHttpsLoader::cancel(mtpRequestId requestId) {
+\tif (_handlers.remove(requestId)) {
+\t\tInvokeQueued(_network.get(), [=] {
+\t\t\tabort(requestId);
+\t\t});
+\t}
+}
+
+void CdnHttpsLoader::deliver(mtpRequestId requestId, Result &&result) {
+\tconst auto i = _handlers.find(requestId);
+\tif (i == end(_handlers)) {
+\t\treturn;
+\t}
+\tconst auto handlers = std::move(i->second);
+\t_handlers.erase(i);
+\tif (const auto bytes = std::get_if<QByteArray>(&result)) {
+\t\thandlers.done(requestId, std::move(*bytes));
+\t} else {
+\t\thandlers.fail(requestId, std::get<CdnHttpsError>(result));
+\t}
+}
+
+void CdnHttpsLoader::send(
+\t\tmtpRequestId requestId,
+\t\tRequest request,
+\t\tbool retried) {
+\tconst auto last = std::min(
+\t\trequest.offset + request.limit,
+\t\trequest.total) - 1;
+\tauto http = QNetworkRequest(QUrl(request.url));
+\thttp.setRawHeader(
+\t\t"Range",
+\t\tu"bytes=%1-%2"_q.arg(request.offset).arg(last).toUtf8());
+\thttp.setRawHeader("Accept-Encoding", "identity");
+\thttp.setRawHeader("User-Agent", "Pluma");
+\thttp.setAttribute(
+\t\tQNetworkRequest::CacheLoadControlAttribute,
+\t\tQNetworkRequest::AlwaysNetwork);
+\thttp.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
+\thttp.setAttribute(
+\t\tQNetworkRequest::CookieLoadControlAttribute,
+\t\tQNetworkRequest::Manual);
+\thttp.setAttribute(
+\t\tQNetworkRequest::CookieSaveControlAttribute,
+\t\tQNetworkRequest::Manual);
+\tconst auto reply = _network->get(http);
+\t_sent[requestId] = Sent{ request, reply, retried };
+\tconst auto length = last - request.offset + 1;
+\t// The request went out, or the answer began, in time.
+\tconst auto started = [=] {
+\t\tif (const auto sent = findSent(requestId, reply)) {
+\t\t\tsent->started = true;
+\t\t}
+\t};
+\tQObject::connect(reply, &QNetworkReply::requestSent, reply, started);
+\tQObject::connect(reply, &QNetworkReply::metaDataChanged, reply, started);
+\tQObject::connect(reply, &QNetworkReply::downloadProgress, reply, [=](
+\t\t\tqint64 received,
+\t\t\tqint64) {
+\t\tstarted();
+\t\tif (received > length) {
+\t\t\tstop(requestId, reply, Stop::TooLong);
+\t\t}
+\t});
+\tQObject::connect(reply, &QNetworkReply::finished, reply, [=] {
+\t\tfinished(requestId, reply);
+\t});
+\tQTimer::singleShot(int(kSendTimeout), reply, [=] {
+\t\tconst auto sent = findSent(requestId, reply);
+\t\tif (sent && !sent->started) {
+\t\t\tstop(requestId, reply, Stop::Timeout);
+\t\t}
+\t});
+\tQTimer::singleShot(int(kRequestTimeout), reply, [=] {
+\t\tstop(requestId, reply, Stop::TooSlow);
+\t});
+}
+
+auto CdnHttpsLoader::findSent(
+\tmtpRequestId requestId,
+\tnot_null<QNetworkReply*> reply)
+-> Sent* {
+\tconst auto i = _sent.find(requestId);
+\treturn (i != end(_sent) && i->second.reply == reply.get())
+\t\t? &i->second
+\t\t: nullptr;
+}
+
+void CdnHttpsLoader::stop(
+\t\tmtpRequestId requestId,
+\t\tnot_null<QNetworkReply*> reply,
+\t\tStop reason) {
+\tif (const auto sent = findSent(requestId, reply)) {
+\t\tsent->stopped = reason;
+\t\treply->abort(); // finished() follows at once.
+\t}
+}
+
+void CdnHttpsLoader::finished(
+\t\tmtpRequestId requestId,
+\t\tnot_null<QNetworkReply*> reply) {
+\tconst auto sent = findSent(requestId, reply);
+\tif (!sent) {
+\t\treturn;
+\t}
+\treply->deleteLater();
+\tsent->reply = nullptr;
+\tconst auto request = sent->request;
+\tconst auto status = reply->attribute(
+\t\tQNetworkRequest::HttpStatusCodeAttribute);
+\tconst auto code = status.isValid() ? status.toInt() : 0;
+\tconst auto error = reply->error();
+\tauto retry = false;
+\tauto result = [&]() -> Result {
+\t\tif (sent->stopped == Stop::TooLong) {
+\t\t\treturn CdnHttpsError::Response;
+\t\t} else if (sent->stopped == Stop::TooSlow) {
+\t\t\t// The whole request is out of time: no retry.
+\t\t\treturn CdnHttpsError::Transport;
+\t\t} else if (sent->stopped == Stop::Timeout) {
+\t\t\tretry = true;
+\t\t\treturn CdnHttpsError::Transport;
+\t\t} else if (!code
+\t\t\t|| (error != QNetworkReply::NoError
+\t\t\t\t&& error < QNetworkReply::ContentAccessDenied)) {
+\t\t\t// No answer, or one broken off by the network, the proxy or
+\t\t\t// the silence timeout; TLS is not mended by a retry.
+\t\t\tretry = (error != QNetworkReply::SslHandshakeFailedError);
+\t\t\treturn CdnHttpsError::Transport;
+\t\t} else if (code == 403 || code == 410) {
+\t\t\treturn CdnHttpsError::Refresh;
+\t\t} else if (code >= 500 && code < 600) {
+\t\t\tretry = true;
+\t\t\treturn CdnHttpsError::Transport;
+\t\t} else if (code != 206) {
+\t\t\treturn CdnHttpsError::Response;
+\t\t}
+\t\t// Exactly the block asked for, of a file of the size the client
+\t\t// knows; the last block of the file is shorter.
+\t\tconst auto last = std::min(
+\t\t\trequest.offset + request.limit,
+\t\t\trequest.total) - 1;
+\t\tconst auto range = u"bytes %1-%2/%3"_q.arg(
+\t\t\trequest.offset
+\t\t).arg(last).arg(request.total).toUtf8();
+\t\tif (reply->rawHeader("Content-Range") != range) {
+\t\t\treturn CdnHttpsError::Response;
+\t\t}
+\t\tauto bytes = reply->readAll();
+\t\tif (bytes.size() != last - request.offset + 1) {
+\t\t\treturn CdnHttpsError::Response;
+\t\t}
+\t\treturn bytes;
+\t}();
+\tif (std::holds_alternative<CdnHttpsError>(result)) {
+\t\tLOG(("CDN Error: HTTPS block at %1 from %2, status %3, error %4."
+\t\t\t).arg(request.offset
+\t\t\t).arg(HostOf(request.url)
+\t\t\t).arg(code
+\t\t\t).arg(int(error)));
+\t\tif (retry && !sent->retried) {
+\t\t\tsent->retried = true;
+\t\t\tconst auto delay = kRetryDelayMin + base::RandomIndex(
+\t\t\t\tint(kRetryDelayMax - kRetryDelayMin) + 1);
+\t\t\tQTimer::singleShot(int(delay), _network.get(), [=] {
+\t\t\t\tresend(requestId);
+\t\t\t});
+\t\t\treturn;
+\t\t}
+\t}
+\t_sent.remove(requestId);
+\tqueueResult(requestId, std::move(result));
+}
+
+void CdnHttpsLoader::resend(mtpRequestId requestId) {
+\tconst auto i = _sent.find(requestId);
+\tif (i != end(_sent) && !i->second.reply) {
+\t\tsend(requestId, i->second.request, true);
+\t}
+}
+
+void CdnHttpsLoader::abort(mtpRequestId requestId) {
+\tconst auto i = _sent.find(requestId);
+\tif (i == end(_sent)) {
+\t\treturn;
+\t}
+\tconst auto reply = i->second.reply;
+\t_sent.erase(i);
+\tif (reply) {
+\t\treply->disconnect();
+\t\treply->abort();
+\t\treply->deleteLater();
+\t}
+}
+
+void CdnHttpsLoader::clear() {
+\t// The manager deletes its replies after this.
+\tfor (const auto &[requestId, sent] : base::take(_sent)) {
+\t\tif (const auto reply = sent.reply.data()) {
+\t\t\treply->disconnect();
+\t\t\treply->abort();
+\t\t}
+\t}
+}
+
+void CdnHttpsLoader::queueResult(mtpRequestId requestId, Result result) {
+\tcrl::on_main(this, [=, data = std::move(result)]() mutable {
+\t\tdeliver(requestId, std::move(data));
+\t});
+}
+
+} // namespace Storage
+"""
+
+
+def cdn_https_source(dev_host):
+    """download_cdn_https.cpp; a development build also takes plain HTTP
+    to its server."""
+    dev = ("\t// pluma: a development build, plain HTTP to the development\n"
+           "\t// server alone.\n"
+           f'\tif (result.startsWith(u"http://"_q) && url.host() == u"{dev_host}"_q) {{\n'
+           "\t\treturn result;\n"
+           "\t}\n") if dev_host else ""
+    return CDN_HTTPS_SOURCE.replace(CDN_HTTPS_DEV_MARK, dev)
+
+
+CDN_HTTPS_EDITS = (
+    (DOWNLOAD_MANAGER_H,
+     "class DownloadMtprotoTask;\n"
+     "\n"
+     "class DownloadManagerMtproto final : public base::has_weak_ptr {\n",
+     "class DownloadMtprotoTask;\n"
+     "class CdnHttpsLoader; // pluma: the HTTPS CDN (task 107)\n"
+     "enum class CdnHttpsError;\n"
+     "\n"
+     "class DownloadManagerMtproto final : public base::has_weak_ptr {\n"),
+    (DOWNLOAD_MANAGER_H,
+     "\tvirtual bool setWebFileSizeHook(int64 size);\n",
+     "\tvirtual bool setWebFileSizeHook(int64 size);\n"
+     "\t// pluma: the size of the file, 0 when unknown (task 107).\n"
+     "\t[[nodiscard]] virtual int64 cdnHttpsFileSize() const;\n"),
+    (DOWNLOAD_MANAGER_H,
+     "\tbool cdnPartFailed(const MTP::Error &error, mtpRequestId requestId);\n",
+     "\tbool cdnPartFailed(const MTP::Error &error, mtpRequestId requestId);\n"
+     "\n"
+     "\t// pluma: the HTTPS CDN (task 107).\n"
+     "\t[[nodiscard]] bool cdnHttpsSupported() const;\n"
+     "\t[[nodiscard]] mtpRequestId cdnHttpsSend(const RequestData &requestData);\n"
+     "\tvoid cdnHttpsLoaded(mtpRequestId requestId, QByteArray bytes);\n"
+     "\tvoid cdnHttpsFailed(mtpRequestId requestId, CdnHttpsError error);\n"
+     "\tvoid cdnBytesReceived(\n"
+     "\t\tconst RequestData &requestData,\n"
+     "\t\tQByteArray encrypted);\n"
+     "\tvoid fallBackToMaster(const RequestData &requestData);\n"
+     "\tvoid restartFromMaster(const RequestData &requestData);\n"
+     "\tvoid abortRequest(mtpRequestId requestId);\n"),
+    (DOWNLOAD_MANAGER_H,
+     "\tmtpRequestId _cdnHashesRequestId = 0;\n",
+     "\tmtpRequestId _cdnHashesRequestId = 0;\n"
+     "\n"
+     "\t// pluma: the HTTPS CDN (task 107).\n"
+     "\tstd::shared_ptr<CdnHttpsLoader> _cdnHttps;\n"
+     "\tQString _cdnHttpsUrl;\n"
+     "\tint _cdnHttpsRefreshes = 0;\n"
+     "\tbool _cdnHttpsDisabled = false;\n"),
+    (FILE_DOWNLOAD_MTPROTO_H,
+     "\tbool setWebFileSizeHook(int64 size) override;\n",
+     "\tbool setWebFileSizeHook(int64 size) override;\n"
+     "\tint64 cdnHttpsFileSize() const override { // pluma: task 107\n"
+     "\t\treturn fullSize();\n"
+     "\t}\n"),
+    (STREAMING_LOADER_MTPROTO_H,
+     "\tvoid cancelOnFail() override;\n",
+     "\tvoid cancelOnFail() override;\n"
+     "\tint64 cdnHttpsFileSize() const override { // pluma: task 107\n"
+     "\t\treturn _size;\n"
+     "\t}\n"),
+    (DOWNLOAD_MANAGER,
+     '#include "base/openssl_help.h"\n',
+     '#include "base/openssl_help.h"\n'
+     '#include "storage/download_cdn_https.h" // pluma: task 107\n'),
+    (DOWNLOAD_MANAGER,
+     "constexpr auto kBadRequestDurationThreshold = 8 * crl::time(1000);\n",
+     "constexpr auto kBadRequestDurationThreshold = 8 * crl::time(1000);\n"
+     "\n"
+     "// pluma: fresh addresses of the HTTPS CDN a download may ask for after\n"
+     "// 403 or 410 (task 107).\n"
+     "constexpr auto kMaxCdnHttpsRefreshes = 3;\n"),
+    (DOWNLOAD_MANAGER,
+     "\tif (_cdnDcId) {\n"
+     "\t\treturn api().request(MTPupload_GetCdnFile(\n",
+     "\tif (_cdnDcId) {\n"
+     "\t\tif (!_cdnHttpsUrl.isEmpty()) {\n"
+     "\t\t\treturn cdnHttpsSend(requestData); // pluma: task 107\n"
+     "\t\t}\n"
+     "\t\treturn api().request(MTPupload_GetCdnFile(\n"),
+    (DOWNLOAD_MANAGER,
+     "\t\t\tMTP_flags(MTPupload_GetFile::Flag::f_cdn_supported),\n",
+     "\t\t\t// pluma: only for the HTTPS CDN, while it may serve (task 107).\n"
+     "\t\t\tMTP_flags(cdnHttpsSupported()\n"
+     "\t\t\t\t? MTPupload_GetFile::Flag::f_cdn_supported\n"
+     "\t\t\t\t: MTPupload_GetFile::Flag(0)),\n"),
+    (DOWNLOAD_MANAGER,
+     "\t\tauto key = bytes::make_span(_cdnEncryptionKey);\n"
+     "\t\tauto iv = bytes::make_span(_cdnEncryptionIV);\n"
+     "\t\tExpects(key.size() == MTP::CTRState::KeySize);\n"
+     "\t\tExpects(iv.size() == MTP::CTRState::IvecSize);\n"
+     "\n"
+     "\t\tauto state = MTP::CTRState();\n"
+     "\t\tauto ivec = bytes::make_span(state.ivec);\n"
+     "\t\tstd::copy(iv.begin(), iv.end(), ivec.begin());\n"
+     "\n"
+     "\t\tauto counterOffset = static_cast<uint32>(requestData.offset >> 4);\n"
+     "\t\tstate.ivec[15] = static_cast<uchar>(counterOffset & 0xFF);\n"
+     "\t\tstate.ivec[14] = static_cast<uchar>((counterOffset >> 8) & 0xFF);\n"
+     "\t\tstate.ivec[13] = static_cast<uchar>((counterOffset >> 16) & 0xFF);\n"
+     "\t\tstate.ivec[12] = static_cast<uchar>((counterOffset >> 24) & 0xFF);\n"
+     "\n"
+     "\t\tauto decryptInPlace = data.vbytes().v;\n"
+     "\t\tauto buffer = bytes::make_detached_span(decryptInPlace);\n"
+     "\t\tMTP::aesCtrEncrypt(buffer, key.data(), &state);\n"
+     "\n"
+     "\t\tswitch (checkCdnFileHash(requestData.offset, buffer)) {\n"
+     "\t\tcase CheckCdnHashResult::NoHash: {\n"
+     "\t\t\t_cdnUncheckedParts.emplace(requestData, decryptInPlace);\n"
+     "\t\t\trequestMoreCdnFileHashes();\n"
+     "\t\t} return;\n"
+     "\n"
+     "\t\tcase CheckCdnHashResult::Invalid: {\n"
+     "\t\t\tLOG((\"API Error: Wrong cdnFileHash for offset %1.\"\n"
+     "\t\t\t\t).arg(requestData.offset));\n"
+     "\t\t\tcancelOnFail();\n"
+     "\t\t} return;\n"
+     "\n"
+     "\t\tcase CheckCdnHashResult::Good: {\n"
+     "\t\t\tpartLoaded(requestData.offset, decryptInPlace);\n"
+     "\t\t} return;\n"
+     "\t\t}\n"
+     "\t\tUnexpected(\"Result of checkCdnFileHash()\");\n"
+     "\t});\n"
+     "}\n",
+     "\t\tcdnBytesReceived(requestData, data.vbytes().v); // pluma: task 107\n"
+     "\t});\n"
+     "}\n"
+     "\n"
+     "// pluma: the blocks of upload.getCdnFile and of the HTTPS CDN (task 107).\n"
+     "void DownloadMtprotoTask::cdnBytesReceived(\n"
+     "\t\tconst RequestData &requestData,\n"
+     "\t\tQByteArray encrypted) {\n"
+     "\tauto key = bytes::make_span(_cdnEncryptionKey);\n"
+     "\tauto iv = bytes::make_span(_cdnEncryptionIV);\n"
+     "\tExpects(key.size() == MTP::CTRState::KeySize);\n"
+     "\tExpects(iv.size() == MTP::CTRState::IvecSize);\n"
+     "\n"
+     "\tauto state = MTP::CTRState();\n"
+     "\tauto ivec = bytes::make_span(state.ivec);\n"
+     "\tstd::copy(iv.begin(), iv.end(), ivec.begin());\n"
+     "\n"
+     "\tauto counterOffset = static_cast<uint32>(requestData.offset >> 4);\n"
+     "\tstate.ivec[15] = static_cast<uchar>(counterOffset & 0xFF);\n"
+     "\tstate.ivec[14] = static_cast<uchar>((counterOffset >> 8) & 0xFF);\n"
+     "\tstate.ivec[13] = static_cast<uchar>((counterOffset >> 16) & 0xFF);\n"
+     "\tstate.ivec[12] = static_cast<uchar>((counterOffset >> 24) & 0xFF);\n"
+     "\n"
+     "\tauto decryptInPlace = std::move(encrypted);\n"
+     "\tauto buffer = bytes::make_detached_span(decryptInPlace);\n"
+     "\tMTP::aesCtrEncrypt(buffer, key.data(), &state);\n"
+     "\n"
+     "\tswitch (checkCdnFileHash(requestData.offset, buffer)) {\n"
+     "\tcase CheckCdnHashResult::NoHash: {\n"
+     "\t\t_cdnUncheckedParts.emplace(requestData, decryptInPlace);\n"
+     "\t\trequestMoreCdnFileHashes();\n"
+     "\t} return;\n"
+     "\n"
+     "\tcase CheckCdnHashResult::Invalid: {\n"
+     "\t\tLOG((\"API Error: Wrong cdnFileHash for offset %1.\"\n"
+     "\t\t\t).arg(requestData.offset));\n"
+     "\t\tif (!_cdnHttpsUrl.isEmpty()) {\n"
+     "\t\t\tfallBackToMaster(requestData);\n"
+     "\t\t} else {\n"
+     "\t\t\tcancelOnFail();\n"
+     "\t\t}\n"
+     "\t} return;\n"
+     "\n"
+     "\tcase CheckCdnHashResult::Good: {\n"
+     "\t\tpartLoaded(requestData.offset, decryptInPlace);\n"
+     "\t} return;\n"
+     "\t}\n"
+     "\tUnexpected(\"Result of checkCdnFileHash()\");\n"
+     "}\n"),
+    (DOWNLOAD_MANAGER,
+     "\t\t\tLOG((\"API Error: Wrong cdnFileHash for offset %1.\"\n"
+     "\t\t\t\t).arg(uncheckedData.offset));\n"
+     "\t\t\tcancelOnFail();\n"
+     "\t\t\treturn;\n",
+     "\t\t\tLOG((\"API Error: Wrong cdnFileHash for offset %1.\"\n"
+     "\t\t\t\t).arg(uncheckedData.offset));\n"
+     "\t\t\tif (!_cdnHttpsUrl.isEmpty()) {\n"
+     "\t\t\t\t// pluma: from the bad block; the block the hashes were\n"
+     "\t\t\t\t// asked for may be in the file already (task 107).\n"
+     "\t\t\t\tfallBackToMaster(uncheckedData);\n"
+     "\t\t\t} else {\n"
+     "\t\t\t\tcancelOnFail();\n"
+     "\t\t\t}\n"
+     "\t\t\treturn;\n"),
+    (DOWNLOAD_MANAGER,
+     "\t\t\t\"after getCdnFileHashes request.\"\n"
+     "\t\t\t).arg(requestData.offset));\n"
+     "\t\tcancelOnFail();\n"
+     "\t\treturn;\n",
+     "\t\t\t\"after getCdnFileHashes request.\"\n"
+     "\t\t\t).arg(requestData.offset));\n"
+     "\t\tif (!_cdnHttpsUrl.isEmpty()) {\n"
+     "\t\t\tfallBackToMaster(requestData); // pluma: task 107\n"
+     "\t\t} else {\n"
+     "\t\t\tcancelOnFail();\n"
+     "\t\t}\n"
+     "\t\treturn;\n"),
+    (DOWNLOAD_MANAGER,
+     "\tconst auto hashes = (_cdnHashesRequestId == requestId);\n"
+     "\tapi().request(requestId).cancel();\n",
+     "\tconst auto hashes = (_cdnHashesRequestId == requestId);\n"
+     "\tabortRequest(requestId); // pluma: an HTTPS request too (task 107)\n"),
+    (DOWNLOAD_MANAGER,
+     "\tif (MTP::IsDefaultHandledError(error)) {\n"
+     "\t\treturn false;\n"
+     "\t}\n"
+     "\n"
+     "\tif (error.type() == u\"FILE_TOKEN_INVALID\"_q\n",
+     "\tif (MTP::IsDefaultHandledError(error)) {\n"
+     "\t\treturn false;\n"
+     "\t}\n"
+     "\n"
+     "\tif (!_cdnHttpsUrl.isEmpty()) {\n"
+     "\t\t// pluma: the master has no hashes for the HTTPS CDN's block; the\n"
+     "\t\t// rest of the download from the master (task 107).\n"
+     "\t\tfallBackToMaster(finishSentRequest(\n"
+     "\t\t\trequestId,\n"
+     "\t\t\tFinishRequestReason::Redirect));\n"
+     "\t\treturn true;\n"
+     "\t}\n"
+     "\tif (error.type() == u\"FILE_TOKEN_INVALID\"_q\n"),
+    (DOWNLOAD_MANAGER,
+     "void DownloadMtprotoTask::switchToCDN(\n"
+     "\t\tconst RequestData &requestData,\n"
+     "\t\tconst MTPDupload_fileCdnRedirect &redirect) {\n"
+     "\tchangeCDNParams(\n",
+     "void DownloadMtprotoTask::switchToCDN(\n"
+     "\t\tconst RequestData &requestData,\n"
+     "\t\tconst MTPDupload_fileCdnRedirect &redirect) {\n"
+     "\t// pluma: the Pluma server's redirect leads to its HTTPS CDN, the\n"
+     "\t// address in the token; no session to the CDN's datacenter (task 107).\n"
+     "\tconst auto &token = redirect.vfile_token().v;\n"
+     "\tif (CdnHttpsLoader::IsHttpsToken(token)) {\n"
+     "\t\tconst auto url = CdnHttpsLoader::UrlFromToken(token);\n"
+     "\t\tconst auto &key = redirect.vencryption_key().v;\n"
+     "\t\tconst auto &iv = redirect.vencryption_iv().v;\n"
+     "\t\tif (url.isEmpty()\n"
+     "\t\t\t|| _cdnHttpsDisabled\n"
+     "\t\t\t|| cdnHttpsFileSize() <= 0\n"
+     "\t\t\t|| !redirect.vdc_id().v\n"
+     "\t\t\t|| key.size() != MTP::CTRState::KeySize\n"
+     "\t\t\t|| iv.size() != MTP::CTRState::IvecSize) {\n"
+     "\t\t\tLOG((\"CDN Error: Bad HTTPS redirect for offset %1.\"\n"
+     "\t\t\t\t).arg(requestData.offset));\n"
+     "\t\t\tfallBackToMaster(requestData);\n"
+     "\t\t\treturn;\n"
+     "\t\t} else if (!_cdnHttpsUrl.isEmpty()\n"
+     "\t\t\t&& _cdnEncryptionKey == key\n"
+     "\t\t\t&& _cdnEncryptionIV == iv) {\n"
+     "\t\t\t// The same file at a fresh address: what is on the way goes on.\n"
+     "\t\t\t_cdnToken = token;\n"
+     "\t\t\t_cdnHttpsUrl = url;\n"
+     "\t\t\taddCdnHashes(redirect.vfile_hashes().v);\n"
+     "\t\t\tmakeRequest(requestData);\n"
+     "\t\t\treturn;\n"
+     "\t\t}\n"
+     "\t\t_cdnHttpsUrl = url;\n"
+     "\t} else {\n"
+     "\t\t_cdnHttpsUrl = QString();\n"
+     "\t}\n"
+     "\tchangeCDNParams(\n"),
+    (DOWNLOAD_MANAGER,
+     "\t\t\tconst auto requestId = _sentRequests.begin()->first;\n"
+     "\t\t\tapi().request(requestId).cancel();\n",
+     "\t\t\tconst auto requestId = _sentRequests.begin()->first;\n"
+     "\t\t\tabortRequest(requestId); // pluma: an HTTPS request too (task 107)\n"),
+    (DOWNLOAD_MANAGER,
+     "\tmakeRequest(requestData);\n"
+     "}\n"
+     "\n"
+     "} // namespace Storage\n",
+     "\tmakeRequest(requestData);\n"
+     "}\n"
+     "\n"
+     "// pluma: the HTTPS CDN (task 107).\n"
+     "int64 DownloadMtprotoTask::cdnHttpsFileSize() const {\n"
+     "\treturn 0;\n"
+     "}\n"
+     "\n"
+     "bool DownloadMtprotoTask::cdnHttpsSupported() const {\n"
+     "\treturn !_cdnHttpsDisabled\n"
+     "\t\t&& (cdnHttpsFileSize() > 0)\n"
+     "\t\t&& CdnHttpsLoader::Allowed();\n"
+     "}\n"
+     "\n"
+     "mtpRequestId DownloadMtprotoTask::cdnHttpsSend(\n"
+     "\t\tconst RequestData &requestData) {\n"
+     "\tif (!_cdnHttps) {\n"
+     "\t\t_cdnHttps = CdnHttpsLoader::Instance();\n"
+     "\t}\n"
+     "\tconst auto weak = base::make_weak(this);\n"
+     "\treturn _cdnHttps->get(\n"
+     "\t\t_cdnHttpsUrl,\n"
+     "\t\trequestData.offset,\n"
+     "\t\tStorage::kDownloadPartSize,\n"
+     "\t\tcdnHttpsFileSize(),\n"
+     "\t\t[=](mtpRequestId id, QByteArray bytes) {\n"
+     "\t\t\tif (const auto strong = weak.get()) {\n"
+     "\t\t\t\tstrong->cdnHttpsLoaded(id, std::move(bytes));\n"
+     "\t\t\t}\n"
+     "\t\t},\n"
+     "\t\t[=](mtpRequestId id, CdnHttpsError error) {\n"
+     "\t\t\tif (const auto strong = weak.get()) {\n"
+     "\t\t\t\tstrong->cdnHttpsFailed(id, error);\n"
+     "\t\t\t}\n"
+     "\t\t});\n"
+     "}\n"
+     "\n"
+     "void DownloadMtprotoTask::cdnHttpsLoaded(\n"
+     "\t\tmtpRequestId requestId,\n"
+     "\t\tQByteArray bytes) {\n"
+     "\tif (!_sentRequests.contains(requestId)) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tCdnHttpsLoader::ReportSuccess();\n"
+     "\tconst auto requestData = finishSentRequest(\n"
+     "\t\trequestId,\n"
+     "\t\tFinishRequestReason::Success);\n"
+     "\tconst auto owner = _owner;\n"
+     "\tconst auto dcId = this->dcId();\n"
+     "\tconst auto guard = gsl::finally([=] {\n"
+     "\t\t// 'this' may be deleted at this point.\n"
+     "\t\towner->checkSendNextAfterSuccess(dcId);\n"
+     "\t});\n"
+     "\tcdnBytesReceived(requestData, std::move(bytes));\n"
+     "}\n"
+     "\n"
+     "void DownloadMtprotoTask::cdnHttpsFailed(\n"
+     "\t\tmtpRequestId requestId,\n"
+     "\t\tCdnHttpsError error) {\n"
+     "\tif (!_sentRequests.contains(requestId)) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto requestData = finishSentRequest(\n"
+     "\t\trequestId,\n"
+     "\t\tFinishRequestReason::Redirect);\n"
+     "\tif (error == CdnHttpsError::Refresh\n"
+     "\t\t&& ++_cdnHttpsRefreshes <= kMaxCdnHttpsRefreshes) {\n"
+     "\t\t// The address expired: the master gives a fresh one.\n"
+     "\t\trestartFromMaster(requestData);\n"
+     "\t\treturn;\n"
+     "\t} else if (error == CdnHttpsError::Transport) {\n"
+     "\t\tCdnHttpsLoader::ReportTransportFailure();\n"
+     "\t}\n"
+     "\tfallBackToMaster(requestData);\n"
+     "}\n"
+     "\n"
+     "void DownloadMtprotoTask::fallBackToMaster(const RequestData &requestData) {\n"
+     "\tLOG((\"CDN Info: The rest of a download from the master, offset %1.\"\n"
+     "\t\t).arg(requestData.offset));\n"
+     "\t_cdnHttpsDisabled = true;\n"
+     "\trestartFromMaster(requestData);\n"
+     "}\n"
+     "\n"
+     "// What is on the way, and the blocks waiting for their hashes, are asked\n"
+     "// of the master again; the blocks in the file stay.\n"
+     "void DownloadMtprotoTask::restartFromMaster(\n"
+     "\t\tconst RequestData &requestData) {\n"
+     "\tauto resend = base::flat_set<RequestData>();\n"
+     "\tresend.emplace(requestData);\n"
+     "\tfor (const auto &[data, bytes] : base::take(_cdnUncheckedParts)) {\n"
+     "\t\tresend.emplace(data);\n"
+     "\t}\n"
+     "\twhile (!_sentRequests.empty()) {\n"
+     "\t\tconst auto requestId = _sentRequests.begin()->first;\n"
+     "\t\tconst auto hashes = (_cdnHashesRequestId == requestId);\n"
+     "\t\tabortRequest(requestId);\n"
+     "\t\tconst auto data = finishSentRequest(\n"
+     "\t\t\trequestId,\n"
+     "\t\t\tFinishRequestReason::Redirect);\n"
+     "\t\tif (!hashes) {\n"
+     "\t\t\tresend.emplace(data);\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\t_cdnDcId = 0;\n"
+     "\t_cdnToken = QByteArray();\n"
+     "\t_cdnEncryptionKey = QByteArray();\n"
+     "\t_cdnEncryptionIV = QByteArray();\n"
+     "\t_cdnHttpsUrl = QString();\n"
+     "\tfor (const auto &data : resend) {\n"
+     "\t\tmakeRequest(data);\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "void DownloadMtprotoTask::abortRequest(mtpRequestId requestId) {\n"
+     "\tif (requestId < 0) {\n"
+     "\t\tif (_cdnHttps) {\n"
+     "\t\t\t_cdnHttps->cancel(requestId);\n"
+     "\t\t}\n"
+     "\t} else {\n"
+     "\t\tapi().request(requestId).cancel();\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "} // namespace Storage\n"),
+    (SESSION_PRIVATE,
+     "\treturn MTP_vector<MTPJSONObjectValue>(\n"
+     "\t\t1,\n"
+     "\t\tMTP_jsonObjectValue(\n"
+     "\t\t\tMTP_string(\"tz_offset\"),\n"
+     "\t\t\tMTP_jsonNumber(MTP_double(rounded))));\n",
+     "\treturn MTP_vector<MTPJSONObjectValue>(QVector<MTPJSONObjectValue>{\n"
+     "\t\tMTP_jsonObjectValue(\n"
+     "\t\t\tMTP_string(\"tz_offset\"),\n"
+     "\t\t\tMTP_jsonNumber(MTP_double(rounded))),\n"
+     "\t\t// pluma: large files may come from the HTTPS CDN (task 107).\n"
+     "\t\tMTP_jsonObjectValue(\n"
+     "\t\t\tMTP_string(\"pluma_cdn\"),\n"
+     "\t\t\tMTP_jsonNumber(MTP_double(1))),\n"
+     "\t});\n"),
+    (CMAKE_APP,
+     "    storage/download_manager_mtproto.cpp\n"
+     "    storage/download_manager_mtproto.h\n",
+     "    storage/download_cdn_https.cpp\n"
+     "    storage/download_cdn_https.h\n"
+     "    storage/download_manager_mtproto.cpp\n"
+     "    storage/download_manager_mtproto.h\n"),
+    # The loader's QNetworkAccessManager brings QtNetwork's DNS lookups into
+    # the static Windows link, and they need the system's dnsapi.
+    (CMAKE_APP,
+     "        target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)\n"
+     "    endif()\n",
+     "        target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)\n"
+     "    endif()\n"
+     "\n"
+     "    # pluma: QtNetwork's DNS lookups of the HTTPS CDN loader (task 107).\n"
+     "    target_link_libraries(Telegram PRIVATE dnsapi)\n"),
+)
+
+# What the edits leave, each exactly so many times: another request for
+# upload.getFile with cdn_supported, another way to the CDN's datacenter or
+# another cancel that leaves an HTTPS request running stops the patch until
+# it is read.
+CDN_HTTPS_GUARDS = (
+    (DOWNLOAD_MANAGER, "f_cdn_supported", 1),
+    (DOWNLOAD_MANAGER, "MTPupload_GetCdnFile(", 1),
+    (DOWNLOAD_MANAGER, "MTPupload_ReuploadCdnFile(", 1),
+    (DOWNLOAD_MANAGER, "api().request(requestId).cancel();", 1),
+    (DOWNLOAD_MANAGER, "abortRequest(requestId);", 3),
+    (DOWNLOAD_MANAGER, "fallBackToMaster(", 7),
+    (DOWNLOAD_MANAGER, "cdnBytesReceived(", 3),
+    (DOWNLOAD_MANAGER, "changeCDNParams(", 3),
+    (SESSION_PRIVATE, '"pluma_cdn"', 1),
+    (CMAKE_APP, "storage/download_cdn_https.", 2),
+    (CMAKE_APP, "target_link_libraries(Telegram PRIVATE dnsapi)", 1),
+)
+# Sources that may set cdn_supported: the download task alone.
+CDN_HTTPS_FLAG = "f_cdn_supported"
+# A log line of the HTTPS CDN names the host, the status and the offset,
+# never the address, the token, the key or the IV.
+CDN_HTTPS_LOG = re.compile(r"\b(?:DEBUG_)?LOG\(\((.*?)\)\);", re.S)
+CDN_HTTPS_LOG_HOST = re.compile(r"\bHostOf\([\w.]+\)")
+CDN_HTTPS_LOG_SECRETS = re.compile(r"\b(?:url|_cdnHttpsUrl|token|_cdnToken|key|iv|_cdnEncryptionKey|"
+                                   r"_cdnEncryptionIV|raw|result|bytes|encrypted|decryptInPlace|range)\b")
+
+
+def cdn_https(tree, c):
+    for rel in (CDN_HTTPS, CDN_HTTPS_H):
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: upstream has a file of this name; the HTTPS CDN (task 107) would replace it")
+    for rel, old, new in CDN_HTTPS_EDITS:
+        tree.replace(rel, old, new)
+    tree.write(CDN_HTTPS_H, CDN_HTTPS_HEADER)
+    tree.write(CDN_HTTPS, cdn_https_source(c.dev_cdn_http))
+
+
+def verify_cdn_https(tree, c):
+    source = tree.read(CDN_HTTPS)
+    if not c.dev_cdn_http and ('u"http://"_q' in source or "a development build" in source):
+        raise PatchError(f"{CDN_HTTPS}: a build for the real server takes plain HTTP (a development build's)")
+    for rel, text in ((CDN_HTTPS_H, CDN_HTTPS_HEADER), (CDN_HTTPS, cdn_https_source(c.dev_cdn_http))):
+        if tree.read(rel) != text:
+            raise PatchError(f"{rel}: not the HTTPS CDN of task 107")
+    for rel, old, new in CDN_HTTPS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the HTTPS CDN (task 107) is not there")
+    for rel, s, count in CDN_HTTPS_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another place decides what the HTTPS CDN (task 107) should")
+    for rel in tree.sources():
+        if rel != DOWNLOAD_MANAGER and CDN_HTTPS_FLAG in tree.scan(rel):
+            raise PatchError(f"{rel}: asks for upload.getFile with cdn_supported outside the HTTPS CDN (task 107)")
+    for rel in (CDN_HTTPS, DOWNLOAD_MANAGER):
+        for m in CDN_HTTPS_LOG.finditer(tree.read(rel)):
+            args = CDN_HTTPS_LOG_HOST.sub("", re.sub(r'"(?:[^"\\\n]|\\.)*"', "", m.group(1)))
+            found = CDN_HTTPS_LOG_SECRETS.search(args)
+            if found:
+                raise PatchError(f"{rel}: a log line of downloads writes {found.group(0)!r}; "
+                                 "the HTTPS CDN (task 107) logs the host, the status and the offset alone")
+
+
+def cdn_https_edited():
+    """The upstream files cdn_https() edits."""
+    return tuple(sorted({rel for rel, _, _ in CDN_HTTPS_EDITS}))
+
+
 def main(argv=None):
     args = argv if argv is not None else sys.argv[1:]
     if args == ["--paths"]:
@@ -6097,6 +7236,8 @@ def main(argv=None):
     ap.add_argument("--build", type=int, default=0, help="the build number, added to AppVersion")
     ap.add_argument("--update-prefix", default="", help="the update prefix instead of PLUMA_UPDATE_PREFIX (a development build)")
     ap.add_argument("--data-name", default="", help="the name of the data folder instead of the app's (a development build)")
+    ap.add_argument("--dev-cdn-http", default="",
+                    help="the address the HTTPS CDN may also be plain HTTP at (a development build)")
     a = ap.parse_args(args)
     try:
         app = load_env(a.app)
@@ -6105,7 +7246,8 @@ def main(argv=None):
         if a.data_name:
             app["PLUMA_DATA_NAME"] = a.data_name
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
-                   pathlib.Path(a.rsa_public_key).read_text(), read_update_keys(a.update_keys), a.build)
+                   pathlib.Path(a.rsa_public_key).read_text(), read_update_keys(a.update_keys), a.build,
+                   a.dev_cdn_http)
         tree = Tree(a.source)
         if (tree.root / MARKER).exists():
             raise PatchError(f"{a.source} is patched already; fetch it again (ci/fetch-upstream.sh)")
