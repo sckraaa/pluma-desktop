@@ -2681,6 +2681,7 @@ def patch(tree, c):
 
     rebrand(tree, c)
     premium_for_everyone(tree)
+    business(tree)
     transcription(tree)
     no_ai_editor(tree)
     # After rebrand(): the texts name the real Telegram.
@@ -2831,6 +2832,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_help_and_gifts(tree)
     verify_premium_for_everyone(tree)
+    verify_business(tree)
     verify_transcription(tree)
     verify_no_ai_editor(tree)
     verify_login_code_screens(tree)
@@ -2856,9 +2858,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("Telegram/SourceFiles/main/main_session.cpp",
      "bool Session::premiumBadgesShown() const {\n\treturn supportMode() || premiumPossible();\n}\n",
      "bool Session::premiumBadgesShown() const {\n\t// pluma: no star by a name: everybody has Premium (ADR 0041).\n\treturn supportMode();\n}\n"),
-    ("Telegram/SourceFiles/settings/sections/settings_main.cpp",
-     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\tif (!session->premiumPossible()) {\n",
-     "void BuildPremiumSection(SectionBuilder &builder) {\n\tconst auto session = builder.session();\n\tconst auto controller = builder.controller();\n\tconst auto showOther = builder.showOther();\n\n\t// pluma: the section is the purchase; everybody has Premium.\n\tif (!session->premiumCanBuy()) {\n"),
     ("Telegram/SourceFiles/window/window_main_menu.cpp",
      "void MainMenu::setupSetEmojiStatus() {\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n",
      "void MainMenu::setupSetEmojiStatus() {\n\t// pluma: the server does not serve account.updateEmojiStatus.\n\t_setEmojiStatus->hide();\n\t_setEmojiStatus->overrideLinkClickHandler([=] {\n\t\tchooseEmojiStatus();\n\t});\n}\n"),
@@ -2920,6 +2919,63 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Telegram Business --------------------------------------------------------
+# Task 105 (ADR 0067): the server serves Telegram Business to everybody with
+# Premium (everybody, ADR 0041). The Business button of the settings sits in
+# BuildPremiumSection, which task 071 hid whole while Premium cannot be bought;
+# now only the purchase buttons (Premium, Stars, TON) are hidden and Business
+# shows, with the section's divider. The gift button keeps upstream's own
+# premiumCanBuy check. The Business section, for a Premium user, opens the
+# editors; its "Do not hide ads" switch (BuildSponsoredSection, with its
+# search entry) is not added: Pluma has no ads and does not serve
+# account.toggleSponsoredMessages. The settings/business/do-not-hide-ads link
+# then only opens the section (checkHighlightControl skips a null button).
+SETTINGS_BUSINESS = f"{SOURCES}/settings/sections/settings_business.cpp"
+BUSINESS_EDITS = (
+    (SETTINGS_MAIN,
+     "\tbuilder.addDivider();\n\tbuilder.addSkip();\n\n\tbuilder.addPremiumButton({\n\t\t.id = u\"main/premium\"_q,\n",
+     "\tbuilder.addDivider();\n\tbuilder.addSkip();\n\n"
+     "\t// pluma: Premium, Stars and TON are the purchase; everybody has Premium\n"
+     "\t// (ADR 0041). Business stays (ADR 0067).\n"
+     "\tif (session->premiumCanBuy()) {\n"
+     "\tbuilder.addPremiumButton({\n\t\t.id = u\"main/premium\"_q,\n"),
+    (SETTINGS_MAIN,
+     "\t});\n\n\tbuilder.addButton({\n\t\t.id = u\"main/business\"_q,\n",
+     "\t});\n\t} // pluma: the purchase buttons end here\n\n\tbuilder.addButton({\n\t\t.id = u\"main/business\"_q,\n"),
+    (SETTINGS_BUSINESS,
+     "void BuildSponsoredSection(\n\t\tSectionBuilder &builder,\n",
+     "// pluma: no ads to hide (ADR 0067), the section is not added.\n"
+     "[[maybe_unused]] void BuildSponsoredSection(\n\t\tSectionBuilder &builder,\n"),
+    (SETTINGS_BUSINESS,
+     "\t}\n\n\tBuildSponsoredSection(builder, state);\n}\n",
+     "\t}\n\t// pluma: no ads to hide (ADR 0067), no sponsored section.\n}\n"),
+)
+# Upstream's text the edits rely on: the section shows for a Premium user, and
+# the business button is the one after the purchase buttons.
+BUSINESS_KEPT = (
+    (SETTINGS_MAIN, "\tif (!session->premiumPossible()) {\n\t\treturn;\n\t}\n"),
+    (SETTINGS_MAIN, "\t\t.title = tr::lng_business_title(),\n\t\t.icon = { .icon = &st::menuIconShop },\n"
+                    "\t\t.onClick = [=] { showOther(BusinessId()); },\n"),
+)
+
+
+def business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the Business edit of task 105 is not there")
+    for rel, kept in BUSINESS_KEPT:
+        if tree.read(rel).count(kept) != 1:
+            raise PatchError(f"{rel}: the Business button is not upstream's; read it")
+    if "BuildSponsoredSection(builder" in tree.read(SETTINGS_BUSINESS):
+        raise PatchError(f"{SETTINGS_BUSINESS}: the ads switch is still added")
 
 
 # --- Transcription of voice and round messages ---------------------------------

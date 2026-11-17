@@ -757,6 +757,11 @@ DAMAGE += ((patch.LANG, patch.GROUP_CALLS_E2E_STRINGS_AFTER, patch.GROUP_CALLS_E
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CALL_COLORS_EDITS)
 DAMAGE += ((patch.PALETTE, "\ngroupCallMuted1: #0992ef;", "\ngroupCallMuted1: #0992ee;"),)
 
+# The Business edits (task 105) and the text they rely on, damaged in the
+# pinned upstream, stop the patch with the file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.BUSINESS_EDITS)
+DAMAGE += tuple((rel, kept, kept[:-2] + "~" + kept[-1]) for rel, kept in patch.BUSINESS_KEPT)
+
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
                  "no checkout of the pinned upstream (ci/fetch-upstream.sh sparse)")
@@ -2020,6 +2025,93 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class BusinessTest(unittest.TestCase):
+    """The Business button shows without the purchase buttons; the ads switch
+    of the Business section is not added (task 105)."""
+
+    # The places as upstream writes them, shortened around the anchors.
+    PLACES = {
+        patch.SETTINGS_MAIN: ("void BuildPremiumSection(SectionBuilder &builder) {\n"
+                              + patch.BUSINESS_KEPT[0][1] + "\n"
+                              + patch.BUSINESS_EDITS[0][1] + "\t\t.onClick = [=] {},\n"
+                              + patch.BUSINESS_EDITS[1][1] + patch.BUSINESS_KEPT[1][1] + "\t});\n}\n"),
+        patch.SETTINGS_BUSINESS: (patch.BUSINESS_EDITS[2][1] + "\t\tstd::shared_ptr<BusinessState> state) {\n}\n\n"
+                                  "void BuildBusinessSectionContent(\n\t\tSectionBuilder &builder) {\n\tif (controller) {\n"
+                                  + patch.BUSINESS_EDITS[3][1]),
+    }
+
+    def tree(self, root, files=None):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        for rel, text in (files or self.PLACES).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_not_hidden_by_task_071(self):
+        for _, old, new in patch.PREMIUM_FOR_EVERYONE_EDITS:
+            self.assertNotIn("BuildPremiumSection", old + new)
+
+    def test_patch_and_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the Business edit of task 105 is not there"):
+                patch.verify_business(tree)
+            patch.business(tree)
+            patch.verify_business(tree)
+            main = tree.read(patch.SETTINGS_MAIN)
+            # The purchase buttons are inside the condition, the Business button after it.
+            opened = main.index("\tif (session->premiumCanBuy()) {\n")
+            closed = main.index("\t} // pluma: the purchase buttons end here\n")
+            self.assertLess(opened, main.index('u"main/premium"_q'))
+            self.assertLess(main.index('u"main/premium"_q'), closed)
+            self.assertLess(closed, main.index('u"main/business"_q'))
+            self.assertEqual(main.count("{"), main.count("}"))
+            business = tree.read(patch.SETTINGS_BUSINESS)
+            self.assertNotIn("BuildSponsoredSection(builder", business)
+            self.assertEqual(business.count("{"), business.count("}"))
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.business(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.BUSINESS_EDITS):
+            files = dict(self.PLACES)
+            files[rel] = files[rel].replace(old, old[:-2] + "~" + old[-1])
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), files)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.business(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.business(tree)
+            # Each edit taken back.
+            for rel, old, new in patch.BUSINESS_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=new[:40]), self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # The section hidden whole again, as task 071 did, or the button moved.
+            for rel, kept in patch.BUSINESS_KEPT:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(kept, kept.replace("premiumPossible", "premiumCanBuy")
+                                                .replace("BusinessId", "PremiumId")))
+                with self.subTest(kept=kept[:40]), self.assertRaisesRegex(patch.PatchError, "not upstream's"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # The switch added from somewhere else.
+            patched = tree.read(patch.SETTINGS_BUSINESS)
+            tree.write(patch.SETTINGS_BUSINESS, patched + "\tBuildSponsoredSection(builder, state);\n")
+            with self.assertRaisesRegex(patch.PatchError, "the ads switch is still added"):
+                patch.verify_business(tree)
+            tree.write(patch.SETTINGS_BUSINESS, patched)
+            patch.verify_business(tree)
 
 
 class TranscriptionTest(unittest.TestCase):
