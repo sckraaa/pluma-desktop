@@ -2523,7 +2523,7 @@ def check_upstream(tree, c):
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
                 + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
-                + call_colors_edited() + cdn_https_edited() + edges_edited()
+                + call_colors_edited() + cdn_https_edited() + edges_edited() + paths_edited()
                 + maplibre_picker_edited()):
         tree.lf_only(rel)
 
@@ -2710,6 +2710,7 @@ def patch(tree, c):
     call_colors(tree)
     cdn_https(tree, c)
     edges(tree, c)
+    paths(tree, c)
     maplibre_picker(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
@@ -2862,6 +2863,7 @@ def verify(tree, c):
     verify_call_colors(tree)
     verify_cdn_https(tree, c)
     verify_edges(tree, c)
+    verify_paths(tree, c)
     verify_maplibre_picker(tree)
 
 
@@ -7293,6 +7295,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "scheme.h"
 
+#include <QtCore/QJsonValue>
+
 namespace MTP::details {
 
 // The edges of the Pluma server (task 109 of the server repository): its
@@ -7309,6 +7313,11 @@ inline constexpr auto kMaxEdges = 4;
 struct EdgePlan {
 \tstd::vector<QString> urls;
 \tbool first = false;
+
+\t// While the probes of task 113 choose: the paths to connect through,
+\t// best first, PathDirect() or an edge's URL; the paths not there are
+\t// kept out of the race in this network. Empty: urls and first decide.
+\tstd::vector<QString> order;
 };
 
 // Any thread: the edges for a connection to datacenter 1 now.
@@ -7327,6 +7336,9 @@ void EdgeApplyAppConfig(const MTPJSONValue *value);
 // An address of the edges' in the place of an IP address.
 [[nodiscard]] bool IsEdgeAddress(const QString &address);
 
+// A value of the app config as JSON.
+[[nodiscard]] QJsonValue EdgeJson(const MTPJSONValue &value);
+
 // The priorities of the test connections of SessionPrivate: upstream gives
 // the direct addresses 0 to 4; the edges go below them in the order of
 // their list, or above them while they go first.
@@ -7335,6 +7347,13 @@ void EdgeApplyAppConfig(const MTPJSONValue *value);
 }
 [[nodiscard]] inline int DirectPriority(int upstream, bool edgesFirst) {
 \treturn upstream + (edgesFirst ? 0 : kMaxEdges);
+}
+
+// While the probes of task 113 choose: the paths of EdgePlan::order in
+// bands of 5 for upstream's 0 to 4 of the direct addresses, the first of
+// the order highest; an edge is at the bottom of its band.
+[[nodiscard]] inline int PathPriority(int rank, int count, int upstream) {
+\treturn (count - rank) * 5 + upstream;
 }
 
 } // namespace MTP::details
@@ -7349,6 +7368,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "mtproto/details/mtproto_edge_route.h"
 
+#include "mtproto/details/mtproto_path_select.h"
 #include "settings.h"
 
 #include <QtCore/QJsonArray>
@@ -7525,18 +7545,29 @@ void Save(const QByteArray &serialized) {
 } // namespace
 
 EdgePlan EdgeCurrentPlan() {
-\tauto &state = Global();
-\tconst auto lock = std::lock_guard(state.mutex);
-\tLoadOnce(state);
-\tif (state.firstUntil && crl::now() >= state.firstUntil) {
-\t\tstate.firstUntil = 0;
-\t\tLOG(("MTP Info: the direct path goes first again."));
+\tauto result = EdgePlan();
+\tauto edgesFirst = false;
+\t{
+\t\tauto &state = Global();
+\t\tconst auto lock = std::lock_guard(state.mutex);
+\t\tLoadOnce(state);
+\t\tif (state.firstUntil && crl::now() >= state.firstUntil) {
+\t\t\tstate.firstUntil = 0;
+\t\t\tLOG(("MTP Info: the direct path goes first again."));
+\t\t}
+\t\tconst auto &config = Current(state);
+\t\tresult = EdgePlan{
+\t\t\t.urls = config.urls,
+\t\t\t.first = config.first || (state.firstUntil != 0),
+\t\t};
+\t\tedgesFirst = config.first;
 \t}
-\tconst auto &config = Current(state);
-\treturn EdgePlan{
-\t\t.urls = config.urls,
-\t\t.first = config.first || (state.firstUntil != 0),
-\t};
+\t// The probes of task 113 order the paths by the server's order and the
+\t// memory of this network; "the edges go first until" is not theirs.
+\tif (!result.urls.empty()) {
+\t\tresult.order = PathOrder(result.urls, edgesFirst);
+\t}
+\treturn result;
 }
 
 void EdgeTakeOver() {
@@ -7581,6 +7612,10 @@ void EdgeApplyAppConfig(const MTPJSONValue *value) {
 
 bool IsEdgeAddress(const QString &address) {
 \treturn address.startsWith(u"wss://"_q);
+}
+
+QJsonValue EdgeJson(const MTPJSONValue &value) {
+\treturn ToJson(value);
 }
 
 } // namespace MTP::details
@@ -7916,6 +7951,7 @@ EDGE_EDITS = (
     (SESSION_PRIVATE_H,
      "#include \"base/timer.h\"\n",
      "#include \"mtproto/details/mtproto_edge_route.h\"\n"
+     "#include \"mtproto/details/mtproto_path_select.h\"\n"
      "#include \"base/timer.h\"\n"),
     (SESSION_PRIVATE_H,
      "\tstruct TestConnection {\n"
@@ -7925,12 +7961,13 @@ EDGE_EDITS = (
      "\tstruct TestConnection {\n"
      "\t\tConnectionPointer data;\n"
      "\t\tint priority = 0;\n"
-     "\t\tbool edge = false; // pluma: through an edge (task 109)\n"
+     "\t\t// pluma: the edge's URL, empty for the direct path (tasks 109, 113).\n"
+     "\t\tQString edge;\n"
      "\t};\n"),
     (SESSION_PRIVATE_H,
      "\tvoid waitBetterFailed();\n",
      "\tvoid waitBetterFailed();\n"
-     "\tvoid connectionChosen(bool throughEdge); // pluma: task 109\n"
+     "\tvoid connectionChosen(const QString &edge); // pluma: tasks 109, 113\n"
      "\tbool directFroze(); // pluma: task 109\n"
      "\tvoid directSilenceFailed(); // pluma: task 109\n"),
     (SESSION_PRIVATE_H,
@@ -7946,6 +7983,10 @@ EDGE_EDITS = (
      "\tcrl::time _directFrozeAt = 0;\n"
      "\tint _directFreezes = 0;\n"
      "\tbool _directFrozen = false;\n"
+     "\n"
+     "\t// pluma: the probes of the paths to datacenter 1, of its main session\n"
+     "\t// (task 113).\n"
+     "\tstd::unique_ptr<PathProber> _pathProber;\n"
      "\n"
      "};\n"),
     (SESSION_PRIVATE,
@@ -7978,16 +8019,28 @@ EDGE_EDITS = (
      "\t\tpriority\n"
      "\t});\n",
      "\t// pluma: the edges of the Pluma server (task 109) in the order of their\n"
-     "\t// list, below the direct addresses or, while they go first, above them.\n"
+     "\t// list, below the direct addresses or, while they go first, above them;\n"
+     "\t// while the probes choose (task 113), the paths in their order, and\n"
+     "\t// none of the paths kept out of the race in this network.\n"
      "\tconst auto edge = ranges::find(_edges.urls, ip);\n"
      "\tconst auto throughEdge = (edge != end(_edges.urls));\n"
-     "\tconst auto priority = throughEdge\n"
+     "\tconst auto upstream = (qthelp::is_ipv6(ip) ? (OptionPreferIPv6.value() ? 2 : 0) : 1)\n"
+     "\t\t+ (protocol == DcOptions::Variants::Tcp ? 1 : 0)\n"
+     "\t\t+ (protocolSecret.empty() ? 0 : 1);\n"
+     "\tconst auto path = ranges::find(\n"
+     "\t\t_edges.order,\n"
+     "\t\tthroughEdge ? ip : PathDirect());\n"
+     "\tif (!_edges.order.empty() && path == end(_edges.order)) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tconst auto priority = !_edges.order.empty()\n"
+     "\t\t? PathPriority(\n"
+     "\t\t\tint(path - begin(_edges.order)),\n"
+     "\t\t\tint(_edges.order.size()),\n"
+     "\t\t\tthroughEdge ? 0 : upstream)\n"
+     "\t\t: throughEdge\n"
      "\t\t? EdgePriority(int(edge - begin(_edges.urls)), _edges.first)\n"
-     "\t\t: DirectPriority(\n"
-     "\t\t\t(qthelp::is_ipv6(ip) ? (OptionPreferIPv6.value() ? 2 : 0) : 1)\n"
-     "\t\t\t\t+ (protocol == DcOptions::Variants::Tcp ? 1 : 0)\n"
-     "\t\t\t\t+ (protocolSecret.empty() ? 0 : 1),\n"
-     "\t\t\t_edges.first);\n"
+     "\t\t: DirectPriority(upstream, _edges.first);\n"
      "\t_testConnections.push_back({\n"
      "\t\tAbstractConnection::Create(\n"
      "\t\t\t_instance,\n"
@@ -7996,7 +8049,7 @@ EDGE_EDITS = (
      "\t\t\tprotocolSecret,\n"
      "\t\t\t_options->proxy),\n"
      "\t\tpriority,\n"
-     "\t\tthroughEdge,\n"
+     "\t\tthroughEdge ? ip : QString(),\n"
      "\t});\n"),
     (SESSION_PRIVATE,
      "\t_options = std::make_unique<SessionOptions>(_sessionData->options());\n"
@@ -8048,7 +8101,7 @@ EDGE_EDITS = (
      "\tif (_connection\n"
      "\t\t&& !_throughEdge\n"
      "\t\t&& !_edges.urls.empty()\n"
-     "\t\t&& !_edges.first\n"
+     "\t\t&& (!_edges.first || !_edges.order.empty())\n"
      "\t\t&& !_directSilenceTimer.isActive()) {\n"
      "\t\t_directSilenceTimer.callOnce(kDirectSilenceTimeout);\n"
      "\t}\n"
@@ -8088,16 +8141,26 @@ EDGE_EDITS = (
      "\tconfirmBestConnection();\n"
      "}\n"
      "\n"
-     "// pluma: the edges of the Pluma server (task 109).\n"
-     "void SessionPrivate::connectionChosen(bool throughEdge) {\n"
+     "// pluma: the edges of the Pluma server (task 109) and the choice of the\n"
+     "// path by probes (task 113), which the main session of datacenter 1 runs.\n"
+     "void SessionPrivate::connectionChosen(const QString &edge) {\n"
+     "\tconst auto throughEdge = !edge.isEmpty();\n"
      "\t_throughEdge = throughEdge;\n"
      "\t_directSilenceTimer.cancel();\n"
      "\t_directFrozen = false;\n"
+     "\tif (_shiftedDcId == kEdgeDcId && !_edges.urls.empty()) {\n"
+     "\t\tif (!_pathProber) {\n"
+     "\t\t\t_pathProber = std::make_unique<PathProber>(_instance, thread());\n"
+     "\t\t}\n"
+     "\t\t_pathProber->connected(throughEdge ? edge : PathDirect());\n"
+     "\t} else {\n"
+     "\t\t_pathProber = nullptr;\n"
+     "\t}\n"
      "\tif (!throughEdge) {\n"
      "\t\treturn;\n"
      "\t}\n"
      "\t_directFreezes = 0;\n"
-     "\tif (!_edges.first) {\n"
+     "\tif (!_edges.first && _edges.order.empty()) {\n"
      "\t\t// The direct path did not connect in time.\n"
      "\t\tEdgeTakeOver();\n"
      "\t}\n"
@@ -8106,14 +8169,15 @@ EDGE_EDITS = (
      "// A request on the direct connection in use got no byte back: for the\n"
      "// time of a freeze, or until the connection is dropped for it. Once a\n"
      "// connection; the second connection in a row (within kDirectFreezeRow of\n"
-     "// the first) puts the edges first.\n"
+     "// the first) puts the edges first, or, while the probes choose, the best\n"
+     "// path that passed one.\n"
      "bool SessionPrivate::directFroze() {\n"
      "\t_directSilenceTimer.cancel();\n"
      "\tif (!_connection\n"
      "\t\t|| _throughEdge\n"
      "\t\t|| _directFrozen\n"
      "\t\t|| _edges.urls.empty()\n"
-     "\t\t|| _edges.first) {\n"
+     "\t\t|| (_edges.first && _edges.order.empty())) {\n"
      "\t\treturn false;\n"
      "\t}\n"
      "\t_directFrozen = true;\n"
@@ -8131,7 +8195,9 @@ EDGE_EDITS = (
      "\t\t).arg(_shiftedDcId\n"
      "\t\t).arg(kDirectFreezesToEdges));\n"
      "\t_directFreezes = 0;\n"
-     "\tEdgeTakeOver();\n"
+     "\tif (!PathFroze()) {\n"
+     "\t\tEdgeTakeOver();\n"
+     "\t}\n"
      "\treturn true;\n"
      "}\n"
      "\n"
@@ -8160,7 +8226,8 @@ EDGE_EDITS = (
     (MAIN_APP_CONFIG,
      "#include \"main/main_session.h\"\n",
      "#include \"main/main_session.h\"\n"
-     "#include \"mtproto/details/mtproto_edge_route.h\"\n"),
+     "#include \"mtproto/details/mtproto_edge_route.h\"\n"
+     "#include \"mtproto/details/mtproto_path_select.h\"\n"),
     (MAIN_APP_CONFIG,
      "\t\t\tupdateIgnoredRestrictionReasons(std::move(was));\n",
      "\t\t\tupdateIgnoredRestrictionReasons(std::move(was));\n"
@@ -8168,7 +8235,12 @@ EDGE_EDITS = (
      "\t\t\t// pluma: the edges of the Pluma server (task 109).\n"
      "\t\t\tconst auto edge = _data.find(u\"pluma_edge\"_q);\n"
      "\t\t\tMTP::details::EdgeApplyAppConfig(\n"
-     "\t\t\t\t(edge != end(_data)) ? &edge->second : nullptr);\n"),
+     "\t\t\t\t(edge != end(_data)) ? &edge->second : nullptr);\n"
+     "\n"
+     "\t\t\t// pluma: the parameters of the path probes (task 113).\n"
+     "\t\t\tconst auto probe = _data.find(u\"pluma_probe\"_q);\n"
+     "\t\t\tMTP::details::PathApplyAppConfig(\n"
+     "\t\t\t\t(probe != end(_data)) ? &probe->second : nullptr);\n"),
     (CMAKE_APP,
      "    mtproto/details/mtproto_web_proxy_socket.cpp\n"
      "    mtproto/details/mtproto_web_proxy_socket.h\n",
@@ -8176,6 +8248,9 @@ EDGE_EDITS = (
      "    mtproto/details/mtproto_edge_route.h\n"
      "    mtproto/details/mtproto_edge_socket.cpp\n"
      "    mtproto/details/mtproto_edge_socket.h\n"
+     "    mtproto/details/mtproto_path_rules.h\n"
+     "    mtproto/details/mtproto_path_select.cpp\n"
+     "    mtproto/details/mtproto_path_select.h\n"
      "    mtproto/details/mtproto_web_proxy_socket.cpp\n"
      "    mtproto/details/mtproto_web_proxy_socket.h\n"),
 )
@@ -8301,6 +8376,333 @@ def verify_edges(tree, c):
 def edges_edited():
     """The upstream files edges() edits."""
     return tuple(dict.fromkeys(rel for rel, _, _ in EDGE_EDITS))
+
+
+# --- The path to datacenter 1 by probes (task 113) ----------------------------
+# The edges of task 109 come to the race beside the direct path, but which
+# path a connection takes is decided by a req_pq of a few hundred bytes,
+# which also passes a path that freezes after its first ~16 KB (task 092 of
+# the server repository): from Russia the app found the edges only after
+# two freezes, 25 to 30 seconds, at every start. The gateway answers a
+# probe of the size asked (pluma.probe, pluma.probeData; the contract is in
+# docs/tasks/113-smart-path-selection.md of the server, "Контракт пробы"),
+# and the app chooses the path by such probes (ADR 0073). The sessions
+# connect at once in the order of the memory of this network, as before;
+# the probes run beside them, on connections of their own. The edits
+# (lines of the pinned tdesktop):
+# - path-selection/, three new files in mtproto/details: the rules without
+#   Qt (mtproto_path_rules.h: pluma_probe, the bytes of the probe and its
+#   answer, the outcome, the score, the memory by network, the choice; its
+#   test is path-selection/rules_test.cpp, which ci/path_rules_test.py
+#   builds and runs), and the selector with the prober
+#   (mtproto_path_select.{h,cpp}): the memory in tdata/pluma_edge_paths, the
+#   key of the network (the country of pluma_probe and a hash of the kinds
+#   and prefixes of the interfaces), the rounds of probes and the switches;
+# - mtproto/connection_tcp.{h,cpp}: a connection made to probe its path asks
+#   req_pq_multi in place of the fake req_pq (socketConnected, 413-422),
+#   and after resPQ (socketPacket, 610-621) gives every packet to the
+#   prober instead of the queue; every read (socketRead, 312-316) is timed;
+#   sendPathProbe writes pluma.probe as prepareNotSecurePacket lays out an
+#   unencrypted message, without the padding inside message_data_length
+#   (connection_abstract.h 172-208) the gateway refuses for the probe;
+# - mtproto/session_private.cpp: the main session of datacenter 1 makes the
+#   prober when it connects (connectionChosen of task 109); onSentSome (1136)
+#   and onReceivedSome (1159) feed its watch of requests without an answer,
+#   and the sessions of files to datacenter 1 tell it a transfer is going on
+#   (isDownloadDcId, isUploadDcId, facade.h 58, 106);
+#   the priorities of the test connections (appendTestConnection, 196-214)
+#   follow the order of the probes, and the paths kept out of the race in
+#   this network are not tried (the edits of task 109, changed with it);
+# - mtproto/mtp_instance.cpp: a switch of the path restarts the sessions of
+#   datacenter 1 of every account (Instance::Private::restart, 620-627), as
+#   a change of the network's reachability restarts them all (335-338);
+# - main/main_app_config.cpp: pluma_probe with pluma_edge after every full
+#   help.getAppConfig (refresh, 323-367), and the app config asked again
+#   when the network changes (the constructor, 27-35);
+# - core/application.cpp: updateNonIdle (1434-1439) marks a user who did
+#   something; the periodic probes wait for one.
+PATH_DIR = pathlib.Path(__file__).resolve().parent.parent / "path-selection"
+PATH_RULES_H = SOURCES + "/mtproto/details/mtproto_path_rules.h"
+PATH_SELECT_H = SOURCES + "/mtproto/details/mtproto_path_select.h"
+PATH_SELECT = SOURCES + "/mtproto/details/mtproto_path_select.cpp"
+CONNECTION_TCP_H = SOURCES + "/mtproto/connection_tcp.h"
+PATH_FILES = ((PATH_RULES_H, "mtproto_path_rules.h"), (PATH_SELECT_H, "mtproto_path_select.h"),
+              (PATH_SELECT, "mtproto_path_select.cpp"))
+
+PATH_EDITS = (
+    (CONNECTION_TCP_H,
+     "\tQString transport() const override;\n"
+     "\tQString tag() const override;\n"
+     "\n"
+     "\t~TcpConnection();\n",
+     "\tQString transport() const override;\n"
+     "\tQString tag() const override;\n"
+     "\n"
+     "\t// pluma: the probe of a path (task 113). Set before connectToServer,\n"
+     "\t// the connection asks req_pq_multi in place of the fake req_pq and,\n"
+     "\t// once connected() by its resPQ, carries pluma.probe and its answer\n"
+     "\t// instead of requests: ready when the socket connects, read with the\n"
+     "\t// count of every read off it, packet with every packet after resPQ.\n"
+     "\tstruct PathProbe {\n"
+     "\t\tFn<void()> ready;\n"
+     "\t\tFn<void(int count)> read;\n"
+     "\t\tFn<void(bytes::const_span packet)> packet;\n"
+     "\t};\n"
+     "\tvoid setPathProbe(PathProbe callbacks);\n"
+     "\tvoid sendPathProbe(bytes::const_span message);\n"
+     "\n"
+     "\t~TcpConnection();\n"),
+    (CONNECTION_TCP_H,
+     "\trpl::lifetime _connectedLifetime;\n"
+     "\trpl::lifetime _lifetime;\n"
+     "\n"
+     "};\n",
+     "\trpl::lifetime _connectedLifetime;\n"
+     "\trpl::lifetime _lifetime;\n"
+     "\n"
+     "\tstd::unique_ptr<PathProbe> _pathProbe; // pluma: task 113\n"
+     "\n"
+     "};\n"),
+    (CONNECTION_TCP,
+     "#include \"base/qthelp_url.h\"\n",
+     "#include \"base/qthelp_url.h\"\n"
+     "#include \"base/unixtime.h\"\n"),
+    (CONNECTION_TCP,
+     "\t\t\taesCtrEncrypt(read, _receiveKey, &_receiveState);\n"
+     "\t\t\tCONNECTION_LOG_INFO(u\"Read %1 bytes\"_q.arg(readCount));\n",
+     "\t\t\taesCtrEncrypt(read, _receiveKey, &_receiveState);\n"
+     "\t\t\tCONNECTION_LOG_INFO(u\"Read %1 bytes\"_q.arg(readCount));\n"
+     "\t\t\tif (_pathProbe) { // pluma: the time of every read (task 113)\n"
+     "\t\t\t\t_pathProbe->read(int(readCount));\n"
+     "\t\t\t}\n"),
+    (CONNECTION_TCP,
+     "\tauto buffer = preparePQFake(_checkNonce);\n",
+     "\t// pluma: a probe of its path asks as the clients that probe do, so\n"
+     "\t// that its round trip is theirs (task 113).\n"
+     "\tauto buffer = _pathProbe\n"
+     "\t\t? prepareNotSecurePacket(\n"
+     "\t\t\tMTPReq_pq_multi(_checkNonce),\n"
+     "\t\t\tbase::unixtime::mtproto_msg_id())\n"
+     "\t\t: preparePQFake(_checkNonce);\n"),
+    (CONNECTION_TCP,
+     "\t_pingTime = crl::now();\n"
+     "\tsendData(std::move(buffer));\n"
+     "}\n",
+     "\t_pingTime = crl::now();\n"
+     "\tsendData(std::move(buffer));\n"
+     "\tif (_pathProbe) { // pluma: task 113\n"
+     "\t\t_pathProbe->ready();\n"
+     "\t}\n"
+     "}\n"),
+    (CONNECTION_TCP,
+     "\t} else if (_status == Status::Ready) {\n"
+     "\t\t_receivedQueue.push_back(data);\n"
+     "\t\treceivedData();\n",
+     "\t} else if (_status == Status::Ready && _pathProbe) {\n"
+     "\t\t// pluma: the answer to the probe of the path (task 113).\n"
+     "\t\t_pathProbe->packet(bytes::make_span(data));\n"
+     "\t} else if (_status == Status::Ready) {\n"
+     "\t\t_receivedQueue.push_back(data);\n"
+     "\t\treceivedData();\n"),
+    (CONNECTION_TCP,
+     "TcpConnection::~TcpConnection() = default;\n",
+     "// pluma: the probe of a path (task 113).\n"
+     "void TcpConnection::setPathProbe(PathProbe callbacks) {\n"
+     "\tExpects(_status == Status::Waiting);\n"
+     "\tExpects(_socket == nullptr);\n"
+     "\n"
+     "\t_pathProbe = std::make_unique<PathProbe>(std::move(callbacks));\n"
+     "}\n"
+     "\n"
+     "// The unencrypted message as prepareNotSecurePacket lays it out, but\n"
+     "// with message_data_length the exact size of pluma.probe: the gateway\n"
+     "// takes no padding inside it.\n"
+     "void TcpConnection::sendPathProbe(bytes::const_span message) {\n"
+     "\tExpects(_pathProbe != nullptr);\n"
+     "\tExpects(_status == Status::Ready);\n"
+     "\tExpects(!message.empty() && !(message.size() % sizeof(mtpPrime)));\n"
+     "\n"
+     "\t// 2 ints of TCP, auth_key_id, msg_id, message_data_length.\n"
+     "\tconstexpr auto kPrefixInts = 7;\n"
+     "\tconst auto ints = int(message.size() / sizeof(mtpPrime));\n"
+     "\tauto buffer = mtpBuffer(kPrefixInts + ints);\n"
+     "\tqToUnaligned(base::unixtime::mtproto_msg_id(), &buffer[4]);\n"
+     "\tbuffer[6] = mtpPrime(message.size());\n"
+     "\tbytes::copy(\n"
+     "\t\tbytes::make_span(buffer).subspan(kPrefixInts * sizeof(mtpPrime)),\n"
+     "\t\tmessage);\n"
+     "\tsendData(std::move(buffer));\n"
+     "}\n"
+     "\n"
+     "TcpConnection::~TcpConnection() = default;\n"),
+    (SESSION_PRIVATE,
+     "\tif (!_firstSentAt) {\n"
+     "\t\t_firstSentAt = crl::now();\n"
+     "\t}\n"
+     "}\n",
+     "\tif (!_firstSentAt) {\n"
+     "\t\t_firstSentAt = crl::now();\n"
+     "\t}\n"
+     "\t// pluma: requests without an answer, and transfers (task 113).\n"
+     "\tif (_pathProber) {\n"
+     "\t\t_pathProber->sent();\n"
+     "\t} else if (BareDcId(_shiftedDcId) == kEdgeDcId\n"
+     "\t\t&& (isDownloadDcId(_shiftedDcId) || isUploadDcId(_shiftedDcId))) {\n"
+     "\t\tPathFileActivity();\n"
+     "\t}\n"
+     "}\n"),
+    (SESSION_PRIVATE,
+     "\t\t_firstSentAt = -1;\n"
+     "\t}\n"
+     "}\n",
+     "\t\t_firstSentAt = -1;\n"
+     "\t}\n"
+     "\t// pluma: an answer, and transfers (task 113).\n"
+     "\tif (_pathProber) {\n"
+     "\t\t_pathProber->received();\n"
+     "\t} else if (BareDcId(_shiftedDcId) == kEdgeDcId\n"
+     "\t\t&& (isDownloadDcId(_shiftedDcId) || isUploadDcId(_shiftedDcId))) {\n"
+     "\t\tPathFileActivity();\n"
+     "\t}\n"
+     "}\n"),
+    (INSTANCE,
+     "#include \"mtproto/details/mtproto_rsa_public_key.h\"\n",
+     "#include \"mtproto/details/mtproto_path_select.h\"\n"
+     "#include \"mtproto/details/mtproto_rsa_public_key.h\"\n"),
+    (INSTANCE,
+     "\t_networkReachability->availableChanges(\n"
+     "\t) | rpl::on_next([=](bool available) {\n"
+     "\t\trestart();\n"
+     "\t}, _lifetime);\n",
+     "\t_networkReachability->availableChanges(\n"
+     "\t) | rpl::on_next([=](bool available) {\n"
+     "\t\trestart();\n"
+     "\t}, _lifetime);\n"
+     "\n"
+     "\t// pluma: the path to datacenter 1 changed (task 113).\n"
+     "\tdetails::PathSwitches(\n"
+     "\t) | rpl::on_next([=] {\n"
+     "\t\trestart(ShiftedDcId(details::kEdgeDcId));\n"
+     "\t}, _lifetime);\n"),
+    (MAIN_APP_CONFIG,
+     "AppConfig::AppConfig(not_null<Account*> account) : _account(account) {\n",
+     "AppConfig::AppConfig(not_null<Account*> account) : _account(account) {\n"
+     "\t// pluma: another network may be another country, and pluma_edge and\n"
+     "\t// pluma_probe of the app config go by it (task 113).\n"
+     "\tMTP::details::PathNetworkChanges(\n"
+     "\t) | rpl::on_next([=] {\n"
+     "\t\trefresh(true);\n"
+     "\t}, _lifetime);\n"
+     "\n"),
+    (APPLICATION,
+     "#include \"mtproto/mtproto_dc_options.h\"\n",
+     "#include \"mtproto/details/mtproto_path_select.h\"\n"
+     "#include \"mtproto/mtproto_dc_options.h\"\n"),
+    (APPLICATION,
+     "void Application::updateNonIdle() {\n"
+     "\t_lastNonIdleTime = crl::now();\n",
+     "void Application::updateNonIdle() {\n"
+     "\t_lastNonIdleTime = crl::now();\n"
+     "\tMTP::details::PathUserActive(); // pluma: task 113\n"),
+)
+
+# What the edits leave, each exactly so many times: another reader of
+# pluma_probe, another prober, another place that probes or restarts for a
+# switch stops the patch until it is read.
+PATH_GUARDS = (
+    (CONNECTION_TCP, "_pathProbe->", 3),
+    (CONNECTION_TCP, "MTPReq_pq_multi(", 1),
+    (SESSION_PRIVATE, "PathPriority(", 1),
+    (SESSION_PRIVATE, "PathFroze()", 1),
+    (SESSION_PRIVATE, "std::make_unique<PathProber>(", 1),
+    (SESSION_PRIVATE, "_pathProber->", 3),
+    (SESSION_PRIVATE, "PathFileActivity();", 2),
+    (INSTANCE, "PathSwitches(", 1),
+    (MAIN_APP_CONFIG, "u\"pluma_probe\"_q", 1),
+    (MAIN_APP_CONFIG, "PathApplyAppConfig(", 1),
+    (MAIN_APP_CONFIG, "PathNetworkChanges(", 1),
+    (APPLICATION, "PathUserActive();", 1),
+    (CMAKE_APP, "mtproto/details/mtproto_path_", 3),
+)
+# The protocol of the contract, read back from the rules.
+PATH_CONTRACT = ("inline constexpr uint32_t kProbeId = 0x5C316D30U;\n",
+                 "inline constexpr uint32_t kProbeDataId = 0x6AB3780BU;\n",
+                 "inline constexpr int kChunk = 16384;\n",
+                 "inline constexpr int kDownMin = 16384;\n",
+                 "inline constexpr int kDownMax = 524288;\n",
+                 'inline const std::string kDirect = "direct";\n')
+PATH_PRIORITY = re.compile(r"return \(count - rank\) \* (\d+) \+ upstream;\n")
+
+
+def path_files():
+    """The new sources of task 113, as path-selection/ has them."""
+    return {rel: (PATH_DIR / name).read_text(encoding="utf-8") for rel, name in PATH_FILES}
+
+
+def paths(tree, c):
+    """The choice of the path by probes (task 113), with the edges of task
+    109: nothing without PLUMA_EDGE_WS_URLS, there is one path then."""
+    if not c.edge_urls:
+        return
+    files = path_files()
+    for rel in files:
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: upstream has a file of this name; the probes (task 113) would replace it")
+    for rel, old, new in PATH_EDITS:
+        tree.replace(rel, old, new)
+    for rel, text in files.items():
+        tree.write(rel, text)
+
+
+def check_path_priorities(header):
+    """The bands of PathPriority, read back from the header: wide enough for
+    upstream's 0 to 4 of the direct addresses, the first of the order
+    highest, no band below 0."""
+    found = PATH_PRIORITY.findall(header)
+    if len(found) != 1 or int(found[0]) < 5:
+        raise PatchError(f"{EDGE_ROUTE_H}: the bands of the paths are not where the patch reads them, "
+                         "or narrower than upstream's priorities")
+
+
+def verify_paths(tree, c):
+    files = path_files()
+    if not c.edge_urls:
+        for rel in files:
+            if (tree.root / rel).exists():
+                raise PatchError(f"{rel}: a build without PLUMA_EDGE_WS_URLS has the probes (task 113)")
+        for rel, _, new in PATH_EDITS:
+            if new in tree.read(rel):
+                raise PatchError(f"{rel}: a build without PLUMA_EDGE_WS_URLS has the probes (task 113)")
+        return
+    check_path_priorities(tree.read(EDGE_ROUTE_H))
+    for rel, text in files.items():
+        if tree.read(rel) != text:
+            raise PatchError(f"{rel}: not the probes of task 113 (path-selection/)")
+    rules = tree.read(PATH_RULES_H)
+    for line in PATH_CONTRACT:
+        if rules.count(line) != 1:
+            raise PatchError(f"{PATH_RULES_H}: {line.strip()!r} is not the contract of the probe (task 113)")
+    if re.search(r'^#include [<"](?!(?:algorithm|cmath|cstddef|cstdint|cstring|map|optional|string|vector)>)',
+                 rules, re.M):
+        raise PatchError(f"{PATH_RULES_H}: includes more than the standard library; its test builds it alone")
+    for rel, old, new in PATH_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the probes (task 113) is not there")
+    for rel, s, count in PATH_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another place decides what the probes (task 113) should")
+    for rel in tree.sources():
+        if rel not in (CONNECTION_TCP, CONNECTION_TCP_H, PATH_SELECT, PATH_SELECT_H) and (
+                "setPathProbe(" in tree.scan(rel) or "sendPathProbe(" in tree.scan(rel)):
+            raise PatchError(f"{rel}: probes a path outside the probes (task 113)")
+
+
+def paths_edited():
+    """The upstream files paths() edits."""
+    return tuple(dict.fromkeys(rel for rel, _, _ in PATH_EDITS))
 
 
 # --- The location picker on MapLibre (task 112) -------------------------------
