@@ -133,12 +133,16 @@ class KeyTest(unittest.TestCase):
         self.assertEqual([k[:2] for k in patch.embedded_keys(literal)], [(n, e)])
 
 
+# The edges of a build for the real server (task 109): a CDN's and a node's.
+EDGE_URLS = ("wss://e7a1b.gcorecdn.com/apiws", "wss://ru.pluma.chat/apiws")
+
+
 def config(**over):
     upstream = patch.load_env(ROOT / "upstream.env")
     app = patch.load_env(ROOT / "config/app.env")
     app.update(over.pop("app", {}))
     args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY,
-                update_keys=UPDATE_KEYS, build=57)
+                update_keys=UPDATE_KEYS, build=57, edge_ws_urls=",".join(EDGE_URLS))
     args.update(over)
     return patch.Config(upstream, app, **args)
 
@@ -211,9 +215,74 @@ class ConfigTest(unittest.TestCase):
             {"build": 100000},
             {"dev_cdn_http": "pluma.chat"},
             {"dev_cdn_http": "http://127.0.0.1"},
+            {"edge_ws_urls": "ws://e7a1b.gcorecdn.com/apiws"},
+            {"edge_ws_urls": "https://e7a1b.gcorecdn.com/apiws"},
+            {"edge_ws_urls": "wss://e7a1b.gcorecdn.com"},
+            {"edge_ws_urls": "wss://e7a1b.gcorecdn.com/apiws?x=1"},
+            {"edge_ws_urls": "wss://user@e7a1b.gcorecdn.com/apiws"},
+            {"edge_ws_urls": "wss://E7A1B.gcorecdn.com/apiws"},
+            {"edge_ws_urls": "wss://203.0.113.7/apiws"},
+            {"edge_ws_urls": "wss://[2001:db8::1]/apiws"},
+            {"edge_ws_urls": "wss://localhost/apiws"},
+            {"edge_ws_urls": "wss://-x.example.com/apiws"},
+            {"edge_ws_urls": "wss://edge.web.telegram.org/apiws"},
+            {"edge_ws_urls": "wss://t.me/apiws"},
+            {"edge_ws_urls": "wss://e7a1b.gcorecdn.com:0/apiws"},
+            {"edge_ws_urls": "wss://e7a1b.gcorecdn.com:65536/apiws"},
+            {"edge_ws_urls": "wss://a.example.com/apiws,,wss://b.example.com/apiws"},
+            {"edge_ws_urls": "wss://a.example.com/apiws,wss://a.example.com/apiws"},
+            {"edge_ws_urls": ",".join(f"wss://e{i}.example.com/apiws" for i in range(5))},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
+
+
+class EdgeConfigTest(unittest.TestCase):
+    """PLUMA_EDGE_WS_URLS (task 109)."""
+
+    def test_edges(self):
+        self.assertEqual(config().edge_urls, EDGE_URLS)
+        self.assertEqual(config(edge_ws_urls=" wss://a.example.com/apiws , wss://b.example.com:8443/x/y ").edge_urls,
+                         ("wss://a.example.com/apiws", "wss://b.example.com:8443/x/y"))
+        four = ",".join(f"wss://e{i}.example.com/apiws" for i in range(4))
+        self.assertEqual(len(config(edge_ws_urls=four).edge_urls), 4)
+        # None: the build has no edges.
+        for empty in ("", "  "):
+            self.assertEqual(config(edge_ws_urls=empty).edge_urls, ())
+
+    def test_priorities(self):
+        """The priorities of the header: the edges below upstream's 0 to 4
+        of the direct addresses by default, above them while they go first,
+        in the order of their list; changed numbers stop the check."""
+        header = patch.EDGE_ROUTE_HEADER
+        patch.check_edge_priorities(header)
+        for old, new, message in (
+                ("(first ? 5 : 0)", "(first ? 5 : 4)", "below the direct addresses by default"),
+                ("(first ? 5 : 0)", "(first ? 4 : 0)", "above the direct addresses while they go first"),
+                ("(edgesFirst ? 0 : kMaxEdges)", "(edgesFirst ? 1 : kMaxEdges)", "above the direct addresses"),
+                ("kMaxEdges - 1 - index", "index", "where the patch reads them"),
+                ("kMaxEdges = 4;", "kMaxEdges = 5;", "where the patch reads them")):
+            with self.subTest(new=new):
+                self.assertIn(old, header)
+                with self.assertRaisesRegex(patch.PatchError, message):
+                    patch.check_edge_priorities(header.replace(old, new))
+
+    def test_configure_passes_the_edges(self):
+        """A build for the server takes EDGE_WS_URLS, which the workflow
+        sets from the repository variable PLUMA_EDGE_WS_URLS wherever it
+        patches; a development build PLUMA_EDGE_WS_URLS of its environment."""
+        script = (ROOT / "ci/configure.sh").read_text()
+        dev_case = script[script.index("dev)\n"):script.index("server)\n")]
+        server_case = script[script.index("server)\n"):script.index("*)\n")]
+        self.assertIn("\tedge_urls=${PLUMA_EDGE_WS_URLS:-}\n", dev_case)
+        self.assertIn("\tedge_urls=${EDGE_WS_URLS:-}\n", server_case)
+        self.assertEqual(script.count("edge_urls="), 2)
+        self.assertIn('--edge-ws-urls "$edge_urls"\n', script)
+        workflow = (ROOT / ".github/workflows/desktop.yml").read_text()
+        servers = workflow.count("          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}\n")
+        self.assertEqual(servers, 4)
+        self.assertEqual(workflow.count("          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}\n"), servers)
+        self.assertEqual(workflow.count("EDGE_WS_URLS"), servers * 2)
 
 
 class ScanTest(unittest.TestCase):
@@ -764,6 +833,14 @@ DAMAGE += ((patch.PALETTE, "\ngroupCallMuted1: #0992ef;", "\ngroupCallMuted1: #0
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.CDN_HTTPS_EDITS)
 DAMAGE += ((S + "/storage/file_download_web.cpp", "namespace {\n",
             "namespace {\n// MTPupload_GetFile::Flag::f_cdn_supported\n"),)
+# The edges (task 109): every edit, damaged in the pinned upstream, a socket
+# made elsewhere, and another test connection stop the patch with the
+# file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.EDGE_EDITS)
+DAMAGE += ((S + "/mtproto/details/mtproto_tcp_socket.cpp", "namespace MTP::details {\n",
+            "namespace MTP::details {\n// std::make_unique<EdgeSocket>(thread)\n"),
+           (S + "/mtproto/session_private.cpp", "void SessionPrivate::restart() {\n",
+            "void SessionPrivate::restart() {\n\t// appendTestConnection(Variants::Tcp, {}, 0, {});\n"))
 
 # The Business edits (task 105) and the text they rely on, damaged in the
 # pinned upstream, stop the patch with the file's name.
@@ -2012,6 +2089,126 @@ class UpstreamTest(unittest.TestCase):
         self.written.add(patch.CDN_HTTPS)
         (self.root / patch.CDN_HTTPS).write_text("// upstream\n")
         with self.assertRaisesRegex(patch.PatchError, "download_cdn_https.cpp.*upstream has a file"):
+            self.run_patch()
+
+    def test_edges(self):
+        tree, c = self.run_patch()
+        self.assertEqual(c.edge_urls, EDGE_URLS)
+        self.assertEqual(tree.read(patch.EDGE_ROUTE_H), patch.EDGE_ROUTE_HEADER)
+        self.assertEqual(tree.read(patch.EDGE_SOCKET_H), patch.EDGE_SOCKET_HEADER)
+        self.assertEqual(tree.read(patch.EDGE_SOCKET), patch.EDGE_SOCKET_SOURCE)
+        route = tree.read(patch.EDGE_ROUTE)
+        self.assertIn("\t\t.urls = {\n"
+                      '\t\t\tu"wss://e7a1b.gcorecdn.com/apiws"_q,\n'
+                      '\t\t\tu"wss://ru.pluma.chat/apiws"_q,\n'
+                      "\t\t},\n"
+                      "\t\t.first = false, // The direct path first.\n", route)
+        self.assertNotIn(patch.EDGE_BUILT_IN_MARK, route)
+        # The contract of the clients: the key of the app config, its
+        # limits, the file it is kept in, sticky_s.
+        for s in ('object.value(u"v"_q)', 'object.value(u"ws"_q)', 'object.value(u"order"_q)',
+                  'object.value(u"sticky_s"_q)', "constexpr auto kStickyDefault = 1800 * crl::time(1000);",
+                  "constexpr auto kStickyMin = 60;", "constexpr auto kStickyMax = 86400;",
+                  'cWorkingDir() + u"tdata/pluma_edge"_q', 'address.startsWith(u"wss://"_q)',
+                  "ws.toArray().size() > kMaxEdges", "ranges::contains(result.urls, url)"):
+            self.assertEqual(route.count(s), 1, s)
+        socket = tree.read(patch.EDGE_SOCKET)
+        for s in ('_client->userAgent = u"Pluma"_q;', 'u"binary"_q);', "constexpr auto kSilenceTimeout = 45 * crl::time(1000);",
+                  "constexpr auto kMaxMessageSize = 1024 * 1024;", "_silence.callOnce(kSilenceTimeout);"):
+            self.assertIn(s, socket)
+        # The client answers ping with pong itself, as the contract asks.
+        client = tree.read(patch.WEBSOCKET_CLIENT)
+        self.assertIn("\t\tcase kOpcodePing:\n\t\t\twriteFrame(payload, kOpcodePong);\n", client)
+        self.assertIn('\t\trequest += u"User-Agent: "_q + userAgent + u"\\r\\n"_q;\n', client)
+        session = tree.read(patch.SESSION_PRIVATE)
+        self.assertIn("constexpr auto kDirectSilenceTimeout = 15 * crl::time(1000);\n"
+                      "constexpr auto kDirectFreezesToEdges = 2;\n"
+                      "constexpr auto kDirectFreezeRow = 10 * 60 * crl::time(1000);\n", session)
+        self.assertIn("\t\tfor (const auto &url : _edges.urls) {\n"
+                      "\t\t\tappendTestConnection(Variants::Tcp, url, 443, {});\n", session)
+        # The edges after every direct address, within the branch of no
+        # MTProto proxy.
+        connect = session[session.index("void SessionPrivate::connectToServer(bool afterConfig) {\n"):]
+        connect = connect[:connect.index("\n}\n")]
+        self.assertLess(connect.index("QString::fromStdString(endpoint.ip),"), connect.index("_edges.urls) {"))
+        self.assertLess(connect.index("_edges = (bareDc == kEdgeDcId\n\t\t&& _options->proxy.type == ProxyData::Type::None)"),
+                        connect.index("appendTestConnection(DcOptions::Variants::Tcp, {}, 0, {});"))
+        self.assertIn('\t\t: (_proxy.type == ProxyData::Type::None && IsEdgeAddress(address))\n'
+                      '\t\t? std::make_unique<EdgeSocket>(thread())\n', tree.read(patch.CONNECTION_TCP))
+        self.assertIn("\tEdgePlan _edges;\n", tree.read(patch.SESSION_PRIVATE_H))
+        self.assertIn("\t\t\tconst auto edge = _data.find(u\"pluma_edge\"_q);\n", tree.read(patch.MAIN_APP_CONFIG))
+        self.assertIn("    mtproto/details/mtproto_edge_route.cpp\n    mtproto/details/mtproto_edge_route.h\n"
+                      "    mtproto/details/mtproto_edge_socket.cpp\n    mtproto/details/mtproto_edge_socket.h\n"
+                      "    mtproto/details/mtproto_web_proxy_socket.cpp\n", tree.read(patch.CMAKE_APP))
+
+    def test_no_edges(self):
+        """A build without PLUMA_EDGE_WS_URLS has none of the edges, and the
+        sources the edges edit are upstream's (or task 107's)."""
+        tree, c = self.run_patch(edge_ws_urls="")
+        self.assertEqual(c.edge_urls, ())
+        for rel, _ in patch.EDGE_FILES:
+            self.assertFalse((self.root / rel).exists(), rel)
+        for rel in (patch.CONNECTION_TCP, patch.SESSION_PRIVATE_H, patch.WEBSOCKET_CLIENT, patch.WEBSOCKET_CLIENT_H):
+            self.assertEqual(tree.read_bytes(rel), self.files[rel], rel)
+        for rel, _, new in patch.EDGE_EDITS:
+            self.assertNotIn(new, tree.read(rel))
+        # The same tree is no build with edges, and the other way round.
+        with self.assertRaisesRegex(patch.PatchError, "mtproto_edge_route.h: missing"):
+            patch.verify_edges(tree, config())
+
+    def test_edges_are_verified(self):
+        """verify() stops a tree where an edit of task 109 is undone, the new
+        files differ, the edges of the build are not the variable's or not
+        wss://, the edges go above the direct path by default, another place
+        makes a test connection or an edge's socket."""
+        tree, c = self.run_patch()
+        patch.verify_edges(tree, c)
+
+        def stops(rel, text, message):
+            patched = tree.read(rel)
+            self.written.add(rel)
+            tree.write(rel, text(patched))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_edges(tree, c)
+            finally:
+                tree.write(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.EDGE_EDITS):
+            with self.subTest(edit=i):
+                stops(rel, lambda t: t.replace(new, old), "task 109")
+        with self.subTest(lost="the edges' test connections"):
+            stops(patch.SESSION_PRIVATE, lambda t: t.replace("\t\t\tappendTestConnection(Variants::Tcp, url, 443, {});\n", ""),
+                  "task 109")
+        with self.subTest(order="edges above the direct path by default"):
+            stops(patch.EDGE_ROUTE_H, lambda t: t.replace("(first ? 5 : 0)", "(first ? 5 : 9)"),
+                  "below the direct addresses by default")
+            stops(patch.EDGE_ROUTE, lambda t: t.replace(patch.EDGE_DEFAULT_ORDER, "\t\t.first = true,\n"),
+                  "does not go first")
+        with self.subTest(url="not wss://"):
+            stops(patch.EDGE_ROUTE, lambda t: t.replace('u"wss://ru.pluma.chat/apiws"_q', 'u"ws://ru.pluma.chat/apiws"_q'),
+                  "not PLUMA_EDGE_WS_URLS")
+            stops(patch.EDGE_ROUTE, lambda t: t.replace('\t\t\tu"wss://ru.pluma.chat/apiws"_q,\n', ""),
+                  "not PLUMA_EDGE_WS_URLS")
+        with self.subTest(source="changed"):
+            stops(patch.EDGE_SOCKET, lambda t: t.replace("45 * crl::time(1000)", "90 * crl::time(1000)"),
+                  "not the edges")
+            stops(patch.EDGE_ROUTE, lambda t: t.replace("kStickyMin = 60;", "kStickyMin = 1;"), "not the edges")
+        for rel, s, _ in patch.EDGE_GUARDS:
+            with self.subTest(guard=s):
+                stops(rel, lambda t: t + "// " + s + "\n", "another place decides")
+        with self.subTest(socket="elsewhere"):
+            stops(S + "/mtproto/details/mtproto_tls_socket.cpp", lambda t: t + "// EdgeSocket\n", "outside the edges")
+        # A build without the variable that has the edges.
+        with self.assertRaisesRegex(patch.PatchError, "without PLUMA_EDGE_WS_URLS has the edges"):
+            patch.verify_edges(tree, config(edge_ws_urls=""))
+        patch.verify(tree, c)
+
+    def test_edge_files_are_new(self):
+        """The patch stops when upstream comes with a file of the new names."""
+        self.written.add(patch.EDGE_SOCKET)
+        (self.root / patch.EDGE_SOCKET).write_text("// upstream\n")
+        with self.assertRaisesRegex(patch.PatchError, "mtproto_edge_socket.cpp.*upstream has a file"):
             self.run_patch()
 
     def test_maplibre_picker(self):

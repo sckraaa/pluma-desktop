@@ -97,6 +97,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
         run: |
           ci/fetch-upstream.sh sparse
           ci/configure.sh server
@@ -189,6 +190,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
         run: ci/configure.sh "$PLUMA_TARGET"
       - name: ccache, age
         run: |
@@ -306,6 +308,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
         run: ci/configure.sh "$PLUMA_TARGET"
       - name: age
         run: ci/setup.sh age
@@ -461,6 +464,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
         run: ci/configure.sh "$PLUMA_TARGET"
       - name: age
         run: ci/setup.sh age

@@ -472,7 +472,7 @@ def load_env(path):
 
 class Config:
     def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, update_keys, build=0,
-                 dev_cdn_http=""):
+                 dev_cdn_http="", edge_ws_urls=""):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -583,6 +583,10 @@ class Config:
                 self.dev_cdn_http = str(ipaddress.ip_address(dev_cdn_http))
             except ValueError:
                 raise PatchError(f"development HTTP host {dev_cdn_http!r} is not an IP address")
+
+        # The edges through a CDN (task 109), in the order the app tries
+        # them; none without PLUMA_EDGE_WS_URLS.
+        self.edge_urls = parse_edge_urls(edge_ws_urls)
 
 
 # --- updates -----------------------------------------------------------------
@@ -2519,7 +2523,8 @@ def check_upstream(tree, c):
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
                 + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
-                + call_colors_edited() + cdn_https_edited() + maplibre_picker_edited()):
+                + call_colors_edited() + cdn_https_edited() + edges_edited()
+                + maplibre_picker_edited()):
         tree.lf_only(rel)
 
 
@@ -2704,6 +2709,7 @@ def patch(tree, c):
     # After rebrand(): it writes the themes first.
     call_colors(tree)
     cdn_https(tree, c)
+    edges(tree, c)
     maplibre_picker(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
@@ -2855,6 +2861,7 @@ def verify(tree, c):
     verify_group_calls_e2e(tree)
     verify_call_colors(tree)
     verify_cdn_https(tree, c)
+    verify_edges(tree, c)
     verify_maplibre_picker(tree)
 
 
@@ -7209,6 +7216,1093 @@ def cdn_https_edited():
     return tuple(sorted({rel for rel, _, _ in CDN_HTTPS_EDITS}))
 
 
+# --- Edges through a CDN (task 109) ----------------------------------------------
+# Where the address of the Pluma server is blocked or freezes, the app reaches
+# it through an edge: MTProto over WebSocket in TLS, wss://<edge>/apiws on port
+# 443 of a CDN or of a node of the server's (task 109, ADR 0072 of the server
+# repository, its contract of the clients). The binary messages carry the bytes of the
+# TCP transport to datacenter 1, the obfuscated header first, as Web K sends
+# them; the server pings every 20 seconds. The edges of the build come from
+# PLUMA_EDGE_WS_URLS (--edge-ws-urls; empty, none of this is in the build).
+# The edits (lines of the pinned tdesktop):
+# - mtproto/details/mtproto_edge_socket.{h,cpp}, new: EdgeSocket, an
+#   AbstractSocket on Core::WebSocketClient (core/websocket_client.cpp), as
+#   WebProxySocket is one on its transport (mtproto_web_proxy_socket.cpp):
+#   "Sec-WebSocket-Protocol: binary", "User-Agent: Pluma", messages of at
+#   most 1 MiB, isGoodStartNonce as TcpSocket's, debugPostfix "_edge". The
+#   client answers ping with pong itself (websocket_client.cpp 233-234) and
+#   reports every frame (onActivity, 209-211): 45 seconds without one, the
+#   connection is dead. Its callbacks come from inside its socket's signals,
+#   so the events go in the queue, as TcpSocket's do.
+# - core/websocket_client.{h,cpp}: the upgrade request (sendUpgradeRequest,
+#   76-97) sends no User-Agent; a userAgent of the client's adds one, and the
+#   other users of the client (webauthn, wallet) leave it empty.
+# - mtproto/details/mtproto_edge_route.{h,cpp}, new: the list of the build;
+#   pluma_edge of help.getAppConfig ({"v":1,"ws":[...],"order":[...],
+#   "sticky_s":1800}), taken in AppConfig::refresh (main_app_config.cpp
+#   323-367) and kept in tdata/pluma_edge for the next start (a value that is
+#   not valid, or none, is the build's list again); "the edges go first
+#   until", in memory alone.
+# - mtproto/connection_tcp.cpp (connectToServer, 535-541): an edge's address
+#   in the place of the IP address takes an EdgeSocket, never with a proxy.
+# - mtproto/session_private.{h,cpp}: connectToServer (1011-1114) adds a test
+#   connection for every edge after the direct addresses (1059-1075) to
+#   datacenter 1, unless a proxy is on (it takes the edges' place as it takes
+#   the direct path's). appendTestConnection (203-205) gives the direct
+#   addresses upstream's priorities above the edges, and the edges theirs in
+#   the order of the list; while the edges go first, the other way round.
+#   tdesktop takes the first connection that answers its fake req_pq and
+#   waits 2 seconds (kWaitForBetterTimeout, 34) for one of a higher priority
+#   (onConnected, 2369-2402; confirmBestConnection, 2416-2438). An edge chosen
+#   while the direct path went first, or freezes of two direct connections
+#   in a row, put the edges first for sticky_s; then the direct path is
+#   tried first again at the next connection. A freeze of the connection in
+#   use: a request sent on it (onSentSome, 1136) and no byte back (onReceived-
+#   Some, 1159) for 15 seconds, or until tdesktop drops it for that silence
+#   itself (waitReceivedFailed, 1214-1236; 4 to 64 seconds by the size of the
+#   request), whichever comes first. Two freezes within 10 minutes are a
+#   row: a path that freezes after its first kilobytes (task 092) answers
+#   the handshake of every new connection and, while the app is idle, its
+#   requests for a minute or more, so neither the bytes nor the time of a
+#   connection that works ends a row. The second freeze in a row reconnects
+#   at once.
+EDGE_ROUTE = SOURCES + "/mtproto/details/mtproto_edge_route.cpp"
+EDGE_ROUTE_H = SOURCES + "/mtproto/details/mtproto_edge_route.h"
+EDGE_SOCKET = SOURCES + "/mtproto/details/mtproto_edge_socket.cpp"
+EDGE_SOCKET_H = SOURCES + "/mtproto/details/mtproto_edge_socket.h"
+CONNECTION_TCP = SOURCES + "/mtproto/connection_tcp.cpp"
+SESSION_PRIVATE_H = SOURCES + "/mtproto/session_private.h"
+WEBSOCKET_CLIENT = SOURCES + "/core/websocket_client.cpp"
+WEBSOCKET_CLIENT_H = SOURCES + "/core/websocket_client.h"
+MAIN_APP_CONFIG = SOURCES + "/main/main_app_config.cpp"
+MAX_EDGES = 4
+# PLUMA_EDGE_WS_URLS: wss://, a host name (TLS checks the name), an optional
+# port, a path.
+EDGE_URL = re.compile(r"wss://(?P<host>[a-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?(?P<path>/[A-Za-z0-9._~/-]*)")
+EDGE_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+EDGE_BUILT_IN_MARK = "//BUILT-IN EDGES\n"
+
+EDGE_ROUTE_HEADER = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#pragma once
+
+#include "scheme.h"
+
+namespace MTP::details {
+
+// The edges of the Pluma server (task 109 of the server repository): its
+// MTProto over WebSocket in TLS through a CDN, wss://<edge>/apiws, for
+// where the direct address is blocked or freezes. They are the last
+// addresses of datacenter 1, in the order of their list, unless the
+// server's pluma_edge puts them first, or the direct path failed and they
+// go first for its sticky_s. No proxy of the user's takes them.
+
+// The datacenter the edges lead to.
+inline constexpr auto kEdgeDcId = 1;
+inline constexpr auto kMaxEdges = 4;
+
+struct EdgePlan {
+\tstd::vector<QString> urls;
+\tbool first = false;
+};
+
+// Any thread: the edges for a connection to datacenter 1 now.
+[[nodiscard]] EdgePlan EdgeCurrentPlan();
+
+// Any thread: a connection went through an edge while the direct path went
+// first, or the direct path froze; the edges go first for sticky_s, and
+// then the direct path is tried first again.
+void EdgeTakeOver();
+
+// Main thread: the pluma_edge value of help.getAppConfig, nullptr when the
+// key is not there. The last value accepted is kept in tdata/pluma_edge;
+// without one, or with a value that is not valid, the build's own list.
+void EdgeApplyAppConfig(const MTPJSONValue *value);
+
+// An address of the edges' in the place of an IP address.
+[[nodiscard]] bool IsEdgeAddress(const QString &address);
+
+// The priorities of the test connections of SessionPrivate: upstream gives
+// the direct addresses 0 to 4; the edges go below them in the order of
+// their list, or above them while they go first.
+[[nodiscard]] inline int EdgePriority(int index, bool first) {
+\treturn (first ? 5 : 0) + (kMaxEdges - 1 - index);
+}
+[[nodiscard]] inline int DirectPriority(int upstream, bool edgesFirst) {
+\treturn upstream + (edgesFirst ? 0 : kMaxEdges);
+}
+
+} // namespace MTP::details
+"""
+
+EDGE_ROUTE_SOURCE = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#include "mtproto/details/mtproto_edge_route.h"
+
+#include "settings.h"
+
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QSaveFile>
+#include <QtCore/QUrl>
+
+#include <cmath>
+#include <mutex>
+
+namespace MTP::details {
+namespace {
+
+constexpr auto kStickyDefault = 1800 * crl::time(1000);
+constexpr auto kStickyMin = 60;
+constexpr auto kStickyMax = 86400;
+constexpr auto kMaxFileSize = 4096;
+
+struct EdgeConfig {
+\tstd::vector<QString> urls;
+\tbool first = false;
+\tcrl::time sticky = kStickyDefault;
+
+\tfriend inline bool operator==(
+\t\tconst EdgeConfig &,
+\t\tconst EdgeConfig &) = default;
+};
+
+struct State {
+\tstd::mutex mutex;
+\tbool loaded = false;
+\tstd::optional<EdgeConfig> received;
+\tcrl::time firstUntil = 0;
+};
+
+// The edges of the build (PLUMA_EDGE_WS_URLS of the repository).
+[[nodiscard]] const EdgeConfig &BuiltIn() {
+\tstatic const auto result = EdgeConfig{
+\t\t.urls = {
+//BUILT-IN EDGES
+\t\t},
+\t\t.first = false, // The direct path first.
+\t\t.sticky = kStickyDefault,
+\t};
+\treturn result;
+}
+
+[[nodiscard]] State &Global() {
+\tstatic State result;
+\treturn result;
+}
+
+[[nodiscard]] QString FilePath() {
+\treturn cWorkingDir() + u"tdata/pluma_edge"_q;
+}
+
+[[nodiscard]] bool IsEdgeUrl(const QString &text) {
+\tif (!IsEdgeAddress(text)) {
+\t\treturn false;
+\t}
+\tconst auto url = QUrl(text, QUrl::StrictMode);
+\treturn url.isValid()
+\t\t&& !url.host().isEmpty()
+\t\t&& url.userInfo().isEmpty()
+\t\t&& url.path().startsWith('/')
+\t\t&& !url.hasQuery()
+\t\t&& !url.hasFragment();
+}
+
+// {"v":1,"ws":["wss://<edge>/apiws"],"order":["direct","edge"],
+// "sticky_s":1800}: from 1 to 4 different addresses, the order either way,
+// sticky_s from 60 to 86400 seconds.
+[[nodiscard]] std::optional<EdgeConfig> Parse(const QJsonObject &object) {
+\tconst auto version = object.value(u"v"_q);
+\tconst auto ws = object.value(u"ws"_q);
+\tconst auto order = object.value(u"order"_q).toArray();
+\tconst auto sticky = object.value(u"sticky_s"_q);
+\tif (!version.isDouble()
+\t\t|| version.toDouble() != 1.
+\t\t|| !ws.isArray()
+\t\t|| ws.toArray().isEmpty()
+\t\t|| ws.toArray().size() > kMaxEdges
+\t\t|| order.size() != 2
+\t\t|| !sticky.isDouble()) {
+\t\treturn std::nullopt;
+\t}
+\tauto result = EdgeConfig();
+\tfor (const auto &entry : ws.toArray()) {
+\t\tconst auto url = entry.toString();
+\t\tif (!entry.isString()
+\t\t\t|| !IsEdgeUrl(url)
+\t\t\t|| ranges::contains(result.urls, url)) {
+\t\t\treturn std::nullopt;
+\t\t}
+\t\tresult.urls.push_back(url);
+\t}
+\tconst auto first = order[0].toString();
+\tconst auto second = order[1].toString();
+\tif (first == u"edge"_q && second == u"direct"_q) {
+\t\tresult.first = true;
+\t} else if (first != u"direct"_q || second != u"edge"_q) {
+\t\treturn std::nullopt;
+\t}
+\tconst auto seconds = sticky.toDouble();
+\tif (seconds != std::floor(seconds)
+\t\t|| seconds < kStickyMin
+\t\t|| seconds > kStickyMax) {
+\t\treturn std::nullopt;
+\t}
+\tresult.sticky = crl::time(seconds) * 1000;
+\treturn result;
+}
+
+[[nodiscard]] QJsonValue ToJson(const MTPJSONValue &value) {
+\treturn value.match([](const MTPDjsonNull &) {
+\t\treturn QJsonValue();
+\t}, [](const MTPDjsonBool &data) {
+\t\treturn QJsonValue(mtpIsTrue(data.vvalue()));
+\t}, [](const MTPDjsonNumber &data) {
+\t\treturn QJsonValue(data.vvalue().v);
+\t}, [](const MTPDjsonString &data) {
+\t\treturn QJsonValue(qs(data.vvalue()));
+\t}, [](const MTPDjsonArray &data) {
+\t\tauto result = QJsonArray();
+\t\tfor (const auto &entry : data.vvalue().v) {
+\t\t\tresult.push_back(ToJson(entry));
+\t\t}
+\t\treturn QJsonValue(result);
+\t}, [](const MTPDjsonObject &data) {
+\t\tauto result = QJsonObject();
+\t\tfor (const auto &entry : data.vvalue().v) {
+\t\t\tentry.match([&](const MTPDjsonObjectValue &pair) {
+\t\t\t\tresult.insert(qs(pair.vkey()), ToJson(pair.vvalue()));
+\t\t\t});
+\t\t}
+\t\treturn QJsonValue(result);
+\t});
+}
+
+// Under the mutex: the value kept from the last run, read once.
+void LoadOnce(State &state) {
+\tif (state.loaded) {
+\t\treturn;
+\t}
+\tstate.loaded = true;
+\tauto file = QFile(FilePath());
+\tif (!file.open(QIODevice::ReadOnly)) {
+\t\treturn;
+\t}
+\tconst auto document = QJsonDocument::fromJson(file.read(kMaxFileSize));
+\tif (document.isObject()) {
+\t\tstate.received = Parse(document.object());
+\t}
+}
+
+[[nodiscard]] const EdgeConfig &Current(const State &state) {
+\treturn state.received ? *state.received : BuiltIn();
+}
+
+void Save(const QByteArray &serialized) {
+\tif (serialized.isEmpty()) {
+\t\tQFile::remove(FilePath());
+\t\treturn;
+\t}
+\tauto file = QSaveFile(FilePath());
+\tif (!file.open(QIODevice::WriteOnly)
+\t\t|| file.write(serialized) != serialized.size()
+\t\t|| !file.commit()) {
+\t\tLOG(("MTP Error: could not keep the edges of the app config."));
+\t}
+}
+
+} // namespace
+
+EdgePlan EdgeCurrentPlan() {
+\tauto &state = Global();
+\tconst auto lock = std::lock_guard(state.mutex);
+\tLoadOnce(state);
+\tif (state.firstUntil && crl::now() >= state.firstUntil) {
+\t\tstate.firstUntil = 0;
+\t\tLOG(("MTP Info: the direct path goes first again."));
+\t}
+\tconst auto &config = Current(state);
+\treturn EdgePlan{
+\t\t.urls = config.urls,
+\t\t.first = config.first || (state.firstUntil != 0),
+\t};
+}
+
+void EdgeTakeOver() {
+\tauto &state = Global();
+\tconst auto lock = std::lock_guard(state.mutex);
+\tLoadOnce(state);
+\tconst auto &config = Current(state);
+\tif (config.first || state.firstUntil) {
+\t\treturn;
+\t}
+\tstate.firstUntil = std::max(crl::now() + config.sticky, crl::time(1));
+\tLOG(("MTP Info: the edges go first for %1 s."
+\t\t).arg(config.sticky / crl::time(1000)));
+}
+
+void EdgeApplyAppConfig(const MTPJSONValue *value) {
+\tauto parsed = std::optional<EdgeConfig>();
+\tauto serialized = QByteArray();
+\tif (value) {
+\t\tconst auto json = ToJson(*value);
+\t\tif (json.isObject()) {
+\t\t\tparsed = Parse(json.toObject());
+\t\t}
+\t\tif (parsed) {
+\t\t\tserialized = QJsonDocument(
+\t\t\t\tjson.toObject()).toJson(QJsonDocument::Compact);
+\t\t} else {
+\t\t\tLOG(("API Error: pluma_edge of the app config is not valid."));
+\t\t}
+\t}
+\tauto &state = Global();
+\t{
+\t\tconst auto lock = std::lock_guard(state.mutex);
+\t\tif (state.loaded && state.received == parsed) {
+\t\t\treturn;
+\t\t}
+\t\tstate.loaded = true;
+\t\tstate.received = std::move(parsed);
+\t}
+\tSave(serialized);
+}
+
+bool IsEdgeAddress(const QString &address) {
+\treturn address.startsWith(u"wss://"_q);
+}
+
+} // namespace MTP::details
+"""
+
+EDGE_SOCKET_HEADER = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#pragma once
+
+#include "mtproto/details/mtproto_abstract_socket.h"
+#include "base/timer.h"
+
+#include <QtCore/QByteArray>
+
+namespace Core {
+class WebSocketClient;
+} // namespace Core
+
+namespace MTP::details {
+
+// A connection to datacenter 1 through an edge of the Pluma server (task
+// 109 of the server repository): the bytes of the TCP transport, the
+// obfuscated header first, in binary messages of wss://<edge>/apiws.
+class EdgeSocket final : public AbstractSocket {
+public:
+\texplicit EdgeSocket(not_null<QThread*> thread);
+\t~EdgeSocket();
+
+\t// The address is the edge's wss:// URL; the port is used when it names
+\t// none.
+\tvoid connectToHost(const QString &address, int port) override;
+\tbool isGoodStartNonce(bytes::const_span nonce) override;
+\tvoid timedOut() override;
+\tbool isConnected() override;
+\tbool hasBytesAvailable() override;
+\tint64 read(bytes::span buffer) override;
+\tvoid write(bytes::const_span prefix, bytes::const_span buffer) override;
+
+\tint32 debugState() override;
+\tQString debugPostfix() const override;
+
+private:
+\tenum class State {
+\t\tNotConnected,
+\t\tConnecting,
+\t\tConnected,
+\t\tClosed,
+\t};
+
+\tvoid clientConnected();
+\tvoid clientData(const QByteArray &data);
+\tvoid clientClosed();
+\tvoid silent();
+\tvoid fail();
+\tvoid closeClient();
+
+\tstd::unique_ptr<Core::WebSocketClient> _client;
+\tbase::Timer _silence;
+\tQByteArray _incoming;
+\tint _incomingOffset = 0;
+\tState _state = State::NotConnected;
+\tbool _readyReadQueued = false;
+
+};
+
+} // namespace MTP::details
+"""
+
+EDGE_SOCKET_SOURCE = """\
+/*
+This file is part of Pluma, built on Telegram Desktop.
+
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+*/
+#include "mtproto/details/mtproto_edge_socket.h"
+
+#include "core/websocket_client.h"
+#include "base/invoke_queued.h"
+
+#include <QtCore/QtEndian>
+#include <QtCore/QUrl>
+
+namespace MTP::details {
+namespace {
+
+// The server pings every 20 seconds; nothing at all for this long is a
+// dead connection.
+constexpr auto kSilenceTimeout = 45 * crl::time(1000);
+
+// The largest binary message sent.
+constexpr auto kMaxMessageSize = 1024 * 1024;
+
+} // namespace
+
+EdgeSocket::EdgeSocket(not_null<QThread*> thread)
+: AbstractSocket(thread)
+, _silence(thread, [=] { silent(); }) {
+}
+
+EdgeSocket::~EdgeSocket() {
+\tcloseClient();
+}
+
+void EdgeSocket::connectToHost(const QString &address, int port) {
+\tExpects(_state == State::NotConnected);
+
+\t_state = State::Connecting;
+\tconst auto url = QUrl(address);
+\t_client = std::make_unique<Core::WebSocketClient>();
+\t_client->userAgent = u"Pluma"_q;
+\t_client->onConnected = [=] {
+\t\tclientConnected();
+\t};
+\t_client->onBinary = [=](QByteArray data) {
+\t\tclientData(data);
+\t};
+\t_client->onClosed = [=] {
+\t\tclientClosed();
+\t};
+\t_client->onActivity = [=] {
+\t\t_silence.callOnce(kSilenceTimeout);
+\t};
+\t_client->connectTo(
+\t\turl.host(),
+\t\turl.port(port),
+\t\turl.path(QUrl::FullyEncoded),
+\t\tu"binary"_q);
+}
+
+bool EdgeSocket::isGoodStartNonce(bytes::const_span nonce) {
+\tExpects(nonce.size() >= 2 * sizeof(uint32));
+
+\tconst auto bytes = nonce.data();
+\tconst auto zero = gsl::to_integer<uchar>(nonce.front());
+\tconst auto first = qFromUnaligned<uint32>(bytes);
+\tconst auto second = qFromUnaligned<uint32>(bytes + sizeof(uint32));
+\treturn (zero != 0xEFU)
+\t\t&& (first != 0x44414548U)
+\t\t&& (first != 0x54534F50U)
+\t\t&& (first != 0x20544547U)
+\t\t&& (first != 0xEEEEEEEEU)
+\t\t&& (first != 0xDDDDDDDDU)
+\t\t&& (first != 0x02010316U)
+\t\t&& (second != 0x00000000U);
+}
+
+void EdgeSocket::timedOut() {
+}
+
+bool EdgeSocket::isConnected() {
+\treturn (_state == State::Connected);
+}
+
+bool EdgeSocket::hasBytesAvailable() {
+\treturn (_incomingOffset < _incoming.size());
+}
+
+int64 EdgeSocket::read(bytes::span buffer) {
+\tconst auto available = _incoming.size() - _incomingOffset;
+\tif (available <= 0) {
+\t\treturn 0;
+\t}
+\tconst auto count = int(std::min<std::size_t>(available, buffer.size()));
+\tif (!count) {
+\t\treturn 0;
+\t}
+\tbytes::copy(
+\t\tbuffer,
+\t\tbytes::make_span(_incoming).subspan(_incomingOffset, count));
+\t_incomingOffset += count;
+\tif (_incomingOffset == _incoming.size()) {
+\t\t_incoming.clear();
+\t\t_incomingOffset = 0;
+\t} else if (_incomingOffset >= 64 * 1024
+\t\t&& _incomingOffset >= _incoming.size() / 2) {
+\t\t_incoming.remove(0, _incomingOffset);
+\t\t_incomingOffset = 0;
+\t}
+\treturn count;
+}
+
+void EdgeSocket::write(bytes::const_span prefix, bytes::const_span buffer) {
+\tExpects(!buffer.empty());
+
+\tif (_state != State::Connected) {
+\t\treturn;
+\t}
+\tauto data = QByteArray(
+\t\tint(prefix.size() + buffer.size()),
+\t\tQt::Uninitialized);
+\tif (!prefix.empty()) {
+\t\tmemcpy(data.data(), prefix.data(), prefix.size());
+\t}
+\tmemcpy(data.data() + prefix.size(), buffer.data(), buffer.size());
+\tif (data.size() <= kMaxMessageSize) {
+\t\t_client->sendBinary(data);
+\t\treturn;
+\t}
+\tfor (auto offset = 0; offset < data.size(); offset += kMaxMessageSize) {
+\t\t_client->sendBinary(data.mid(offset, kMaxMessageSize));
+\t}
+}
+
+int32 EdgeSocket::debugState() {
+\treturn int32(_state);
+}
+
+QString EdgeSocket::debugPostfix() const {
+\treturn u"_edge"_q;
+}
+
+// The client calls back from inside its socket's signals: what follows
+// may destroy this socket, so it goes in the queue (as TcpSocket's does).
+void EdgeSocket::clientConnected() {
+\tif (_state != State::Connecting) {
+\t\treturn;
+\t}
+\t_state = State::Connected;
+\t_silence.callOnce(kSilenceTimeout);
+\tInvokeQueued(this, [=] {
+\t\t_connected.fire({});
+\t});
+}
+
+void EdgeSocket::clientData(const QByteArray &data) {
+\tif (_state != State::Connected || data.isEmpty()) {
+\t\treturn;
+\t}
+\t_incoming.append(data);
+\tif (!_readyReadQueued) {
+\t\t_readyReadQueued = true;
+\t\tInvokeQueued(this, [=] {
+\t\t\t_readyReadQueued = false;
+\t\t\t_readyRead.fire({});
+\t\t});
+\t}
+}
+
+void EdgeSocket::clientClosed() {
+\tif (_state == State::Closed) {
+\t\treturn;
+\t}
+\tDEBUG_LOG(("Socket %1 Error: the edge closed the connection."
+\t\t).arg(_debugId));
+\tfail();
+}
+
+void EdgeSocket::silent() {
+\tif (_state != State::Connected) {
+\t\treturn;
+\t}
+\tDEBUG_LOG(("Socket %1 Error: nothing from the edge for %2 ms."
+\t\t).arg(_debugId
+\t\t).arg(kSilenceTimeout));
+\tcloseClient();
+\tfail();
+}
+
+void EdgeSocket::fail() {
+\t_state = State::Closed;
+\t_silence.cancel();
+\tInvokeQueued(this, [=] {
+\t\t_error.fire({});
+\t});
+}
+
+void EdgeSocket::closeClient() {
+\tif (const auto client = base::take(_client)) {
+\t\tclient->onConnected = nullptr;
+\t\tclient->onBinary = nullptr;
+\t\tclient->onClosed = nullptr;
+\t\tclient->onActivity = nullptr;
+\t\tclient->close();
+\t}
+}
+
+} // namespace MTP::details
+"""
+
+
+def edge_route_source(urls):
+    """mtproto_edge_route.cpp with the edges of the build."""
+    return EDGE_ROUTE_SOURCE.replace(EDGE_BUILT_IN_MARK, "".join(f'\t\t\tu"{url}"_q,\n' for url in urls))
+
+
+EDGE_FILES = ((EDGE_ROUTE_H, lambda c: EDGE_ROUTE_HEADER), (EDGE_ROUTE, lambda c: edge_route_source(c.edge_urls)),
+              (EDGE_SOCKET_H, lambda c: EDGE_SOCKET_HEADER), (EDGE_SOCKET, lambda c: EDGE_SOCKET_SOURCE))
+
+EDGE_EDITS = (
+    (WEBSOCKET_CLIENT_H,
+     "\tstd::function<void()> onClosed;\n"
+     "\tstd::function<void()> onActivity;\n",
+     "\tstd::function<void()> onClosed;\n"
+     "\tstd::function<void()> onActivity;\n"
+     "\n"
+     "\t// pluma: the User-Agent of the upgrade request, none when empty (the\n"
+     "\t// edges of task 109).\n"
+     "\tQString userAgent;\n"),
+    (WEBSOCKET_CLIENT,
+     "\tif (!_subprotocol.isEmpty()) {\n"
+     "\t\trequest += u\"Sec-WebSocket-Protocol: \"_q + _subprotocol + u\"\\r\\n\"_q;\n"
+     "\t}\n"
+     "\trequest += u\"\\r\\n\"_q;\n",
+     "\tif (!_subprotocol.isEmpty()) {\n"
+     "\t\trequest += u\"Sec-WebSocket-Protocol: \"_q + _subprotocol + u\"\\r\\n\"_q;\n"
+     "\t}\n"
+     "\tif (!userAgent.isEmpty()) { // pluma: the edges of task 109\n"
+     "\t\trequest += u\"User-Agent: \"_q + userAgent + u\"\\r\\n\"_q;\n"
+     "\t}\n"
+     "\trequest += u\"\\r\\n\"_q;\n"),
+    (CONNECTION_TCP,
+     "#include \"mtproto/details/mtproto_web_proxy_socket.h\"\n",
+     "#include \"mtproto/details/mtproto_edge_route.h\"\n"
+     "#include \"mtproto/details/mtproto_edge_socket.h\"\n"
+     "#include \"mtproto/details/mtproto_web_proxy_socket.h\"\n"),
+    (CONNECTION_TCP,
+     "\t_socket = (_proxy.type == ProxyData::Type::Web)\n"
+     "\t\t? std::make_unique<WebProxySocket>(thread(), _proxy)\n"
+     "\t\t: AbstractSocket::Create(\n",
+     "\t_socket = (_proxy.type == ProxyData::Type::Web)\n"
+     "\t\t? std::make_unique<WebProxySocket>(thread(), _proxy)\n"
+     "\t\t// pluma: an edge of the Pluma server (task 109), never through a\n"
+     "\t\t// proxy.\n"
+     "\t\t: (_proxy.type == ProxyData::Type::None && IsEdgeAddress(address))\n"
+     "\t\t? std::make_unique<EdgeSocket>(thread())\n"
+     "\t\t: AbstractSocket::Create(\n"),
+    (SESSION_PRIVATE_H,
+     "#include \"base/timer.h\"\n",
+     "#include \"mtproto/details/mtproto_edge_route.h\"\n"
+     "#include \"base/timer.h\"\n"),
+    (SESSION_PRIVATE_H,
+     "\tstruct TestConnection {\n"
+     "\t\tConnectionPointer data;\n"
+     "\t\tint priority = 0;\n"
+     "\t};\n",
+     "\tstruct TestConnection {\n"
+     "\t\tConnectionPointer data;\n"
+     "\t\tint priority = 0;\n"
+     "\t\tbool edge = false; // pluma: through an edge (task 109)\n"
+     "\t};\n"),
+    (SESSION_PRIVATE_H,
+     "\tvoid waitBetterFailed();\n",
+     "\tvoid waitBetterFailed();\n"
+     "\tvoid connectionChosen(bool throughEdge); // pluma: task 109\n"
+     "\tbool directFroze(); // pluma: task 109\n"
+     "\tvoid directSilenceFailed(); // pluma: task 109\n"),
+    (SESSION_PRIVATE_H,
+     "\tcrl::time _bindMessageSent = 0;\n"
+     "\n"
+     "};\n",
+     "\tcrl::time _bindMessageSent = 0;\n"
+     "\n"
+     "\t// pluma: the edges of the Pluma server (task 109).\n"
+     "\tEdgePlan _edges;\n"
+     "\tbool _throughEdge = false;\n"
+     "\tbase::Timer _directSilenceTimer;\n"
+     "\tcrl::time _directFrozeAt = 0;\n"
+     "\tint _directFreezes = 0;\n"
+     "\tbool _directFrozen = false;\n"
+     "\n"
+     "};\n"),
+    (SESSION_PRIVATE,
+     "constexpr auto kFastRequestDuration = crl::time(500);\n",
+     "constexpr auto kFastRequestDuration = crl::time(500);\n"
+     "\n"
+     "// pluma: a request on the direct connection in use and no byte back for\n"
+     "// this long, or until the connection is dropped for it, is a freeze; so\n"
+     "// many connections in a row, each freeze within kDirectFreezeRow of the\n"
+     "// one before, and the edges go first (task 109).\n"
+     "constexpr auto kDirectSilenceTimeout = 15 * crl::time(1000);\n"
+     "constexpr auto kDirectFreezesToEdges = 2;\n"
+     "constexpr auto kDirectFreezeRow = 10 * 60 * crl::time(1000);\n"),
+    (SESSION_PRIVATE,
+     ", _sessionData(std::move(data)) {\n",
+     ", _sessionData(std::move(data))\n"
+     "// pluma: the freezes of the direct path (task 109).\n"
+     ", _directSilenceTimer(thread, [=] { directSilenceFailed(); }) {\n"),
+    (SESSION_PRIVATE,
+     "\tconst auto priority = (qthelp::is_ipv6(ip) ? (OptionPreferIPv6.value() ? 2 : 0) : 1)\n"
+     "\t\t+ (protocol == DcOptions::Variants::Tcp ? 1 : 0)\n"
+     "\t\t+ (protocolSecret.empty() ? 0 : 1);\n"
+     "\t_testConnections.push_back({\n"
+     "\t\tAbstractConnection::Create(\n"
+     "\t\t\t_instance,\n"
+     "\t\t\tprotocol,\n"
+     "\t\t\tthread(),\n"
+     "\t\t\tprotocolSecret,\n"
+     "\t\t\t_options->proxy),\n"
+     "\t\tpriority\n"
+     "\t});\n",
+     "\t// pluma: the edges of the Pluma server (task 109) in the order of their\n"
+     "\t// list, below the direct addresses or, while they go first, above them.\n"
+     "\tconst auto edge = ranges::find(_edges.urls, ip);\n"
+     "\tconst auto throughEdge = (edge != end(_edges.urls));\n"
+     "\tconst auto priority = throughEdge\n"
+     "\t\t? EdgePriority(int(edge - begin(_edges.urls)), _edges.first)\n"
+     "\t\t: DirectPriority(\n"
+     "\t\t\t(qthelp::is_ipv6(ip) ? (OptionPreferIPv6.value() ? 2 : 0) : 1)\n"
+     "\t\t\t\t+ (protocol == DcOptions::Variants::Tcp ? 1 : 0)\n"
+     "\t\t\t\t+ (protocolSecret.empty() ? 0 : 1),\n"
+     "\t\t\t_edges.first);\n"
+     "\t_testConnections.push_back({\n"
+     "\t\tAbstractConnection::Create(\n"
+     "\t\t\t_instance,\n"
+     "\t\t\tprotocol,\n"
+     "\t\t\tthread(),\n"
+     "\t\t\tprotocolSecret,\n"
+     "\t\t\t_options->proxy),\n"
+     "\t\tpriority,\n"
+     "\t\tthroughEdge,\n"
+     "\t});\n"),
+    (SESSION_PRIVATE,
+     "\t_options = std::make_unique<SessionOptions>(_sessionData->options());\n"
+     "\n"
+     "\tconst auto bareDc = BareDcId(_shiftedDcId);\n",
+     "\t_options = std::make_unique<SessionOptions>(_sessionData->options());\n"
+     "\n"
+     "\tconst auto bareDc = BareDcId(_shiftedDcId);\n"
+     "\n"
+     "\t// pluma: the edges of the Pluma server (task 109), to datacenter 1 and\n"
+     "\t// without a proxy: the user's proxy takes their place as it takes the\n"
+     "\t// direct path's.\n"
+     "\t_edges = (bareDc == kEdgeDcId\n"
+     "\t\t&& _options->proxy.type == ProxyData::Type::None)\n"
+     "\t\t? EdgeCurrentPlan()\n"
+     "\t\t: EdgePlan();\n"),
+    (SESSION_PRIVATE,
+     "\t\t\t\t\tappendTestConnection(\n"
+     "\t\t\t\t\t\tstatic_cast<Variants::Protocol>(protocol),\n"
+     "\t\t\t\t\t\tQString::fromStdString(endpoint.ip),\n"
+     "\t\t\t\t\t\tendpoint.port,\n"
+     "\t\t\t\t\t\tendpoint.secret);\n"
+     "\t\t\t\t}\n"
+     "\t\t\t}\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\tif (_testConnections.empty()) {\n",
+     "\t\t\t\t\tappendTestConnection(\n"
+     "\t\t\t\t\t\tstatic_cast<Variants::Protocol>(protocol),\n"
+     "\t\t\t\t\t\tQString::fromStdString(endpoint.ip),\n"
+     "\t\t\t\t\t\tendpoint.port,\n"
+     "\t\t\t\t\t\tendpoint.secret);\n"
+     "\t\t\t\t}\n"
+     "\t\t\t}\n"
+     "\t\t}\n"
+     "\t\t// pluma: the edges of the Pluma server (task 109), the bytes of TCP\n"
+     "\t\t// over WebSocket.\n"
+     "\t\tfor (const auto &url : _edges.urls) {\n"
+     "\t\t\tappendTestConnection(Variants::Tcp, url, 443, {});\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\tif (_testConnections.empty()) {\n"),
+    (SESSION_PRIVATE,
+     "void SessionPrivate::onSentSome(uint64 size) {\n"
+     "\tif (!_waitForReceivedTimer.isActive()) {\n",
+     "void SessionPrivate::onSentSome(uint64 size) {\n"
+     "\t// pluma: on a direct connection, while the edges wait behind it (task\n"
+     "\t// 109), the time without a byte back starts with this request.\n"
+     "\tif (_connection\n"
+     "\t\t&& !_throughEdge\n"
+     "\t\t&& !_edges.urls.empty()\n"
+     "\t\t&& !_edges.first\n"
+     "\t\t&& !_directSilenceTimer.isActive()) {\n"
+     "\t\t_directSilenceTimer.callOnce(kDirectSilenceTimeout);\n"
+     "\t}\n"
+     "\tif (!_waitForReceivedTimer.isActive()) {\n"),
+    (SESSION_PRIVATE,
+     "void SessionPrivate::onReceivedSome() {\n"
+     "\tif (_oldConnection) {\n",
+     "void SessionPrivate::onReceivedSome() {\n"
+     "\t// pluma: the direct connection in use answers (task 109).\n"
+     "\tif (_connection && !_throughEdge) {\n"
+     "\t\t_directSilenceTimer.cancel();\n"
+     "\t}\n"
+     "\tif (_oldConnection) {\n"),
+    (SESSION_PRIVATE,
+     "\t\tDEBUG_LOG((\"MTP Info: connection through IPv4 succeed.\"));\n"
+     "\t\t_waitForBetterTimer.cancel();\n"
+     "\t\t_connection = std::move(i->data);\n",
+     "\t\tDEBUG_LOG((\"MTP Info: connection through IPv4 succeed.\"));\n"
+     "\t\t_waitForBetterTimer.cancel();\n"
+     "\t\tconnectionChosen(i->edge); // pluma: task 109\n"
+     "\t\t_connection = std::move(i->data);\n"),
+    (SESSION_PRIVATE,
+     "\tDEBUG_LOG((\"MTP Info: can't connect through better, using %1.\"\n"
+     "\t\t).arg(i->data->tag()));\n"
+     "\n"
+     "\t_connection = std::move(i->data);\n",
+     "\tDEBUG_LOG((\"MTP Info: can't connect through better, using %1.\"\n"
+     "\t\t).arg(i->data->tag()));\n"
+     "\n"
+     "\tconnectionChosen(i->edge); // pluma: task 109\n"
+     "\t_connection = std::move(i->data);\n"),
+    (SESSION_PRIVATE,
+     "void SessionPrivate::waitBetterFailed() {\n"
+     "\tconfirmBestConnection();\n"
+     "}\n",
+     "void SessionPrivate::waitBetterFailed() {\n"
+     "\tconfirmBestConnection();\n"
+     "}\n"
+     "\n"
+     "// pluma: the edges of the Pluma server (task 109).\n"
+     "void SessionPrivate::connectionChosen(bool throughEdge) {\n"
+     "\t_throughEdge = throughEdge;\n"
+     "\t_directSilenceTimer.cancel();\n"
+     "\t_directFrozen = false;\n"
+     "\tif (!throughEdge) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\t_directFreezes = 0;\n"
+     "\tif (!_edges.first) {\n"
+     "\t\t// The direct path did not connect in time.\n"
+     "\t\tEdgeTakeOver();\n"
+     "\t}\n"
+     "}\n"
+     "\n"
+     "// A request on the direct connection in use got no byte back: for the\n"
+     "// time of a freeze, or until the connection is dropped for it. Once a\n"
+     "// connection; the second connection in a row (within kDirectFreezeRow of\n"
+     "// the first) puts the edges first.\n"
+     "bool SessionPrivate::directFroze() {\n"
+     "\t_directSilenceTimer.cancel();\n"
+     "\tif (!_connection\n"
+     "\t\t|| _throughEdge\n"
+     "\t\t|| _directFrozen\n"
+     "\t\t|| _edges.urls.empty()\n"
+     "\t\t|| _edges.first) {\n"
+     "\t\treturn false;\n"
+     "\t}\n"
+     "\t_directFrozen = true;\n"
+     "\tconst auto now = crl::now();\n"
+     "\tif (_directFreezes && now - _directFrozeAt > kDirectFreezeRow) {\n"
+     "\t\t_directFreezes = 0;\n"
+     "\t}\n"
+     "\t_directFrozeAt = now;\n"
+     "\tif (++_directFreezes < kDirectFreezesToEdges) {\n"
+     "\t\tDEBUG_LOG((\"MTP Info: the direct path to %1 froze.\"\n"
+     "\t\t\t).arg(_shiftedDcId));\n"
+     "\t\treturn false;\n"
+     "\t}\n"
+     "\tLOG((\"MTP Info: the direct path to %1 froze %2 times in a row.\"\n"
+     "\t\t).arg(_shiftedDcId\n"
+     "\t\t).arg(kDirectFreezesToEdges));\n"
+     "\t_directFreezes = 0;\n"
+     "\tEdgeTakeOver();\n"
+     "\treturn true;\n"
+     "}\n"
+     "\n"
+     "void SessionPrivate::directSilenceFailed() {\n"
+     "\tif (!directFroze()) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tdoDisconnect();\n"
+     "\tif (_retryTimer.isActive()) {\n"
+     "\t\treturn;\n"
+     "\t}\n"
+     "\tInvokeQueued(this, [=] { connectToServer(); });\n"
+     "}\n"),
+    (SESSION_PRIVATE,
+     "void SessionPrivate::waitReceivedFailed() {\n"
+     "\tExpects(_options != nullptr);\n"
+     "\n",
+     "void SessionPrivate::waitReceivedFailed() {\n"
+     "\tExpects(_options != nullptr);\n"
+     "\n"
+     "\t// pluma: dropped for its silence, the direct connection froze; the\n"
+     "\t// reconnection below takes the edges first after the second (task\n"
+     "\t// 109).\n"
+     "\tdirectFroze();\n"
+     "\n"),
+    (MAIN_APP_CONFIG,
+     "#include \"main/main_session.h\"\n",
+     "#include \"main/main_session.h\"\n"
+     "#include \"mtproto/details/mtproto_edge_route.h\"\n"),
+    (MAIN_APP_CONFIG,
+     "\t\t\tupdateIgnoredRestrictionReasons(std::move(was));\n",
+     "\t\t\tupdateIgnoredRestrictionReasons(std::move(was));\n"
+     "\n"
+     "\t\t\t// pluma: the edges of the Pluma server (task 109).\n"
+     "\t\t\tconst auto edge = _data.find(u\"pluma_edge\"_q);\n"
+     "\t\t\tMTP::details::EdgeApplyAppConfig(\n"
+     "\t\t\t\t(edge != end(_data)) ? &edge->second : nullptr);\n"),
+    (CMAKE_APP,
+     "    mtproto/details/mtproto_web_proxy_socket.cpp\n"
+     "    mtproto/details/mtproto_web_proxy_socket.h\n",
+     "    mtproto/details/mtproto_edge_route.cpp\n"
+     "    mtproto/details/mtproto_edge_route.h\n"
+     "    mtproto/details/mtproto_edge_socket.cpp\n"
+     "    mtproto/details/mtproto_edge_socket.h\n"
+     "    mtproto/details/mtproto_web_proxy_socket.cpp\n"
+     "    mtproto/details/mtproto_web_proxy_socket.h\n"),
+)
+
+# What the edits leave, each exactly so many times: another socket, another
+# test connection, another reader of pluma_edge or a lost choice stops the
+# patch until it is read.
+EDGE_GUARDS = (
+    (CONNECTION_TCP, "std::make_unique<EdgeSocket>(", 1),
+    (CONNECTION_TCP, "IsEdgeAddress(", 1),
+    (SESSION_PRIVATE, "appendTestConnection(", 4),
+    (SESSION_PRIVATE, "EdgeCurrentPlan()", 1),
+    (SESSION_PRIVATE, "EdgeTakeOver();", 2),
+    (SESSION_PRIVATE, "connectionChosen(", 3),
+    (SESSION_PRIVATE, "directFroze()", 3),
+    (SESSION_PRIVATE, "_connection = std::move(", 2),
+    (SESSION_PRIVATE, "EdgePriority(", 1),
+    (SESSION_PRIVATE, "DirectPriority(", 1),
+    (WEBSOCKET_CLIENT, "User-Agent", 1),
+    (MAIN_APP_CONFIG, "u\"pluma_edge\"_q", 1),
+    (MAIN_APP_CONFIG, "EdgeApplyAppConfig(", 1),
+    (CMAKE_APP, "mtproto/details/mtproto_edge_", 4),
+)
+# The priorities of mtproto_edge_route.h, read back: the edges below every
+# direct address of upstream's 0 to 4 by default, above them while they go
+# first, each in the order of the list.
+EDGE_PRIORITY = re.compile(r"return \(first \? (\d+) : (\d+)\) \+ \(kMaxEdges - 1 - index\);\n")
+DIRECT_PRIORITY = re.compile(r"return upstream \+ \(edgesFirst \? (\d+) : kMaxEdges\);\n")
+EDGE_DEFAULT_ORDER = "\t\t.first = false, // The direct path first.\n"
+
+
+def parse_edge_urls(text):
+    """PLUMA_EDGE_WS_URLS: from 1 to 4 addresses wss://<host>[:port]/<path>,
+    by commas, in the order the app tries them; empty, the build has no
+    edges."""
+    if not text.strip():
+        return ()
+    urls = tuple(url.strip() for url in text.split(","))
+    if len(urls) > MAX_EDGES:
+        raise PatchError(f"PLUMA_EDGE_WS_URLS: {len(urls)} edges, at most {MAX_EDGES}")
+    for url in urls:
+        m = EDGE_URL.fullmatch(url)
+        if not m:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r} is not wss://<host>/<path>")
+        host, port = m.group("host"), m.group("port")
+        labels = host.split(".")
+        if len(labels) < 2 or not all(EDGE_LABEL.fullmatch(label) for label in labels) or not re.search("[a-z]", labels[-1]):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {host!r} is not a host name (TLS checks the edge by its name)")
+        if EXTERNAL_HOSTS.search(host) or LINK_TME.search(host):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {host!r} is Telegram's")
+        if port is not None and not 0 < int(port) < 65536:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r}: the port is not a port")
+    if len(set(urls)) != len(urls):
+        raise PatchError("PLUMA_EDGE_WS_URLS: an edge is there twice")
+    return urls
+
+
+def edges(tree, c):
+    """The edges through a CDN (task 109); nothing without PLUMA_EDGE_WS_URLS."""
+    if not c.edge_urls:
+        return
+    for rel, _ in EDGE_FILES:
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: upstream has a file of this name; the edges (task 109) would replace it")
+    for rel, old, new in EDGE_EDITS:
+        tree.replace(rel, old, new)
+    for rel, text in EDGE_FILES:
+        tree.write(rel, text(c))
+
+
+def check_edge_priorities(header):
+    """The priorities of the test connections, read back from the header."""
+    edge, direct, max_edges = EDGE_PRIORITY.findall(header), DIRECT_PRIORITY.findall(header), \
+        re.findall(r"inline constexpr auto kMaxEdges = (\d+);\n", header)
+    if len(edge) != 1 or len(direct) != 1 or max_edges != [str(MAX_EDGES)]:
+        raise PatchError(f"{EDGE_ROUTE_H}: the priorities of the edges are not where the patch reads them")
+    first_base, last_base = (int(x) for x in edge[0])
+    direct_first_shift = int(direct[0])
+    upstream = range(0, 5)  # appendTestConnection, session_private.cpp 203-205
+    for first in (False, True):
+        edges_ = [(first_base if first else last_base) + MAX_EDGES - 1 - i for i in range(MAX_EDGES)]
+        directs = [p + (direct_first_shift if first else MAX_EDGES) for p in upstream]
+        if min(edges_) < 0 or edges_ != sorted(edges_, reverse=True) or len(set(edges_)) != MAX_EDGES:
+            raise PatchError(f"{EDGE_ROUTE_H}: the edges do not keep the order of their list")
+        if (min(edges_) <= max(directs)) if first else (max(edges_) >= min(directs)):
+            raise PatchError(f"{EDGE_ROUTE_H}: the edges are not {'above' if first else 'below'} "
+                             "the direct addresses " + ("while they go first" if first else "by default"))
+
+
+def verify_edges(tree, c):
+    if not c.edge_urls:
+        for rel, _ in EDGE_FILES:
+            if (tree.root / rel).exists():
+                raise PatchError(f"{rel}: a build without PLUMA_EDGE_WS_URLS has the edges (task 109)")
+        for rel, _, new in EDGE_EDITS:
+            if new in tree.read(rel):
+                raise PatchError(f"{rel}: a build without PLUMA_EDGE_WS_URLS has the edges (task 109)")
+        return
+    check_edge_priorities(tree.read(EDGE_ROUTE_H))
+    source = tree.read(EDGE_ROUTE)
+    built_in = tuple(re.findall(r'^\t\t\tu"([^"]*)"_q,\n', source, re.M))
+    if built_in != c.edge_urls or not all(url.startswith("wss://") for url in built_in):
+        raise PatchError(f"{EDGE_ROUTE}: the edges of the build are not PLUMA_EDGE_WS_URLS")
+    if source.count(EDGE_DEFAULT_ORDER) != 1:
+        raise PatchError(f"{EDGE_ROUTE}: the direct path does not go first by default")
+    for rel, text in EDGE_FILES:
+        if tree.read(rel) != text(c):
+            raise PatchError(f"{rel}: not the edges of task 109")
+    for rel, old, new in EDGE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the edges (task 109) is not there")
+    for rel, s, count in EDGE_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another place decides what the edges (task 109) should")
+    for rel in tree.sources():
+        if rel not in (CONNECTION_TCP, EDGE_SOCKET, EDGE_SOCKET_H) and "EdgeSocket" in tree.scan(rel):
+            raise PatchError(f"{rel}: makes a connection through an edge outside the edges (task 109)")
+
+
+def edges_edited():
+    """The upstream files edges() edits."""
+    return tuple(dict.fromkeys(rel for rel, _, _ in EDGE_EDITS))
+
+
 # --- The location picker on MapLibre (task 112) -------------------------------
 # Upstream's picker of a point on the map (Ui::LocationPicker, of the
 # attachment menu, a poll's media, a business's address and the editor of
@@ -7509,6 +8603,8 @@ def main(argv=None):
     ap.add_argument("--data-name", default="", help="the name of the data folder instead of the app's (a development build)")
     ap.add_argument("--dev-cdn-http", default="",
                     help="the address the HTTPS CDN may also be plain HTTP at (a development build)")
+    ap.add_argument("--edge-ws-urls", default="",
+                    help="the edges of the server, wss:// addresses by commas in the order tried (PLUMA_EDGE_WS_URLS)")
     a = ap.parse_args(args)
     try:
         app = load_env(a.app)
@@ -7518,7 +8614,7 @@ def main(argv=None):
             app["PLUMA_DATA_NAME"] = a.data_name
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
                    pathlib.Path(a.rsa_public_key).read_text(), read_update_keys(a.update_keys), a.build,
-                   a.dev_cdn_http)
+                   a.dev_cdn_http, a.edge_ws_urls)
         tree = Tree(a.source)
         if (tree.root / MARKER).exists():
             raise PatchError(f"{a.source} is patched already; fetch it again (ci/fetch-upstream.sh)")
@@ -7529,7 +8625,8 @@ def main(argv=None):
         return 1
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     print(f"patch: {c.app_id} \"{c.app_name}\" {c.release_version}, api_id {c.api_id}, layer {c.layer}, "
-          f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint})")
+          f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint}), "
+          f"edges {', '.join(c.edge_urls) or 'none'}")
     return 0
 
 
