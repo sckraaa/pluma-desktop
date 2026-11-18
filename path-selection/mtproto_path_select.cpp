@@ -60,7 +60,11 @@ struct State {
 	bool loaded = false;
 	QJsonObject probe; // pluma_probe as it came, kept in the file
 	path::Params params;
-	bool unsupported = false;
+	// Until when the probes rest: every probe of a round was closed right
+	// after resPQ. The gateway does so when it knows no probe and when its
+	// limits refuse one (the server's task 113 brief, «Контракт пробы»), so
+	// the rest lasts until the next app config or failed_ttl_s, not for good.
+	path::Time unsupportedUntil = 0;
 	path::Table table;
 	path::Paths paths;
 	std::vector<std::string> fingerprint;
@@ -482,7 +486,15 @@ namespace {
 		path::Time now,
 		crl::time &wait) {
 	wait = kIdleRetry;
-	if (state.unsupported || state.key.empty() || state.current.empty()) {
+	if (state.unsupportedUntil) {
+		if (now < state.unsupportedUntil) {
+			return std::nullopt;
+		}
+		state.unsupportedUntil = 0;
+		state.gateDue = true;
+		state.gateAt = 0;
+	}
+	if (state.key.empty() || state.current.empty()) {
 		return std::nullopt;
 	}
 	if (!state.deferredTo.empty()) {
@@ -600,8 +612,9 @@ void Finished(
 			});
 		if (unsupported) {
 			LOG(("MTP Info: the gateway answers no path probes, "
-				"the edges choose until the next app config."));
-			state.unsupported = true;
+				"the edges choose until the next app config "
+				"or failed_ttl_s."));
+			state.unsupportedUntil = now + state.params.failedTtl;
 			return;
 		} else if (state.roundKey != state.key) {
 			// Probes of another network.
@@ -721,10 +734,10 @@ std::vector<QString> PathOrder(
 			| ranges::to_vector,
 		.edgesFirst = edgesFirst,
 	};
-	if (state.unsupported || state.key.empty()) {
+	const auto now = Now();
+	if (now < state.unsupportedUntil || state.key.empty()) {
 		return {};
 	}
-	const auto now = Now();
 	const auto order = path::ConnectOrder(
 		state.paths,
 		path::Fresh(state.table, state.key, now),
@@ -738,10 +751,10 @@ bool PathFroze() {
 	{
 		const auto lock = std::lock_guard(state.mutex);
 		LoadOnce(state);
-		if (state.unsupported || state.key.empty()) {
+		const auto now = Now();
+		if (now < state.unsupportedUntil || state.key.empty()) {
 			return false;
 		}
-		const auto now = Now();
 		auto &network = path::Use(state.table, state.key, now);
 		path::MarkFrozen(network, path::kDirect, state.params, now);
 		const auto to = path::BestKnown(
@@ -789,7 +802,7 @@ void PathApplyAppConfig(const MTPJSONValue *value) {
 	{
 		const auto lock = std::lock_guard(state.mutex);
 		LoadOnce(state);
-		if (base::take(state.unsupported)) {
+		if (base::take(state.unsupportedUntil)) {
 			state.gateDue = true;
 			state.gateAt = 0;
 		}
@@ -823,7 +836,8 @@ PathProber::PathProber(
 	{
 		const auto lock = std::lock_guard(state.mutex);
 		const auto now = Now();
-		if (state.unsupported || now - state.lastSuspect < kSuspectEvery) {
+		if (now < state.unsupportedUntil
+			|| now - state.lastSuspect < kSuspectEvery) {
 			return;
 		}
 		state.lastSuspect = now;
@@ -876,8 +890,11 @@ void PathProber::tick() {
 	auto round = std::optional<PathRound>();
 	{
 		const auto lock = std::lock_guard(state.mutex);
-		_suspectTimeout = state.unsupported ? 0 : state.params.suspect;
-		round = Due(state, Now(), wait);
+		const auto now = Now();
+		_suspectTimeout = (now < state.unsupportedUntil)
+			? 0
+			: state.params.suspect;
+		round = Due(state, now, wait);
 	}
 	if (round) {
 		start(std::move(*round));
