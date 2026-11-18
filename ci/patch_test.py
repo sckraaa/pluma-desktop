@@ -267,6 +267,26 @@ class EdgeConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(patch.PatchError, message):
                     patch.check_edge_priorities(header.replace(old, new))
 
+    def test_path_priorities(self):
+        """The bands of the paths while the probes choose (task 113): as
+        wide as upstream's 0 to 4 of the direct addresses; narrower bands,
+        or numbers elsewhere, stop the check."""
+        header = patch.EDGE_ROUTE_HEADER
+        patch.check_path_priorities(header)
+        for old, new in (("(count - rank) * 5 + upstream", "(count - rank) * 4 + upstream"),
+                         ("(count - rank) * 5 + upstream", "(count - rank) * 5 + upstream / 2"),
+                         ("(count - rank) * 5 + upstream", "rank * 5 + upstream")):
+            with self.subTest(new=new), self.assertRaisesRegex(patch.PatchError, "bands of the paths"):
+                patch.check_path_priorities(header.replace(old, new))
+        # The first of the order goes highest, every band above the one
+        # after it whatever upstream's priority in it.
+        bands = 5
+        for count in range(1, 6):
+            ranks = [[(count - rank) * bands + upstream for upstream in range(5)] for rank in range(count)]
+            for higher, lower in zip(ranks, ranks[1:]):
+                self.assertGreater(min(higher), max(lower))
+            self.assertGreaterEqual(min(ranks[-1]), 0)
+
     def test_configure_passes_the_edges(self):
         """A build for the server takes EDGE_WS_URLS, which the workflow
         sets from the repository variable PLUMA_EDGE_WS_URLS wherever it
@@ -841,6 +861,13 @@ DAMAGE += ((S + "/mtproto/details/mtproto_tcp_socket.cpp", "namespace MTP::detai
             "namespace MTP::details {\n// std::make_unique<EdgeSocket>(thread)\n"),
            (S + "/mtproto/session_private.cpp", "void SessionPrivate::restart() {\n",
             "void SessionPrivate::restart() {\n\t// appendTestConnection(Variants::Tcp, {}, 0, {});\n"))
+
+# The probes of the paths (task 113): every edit, damaged in the pinned
+# upstream, and a connection probed elsewhere stop the patch with the
+# file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.PATH_EDITS)
+DAMAGE += ((S + "/mtproto/connection_http.cpp", "namespace MTP {\n",
+            "namespace MTP {\n// setPathProbe(\n"),)
 
 # The Business edits (task 105) and the text they rely on, damaged in the
 # pinned upstream, stop the patch with the file's name.
@@ -2139,7 +2166,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("\t\t\tconst auto edge = _data.find(u\"pluma_edge\"_q);\n", tree.read(patch.MAIN_APP_CONFIG))
         self.assertIn("    mtproto/details/mtproto_edge_route.cpp\n    mtproto/details/mtproto_edge_route.h\n"
                       "    mtproto/details/mtproto_edge_socket.cpp\n    mtproto/details/mtproto_edge_socket.h\n"
-                      "    mtproto/details/mtproto_web_proxy_socket.cpp\n", tree.read(patch.CMAKE_APP))
+                      "    mtproto/details/mtproto_path_rules.h\n", tree.read(patch.CMAKE_APP))
 
     def test_no_edges(self):
         """A build without PLUMA_EDGE_WS_URLS has none of the edges, and the
@@ -2152,6 +2179,13 @@ class UpstreamTest(unittest.TestCase):
             self.assertEqual(tree.read_bytes(rel), self.files[rel], rel)
         for rel, _, new in patch.EDGE_EDITS:
             self.assertNotIn(new, tree.read(rel))
+        # Nor the probes of task 113: one path, nothing to choose.
+        for rel, _ in patch.PATH_FILES:
+            self.assertFalse((self.root / rel).exists(), rel)
+        self.assertEqual(tree.read_bytes(patch.CONNECTION_TCP_H), self.files[patch.CONNECTION_TCP_H])
+        for rel, _, new in patch.PATH_EDITS:
+            self.assertNotIn(new, tree.read(rel))
+        patch.verify_paths(tree, c)
         # The same tree is no build with edges, and the other way round.
         with self.assertRaisesRegex(patch.PatchError, "mtproto_edge_route.h: missing"):
             patch.verify_edges(tree, config())
@@ -2209,6 +2243,107 @@ class UpstreamTest(unittest.TestCase):
         self.written.add(patch.EDGE_SOCKET)
         (self.root / patch.EDGE_SOCKET).write_text("// upstream\n")
         with self.assertRaisesRegex(patch.PatchError, "mtproto_edge_socket.cpp.*upstream has a file"):
+            self.run_patch()
+
+    def test_paths(self):
+        """The probes of the paths (task 113) with the edges."""
+        tree, c = self.run_patch()
+        for rel, name in patch.PATH_FILES:
+            self.assertEqual(tree.read(rel), (patch.PATH_DIR / name).read_text(), rel)
+        rules = tree.read(patch.PATH_RULES_H)
+        # The contract of the probe and the defaults of pluma_probe.
+        for line in patch.PATH_CONTRACT + ("\tint gateDown = 65536;\n", "\tint rankDown = 196608;\n",
+                                           "\tint up = 20480;\n", "\tTime stall = 1500;\n",
+                                           "\tTime deadline = 6000;\n", "\tTime suspect = 4000;\n",
+                                           "\tdouble switchRatio = 0.7;\n", "\tdouble switchRatioNow = 0.25;\n",
+                                           "\tTime raceStagger = 800;\n", "inline constexpr auto kMaxNetworks = 16;\n",
+                                           "inline constexpr auto kScoreBytes = 256 * 1024;\n"):
+            self.assertEqual(rules.count(line), 1, line)
+        select = tree.read(patch.PATH_SELECT)
+        self.assertIn('cWorkingDir() + u"tdata/pluma_edge_paths"_q', select)
+        tcp = tree.read(patch.CONNECTION_TCP)
+        self.assertIn("\tauto buffer = _pathProbe\n\t\t? prepareNotSecurePacket(\n\t\t\tMTPReq_pq_multi(_checkNonce),\n", tcp)
+        # The reads are timed before the packets are parsed, and the
+        # answer goes to the prober, not to the queue of the session.
+        read = tcp[tcp.index("void TcpConnection::socketRead() {\n"):]
+        self.assertLess(read.index("_pathProbe->read(int(readCount));"), read.index("socketPacket("))
+        packet = tcp[tcp.index("void TcpConnection::socketPacket(bytes::const_span bytes) {\n"):]
+        self.assertLess(packet.index("_status == Status::Ready && _pathProbe"), packet.index("_receivedQueue.push_back(data);"))
+        session = tree.read(patch.SESSION_PRIVATE)
+        chosen = session[session.index("void SessionPrivate::connectionChosen(const QString &edge) {\n"):]
+        chosen = chosen[:chosen.index("\n}\n")]
+        self.assertIn("if (_shiftedDcId == kEdgeDcId && !_edges.urls.empty()) {", chosen)
+        self.assertIn("\t\t_pathProber->connected(throughEdge ? edge : PathDirect());\n", chosen)
+        froze = session[session.index("bool SessionPrivate::directFroze() {\n"):]
+        froze = froze[:froze.index("\n}\n")]
+        self.assertIn("\tif (!PathFroze()) {\n\t\tEdgeTakeOver();\n\t}\n", froze)
+        self.assertIn("\t\trestart(ShiftedDcId(details::kEdgeDcId));\n", tree.read(patch.INSTANCE))
+        config = tree.read(patch.MAIN_APP_CONFIG)
+        self.assertLess(config.index('_data.find(u"pluma_edge"_q)'), config.index('_data.find(u"pluma_probe"_q)'))
+        self.assertIn("\tMTP::details::PathUserActive(); // pluma: task 113\n", tree.read(patch.APPLICATION))
+        self.assertIn("    mtproto/details/mtproto_path_rules.h\n    mtproto/details/mtproto_path_select.cpp\n"
+                      "    mtproto/details/mtproto_path_select.h\n", tree.read(patch.CMAKE_APP))
+        self.assertIn("\tstd::vector<QString> order;\n", tree.read(patch.EDGE_ROUTE_H))
+        self.assertIn("\t\tresult.order = PathOrder(result.urls, edgesFirst);\n", tree.read(patch.EDGE_ROUTE))
+
+    def test_paths_are_verified(self):
+        """verify() stops a tree where an edit of task 113 is undone, the
+        new files are not path-selection/'s, the contract or the bands
+        changed, the rules need more than the standard library, or another
+        place probes a path."""
+        tree, c = self.run_patch()
+        patch.verify_paths(tree, c)
+
+        def stops(rel, text, message):
+            patched = tree.read(rel)
+            self.written.add(rel)
+            tree.write(rel, text(patched))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_paths(tree, c)
+            finally:
+                tree.write(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.PATH_EDITS):
+            with self.subTest(edit=i):
+                stops(rel, lambda t: t.replace(new, old), "task 113")
+        with self.subTest(file="changed"):
+            stops(patch.PATH_SELECT, lambda t: t.replace("kSuspectEvery = path::Time(60)", "kSuspectEvery = path::Time(6)"),
+                  "not the probes")
+        # The rules as path-selection/ would have them otherwise: the
+        # contract of the probe, and the standard library alone.
+        files = patch.path_files()
+        for change, message in ((lambda t: t.replace("0x5C316D30U", "0x5C316D31U"), "contract"),
+                                (lambda t: t.replace("#include <map>\n", "#include <map>\n#include <QtCore/QString>\n"),
+                                 "standard library")):
+            with self.subTest(rules=message):
+                rules = change(files[patch.PATH_RULES_H])
+                self.written.add(patch.PATH_RULES_H)
+                tree.write(patch.PATH_RULES_H, rules)
+                try:
+                    with unittest.mock.patch.object(patch, "path_files", lambda: {**files, patch.PATH_RULES_H: rules}), \
+                            self.assertRaisesRegex(patch.PatchError, "mtproto_path_rules.h.*" + message):
+                        patch.verify_paths(tree, c)
+                finally:
+                    tree.write(patch.PATH_RULES_H, files[patch.PATH_RULES_H])
+        with self.subTest(bands="narrower"):
+            # The header is task 109's file: its own check stops first.
+            stops(patch.EDGE_ROUTE_H, lambda t: t.replace("(count - rank) * 5 + upstream", "(count - rank) * 4 + upstream"),
+                  "bands of the paths")
+        for rel, s, _ in patch.PATH_GUARDS:
+            with self.subTest(guard=s):
+                stops(rel, lambda t: t + "// " + s + "\n", "another place decides")
+        with self.subTest(probe="elsewhere"):
+            stops(S + "/mtproto/session.cpp", lambda t: t + "// sendPathProbe(\n", "outside the probes")
+        with self.assertRaisesRegex(patch.PatchError, "without PLUMA_EDGE_WS_URLS has the probes"):
+            patch.verify_paths(tree, config(edge_ws_urls=""))
+        patch.verify(tree, c)
+
+    def test_path_files_are_new(self):
+        """The patch stops when upstream comes with a file of the new names."""
+        self.written.add(patch.PATH_SELECT)
+        (self.root / patch.PATH_SELECT).write_text("// upstream\n")
+        with self.assertRaisesRegex(patch.PatchError, "mtproto_path_select.cpp.*upstream has a file"):
             self.run_patch()
 
     def test_maplibre_picker(self):
