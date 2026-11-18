@@ -251,7 +251,8 @@ MARKER = "pluma-patch.txt"
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTITLEMENTS, WIN_RC, DESKTOP_FILE,
                   UPDATE_RESOURCES, QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
                   LANG, NIGHT_THEME, DAY_BLUE_THEME, NIGHT_GREEN_THEME, DAY_BASE_THEME, NIGHT_BASE_THEME, EXPORT_CSS,
-                  SHELL_PAGE, CUSTOM_SHORTCUTS) + tuple(path for path, _ in ASSETS)
+                  SHELL_PAGE, CUSTOM_SHORTCUTS, "Telegram/Resources/picker_html",
+                  "Telegram/Resources/qrc/telegram/picker.qrc") + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
 SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.palette"),
                    ("Telegram/lib_ui", "ui/text/text_entity.cpp"), ("Telegram/lib_base", "base/qthelp_url.cpp"),
@@ -2522,7 +2523,8 @@ def check_upstream(tree, c):
         raise PatchError(f"{ENTITLEMENTS}: not ci/macos.entitlements; upstream changed what the app may use")
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
                 + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
-                + call_colors_edited() + cdn_https_edited() + edges_edited()):
+                + call_colors_edited() + cdn_https_edited() + edges_edited()
+                + maplibre_picker_edited()):
         tree.lf_only(rel)
 
 
@@ -2708,6 +2710,7 @@ def patch(tree, c):
     call_colors(tree)
     cdn_https(tree, c)
     edges(tree, c)
+    maplibre_picker(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2859,6 +2862,7 @@ def verify(tree, c):
     verify_call_colors(tree)
     verify_cdn_https(tree, c)
     verify_edges(tree, c)
+    verify_maplibre_picker(tree)
 
 
 
@@ -8297,6 +8301,274 @@ def verify_edges(tree, c):
 def edges_edited():
     """The upstream files edges() edits."""
     return tuple(dict.fromkeys(rel for rel, _, _ in EDGE_EDITS))
+
+
+# --- The location picker on MapLibre (task 112) -------------------------------
+# Upstream's picker of a point on the map (Ui::LocationPicker, of the
+# attachment menu, a poll's media, a business's address and the editor of
+# rich messages) is a page of the app's resources, picker_html, that loads
+# Mapbox GL JS 3.4.0 from api.mapbox.com and opens it with
+# tdesktop_config_map.maps of the app config as the Mapbox token; without
+# that key there is no "Location" (LocationPicker::Available,
+# location_picker.cpp 343-351). The Pluma server puts there the address of
+# its own maps, https://<host>/<key>, and pluma_maps_styles, the languages of
+# their labels (task 112 of the server repository). The edits (lines of the
+# pinned tdesktop):
+# - the page loads MapLibre GL JS 5.24.0 from the app's resources
+#   (location-picker/, MAPLIBRE_FILES; PickerContent, 100-143), and its
+#   picker.js (location-picker/picker.js) shows the server's style, light or
+#   dark as the app's theme, in the language MapsStyle chooses by the
+#   server's rule (docs/ops/maps.md of the server repository);
+# - macOS and Linux fetch the server through the page's own address, as
+#   upstream fetched Mapbox: lib_webview's dataRequestRedirectHost is the
+#   server's host (setupWebview, 406). Windows fetches it directly (the
+#   server answers with CORS); lib_webview reads dataRequestRedirectHost on
+#   macOS (webview_mac.mm processRedirect) and Linux
+#   (webview_linux_http_server.cpp processRedirect) alone, for https
+#   without a port, which MapsBase demands;
+# - a map that cannot start (MapLibre needs WebGL 2) closes the webview and
+#   shows upstream's error of the webview (showWebviewError);
+# - the four places that open the picker pass pluma_maps_styles
+#   (LocationPickerConfig::mapsStyles); the fifth checks Available() alone.
+# The address of a point stays the system's (CLGeocoder on macOS, the
+# coordinates on Windows and Linux): the server sends no geo token, and the
+# geocoder of Mapbox (current_geo_location.cpp, ResolveLocationAddressGeneric)
+# runs only with one. No other source names api.mapbox.com (MAPBOX_HOSTS).
+LOCATION_PICKER = SOURCES + "/ui/controls/location_picker.cpp"
+LOCATION_PICKER_H = SOURCES + "/ui/controls/location_picker.h"
+BOT_ATTACH_WEB_VIEW = SOURCES + "/inline_bots/bot_attach_web_view.cpp"
+IV_EDITOR_SESSION = SOURCES + "/iv/editor/iv_editor_session.cpp"
+CREATE_POLL_BOX = SOURCES + "/boxes/create_poll_box.cpp"
+BUSINESS_LOCATION = SOURCES + "/settings/business/settings_location.cpp"
+GEO_LOCATION = SOURCES + "/core/current_geo_location.cpp"
+PICKER_HTML = "Telegram/Resources/picker_html"
+PICKER_JS = PICKER_HTML + "/picker.js"
+PICKER_QRC = "Telegram/Resources/qrc/telegram/picker.qrc"
+# The files of the page in this repository.
+PICKER_DIR = pathlib.Path(__file__).resolve().parent.parent / "location-picker"
+# Upstream's picker.js, which the patch replaces only while it is this one.
+PICKER_JS_UPSTREAM = "32691b345ebdbc3e746a959405a1d35b3c93f3ebe7860681b1d3fc1eb2a694ef"
+MAPLIBRE_VERSION = "5.24.0"
+# MapLibre GL JS as npm publishes it (location-picker/README.md): the file
+# here, its name in the resources of the picker, its SHA-256.
+MAPLIBRE_FILES = (
+    ("maplibre-gl.js", "maplibre-gl.js", "45a9b07a9189ce56054c620a947ccf41e291e58c95e9b61533b740aaa65ee5cb"),
+    ("maplibre-gl.css", "maplibre-gl.css", "ab1e70d59ec40465bae7e7030da2f3ccf28133fd502e62bd598eefbadfd7a732"),
+    ("maplibre-gl-LICENSE.txt", "maplibre-gl-license.txt",
+     "ee5fc05a0677eaf69601d2c7db0d9ecd6cc27c3abc1d0733bc9ed34707cf8ef2"),
+)
+
+
+def maps_styles_item(indent):
+    """The styles of the server in the config of the picker, at the indent of
+    the fields around."""
+    return (f"{indent}.mapsStyles = appConfig.get<std::vector<QString>>(\n"
+            f"{indent}\tu\"pluma_maps_styles\"_q,\n"
+            f"{indent}\tstd::vector<QString>()), // pluma: task 112\n")
+
+
+LOCATION_PICKER_EDITS = (
+    (LOCATION_PICKER,
+     "#include <QtCore/QJsonValue>\n",
+     "#include <QtCore/QJsonValue>\n"
+     "#include <QtCore/QUrl> // pluma: the address of the maps (task 112)\n"),
+    (LOCATION_PICKER,
+     "[[nodiscard]] QSize PickerInnerSize() {\n",
+     "// pluma: the address of the Pluma server's maps, which the app config\n"
+     "// gives in tdesktop_config_map in place of a Mapbox token (task 112):\n"
+     "// https, with no port, user, query or fragment, since lib_webview\n"
+     "// fetches the server for the page on macOS and Linux only at such an\n"
+     "// address (dataRequestRedirectHost). Anything else leaves the picker out.\n"
+     "[[nodiscard]] QUrl MapsBase(const QString &value) {\n"
+     "\tconst auto result = QUrl(value, QUrl::StrictMode);\n"
+     "\treturn (result.isValid()\n"
+     "\t\t&& !result.isRelative()\n"
+     "\t\t&& result.scheme() == u\"https\"_q\n"
+     "\t\t&& !result.host().isEmpty()\n"
+     "\t\t&& result.userInfo().isEmpty()\n"
+     "\t\t&& result.port() == -1\n"
+     "\t\t&& !result.hasQuery()\n"
+     "\t\t&& !result.hasFragment())\n"
+     "\t\t? result\n"
+     "\t\t: QUrl();\n"
+     "}\n"
+     "\n"
+     "// pluma: the language of the map's labels by the rule of the server\n"
+     "// (docs/ops/maps.md of the server repository): the interface's when the\n"
+     "// server has its style, Russian for be, kk, ky, tg, uz, hy and az,\n"
+     "// English for the rest; the server's first style when it lacks that one.\n"
+     "[[nodiscard]] QString MapsStyle(const std::vector<QString> &styles) {\n"
+     "\tstatic const auto kRussianLabels = std::array{\n"
+     "\t\tu\"be\"_q,\n"
+     "\t\tu\"kk\"_q,\n"
+     "\t\tu\"ky\"_q,\n"
+     "\t\tu\"tg\"_q,\n"
+     "\t\tu\"uz\"_q,\n"
+     "\t\tu\"hy\"_q,\n"
+     "\t\tu\"az\"_q,\n"
+     "\t};\n"
+     "\tconst auto baseId = Lang::GetInstance().baseId();\n"
+     "\tconst auto id = (baseId.isEmpty()\n"
+     "\t\t? Lang::GetInstance().id()\n"
+     "\t\t: baseId).toLower();\n"
+     "\tauto language = QString();\n"
+     "\tfor (const auto ch : id) {\n"
+     "\t\tconst auto code = ch.unicode();\n"
+     "\t\tif (code < 'a' || code > 'z') {\n"
+     "\t\t\tbreak;\n"
+     "\t\t}\n"
+     "\t\tlanguage.append(ch);\n"
+     "\t}\n"
+     "\tconst auto chosen = (!language.isEmpty()\n"
+     "\t\t&& ranges::contains(styles, language))\n"
+     "\t\t? language\n"
+     "\t\t: ranges::contains(kRussianLabels, language)\n"
+     "\t\t? u\"ru\"_q\n"
+     "\t\t: u\"en\"_q;\n"
+     "\treturn (styles.empty() || ranges::contains(styles, chosen))\n"
+     "\t\t? chosen\n"
+     "\t\t: styles.front();\n"
+     "}\n"
+     "\n"
+     "[[nodiscard]] QSize PickerInnerSize() {\n"),
+    (LOCATION_PICKER,
+     "\t\t<script src='https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js'></script>\n"
+     "\t\t<link href='https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css' rel='stylesheet' />\n",
+     "\t\t<!-- pluma: MapLibre GL JS from the app's resources (task 112). -->\n"
+     "\t\t<script src=\"/location/maplibre-gl.js\"></script>\n"
+     "\t\t<link rel=\"stylesheet\" href=\"/location/maplibre-gl.css\" />\n"),
+    (LOCATION_PICKER,
+     "\t\t&& !config.mapsToken.isEmpty();\n",
+     "\t\t&& !MapsBase(config.mapsToken).isEmpty(); // pluma: the server's maps\n"),
+    (LOCATION_PICKER,
+     "\t\t\t.dataRequestRedirectHost = u\"api.mapbox.com\"_q,\n",
+     "\t\t\t// pluma: macOS and Linux fetch the server's maps for the page.\n"
+     "\t\t\t.dataRequestRedirectHost = MapsBase(_config.mapsToken).host(\n"
+     "\t\t\t\tQUrl::FullyEncoded),\n"),
+    (LOCATION_PICKER,
+     "\t\t\t} else if (event == u\"move_start\"_q) {\n",
+     "\t\t\t} else if (event == u\"error\"_q) {\n"
+     "\t\t\t\t// pluma: the map could not start (MapLibre needs WebGL 2).\n"
+     "\t\t\t\tdelete base::take(_mapButton);\n"
+     "\t\t\t\tbase::take(_webview);\n"
+     "\t\t\t\tshowWebviewError();\n"
+     "\t\t\t} else if (event == u\"move_start\"_q) {\n"),
+    (LOCATION_PICKER,
+     "\tconst auto token = _config.mapsToken.toUtf8();\n"
+     "\tconst auto center = DefaultCenter(_initialProvided);\n"
+     "\tconst auto bounds = DefaultBounds();\n"
+     "\tconst auto params = \"token: '\" + token + \"'\"\n",
+     "\t// pluma: the server's maps and the language of their labels.\n"
+     "\tconst auto base = MapsBase(_config.mapsToken).toEncoded();\n"
+     "\tconst auto style = MapsStyle(_config.mapsStyles).toUtf8();\n"
+     "\tconst auto center = DefaultCenter(_initialProvided);\n"
+     "\tconst auto bounds = DefaultBounds();\n"
+     "\tconst auto params = \"base: '\" + EscapeForScriptString(base) + \"'\"\n"
+     "\t\t+ \", style: '\" + EscapeForScriptString(style) + \"'\"\n"),
+    (LOCATION_PICKER_H,
+     "\tQString mapsToken;\n\tQString geoToken;\n};\n",
+     "\tQString mapsToken;\n"
+     "\tQString geoToken;\n"
+     "\tstd::vector<QString> mapsStyles; // pluma: pluma_maps_styles (task 112)\n"
+     "};\n"),
+    (BOT_ATTACH_WEB_VIEW,
+     "\t\t.geoToken = map[u\"geo\"_q],\n\t};\n",
+     "\t\t.geoToken = map[u\"geo\"_q],\n" + maps_styles_item("\t\t") + "\t};\n"),
+    (IV_EDITOR_SESSION,
+     "\t\t.geoToken = map[u\"geo\"_q],\n\t};\n",
+     "\t\t.geoToken = map[u\"geo\"_q],\n" + maps_styles_item("\t\t") + "\t};\n"),
+    (CREATE_POLL_BOX,
+     "\n\t\t\t.geoToken = map[u\"geo\"_q],\n\t\t};\n",
+     "\n\t\t\t.geoToken = map[u\"geo\"_q],\n" + maps_styles_item("\t\t\t") + "\t\t};\n"),
+    (BUSINESS_LOCATION,
+     "\t\t.geoToken = map[u\"bgeo\"_q],\n\t};\n",
+     "\t\t.geoToken = map[u\"bgeo\"_q],\n" + maps_styles_item("\t\t") + "\t};\n"),
+    (PICKER_QRC,
+     "    <file alias=\"picker.js\">../../picker_html/picker.js</file>\n",
+     "    <file alias=\"picker.js\">../../picker_html/picker.js</file>\n"
+     + "".join(f"    <file alias=\"{name}\">../../picker_html/{name}</file>\n" for _, name, _ in MAPLIBRE_FILES)),
+)
+# Every place that makes the config of the picker: those that open it pass
+# the styles (LOCATION_PICKER_EDITS), the poll's menu checks Available()
+# alone. Another one stops the patch until it is read.
+MAPS_CONFIG_PLACES = {
+    BOT_ATTACH_WEB_VIEW: 1,
+    IV_EDITOR_SESSION: 1,
+    CREATE_POLL_BOX: 2,
+    BUSINESS_LOCATION: 1,
+}
+MAPS_CONFIG_PLACE = ".mapsToken = map[u\""
+# Mapbox's host after the patch: its geocoder alone, which needs a geo token
+# the server does not send.
+MAPBOX_HOST = "api.mapbox.com"
+MAPBOX_HOSTS = {GEO_LOCATION: 1}
+MAPBOX_GEOCODER_GUARD = (GEO_LOCATION, "\t\tif (!result && !token.isEmpty()) {\n\t\t\tResolveLocationAddressGeneric(\n")
+
+
+def sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def maplibre_files():
+    """The files of the page: {path in the checkout: bytes}, checked against
+    their SHA-256."""
+    files = {}
+    for source, name, digest in MAPLIBRE_FILES:
+        data = (PICKER_DIR / source).read_bytes()
+        if sha256_hex(data) != digest:
+            raise PatchError(f"location-picker/{source}: not MapLibre GL JS {MAPLIBRE_VERSION} (SHA-256)")
+        files[PICKER_HTML + "/" + name] = data
+    files[PICKER_JS] = (PICKER_DIR / "picker.js").read_bytes()
+    return files
+
+
+def maplibre_picker(tree):
+    if sha256_hex(tree.read_bytes(PICKER_JS)) != PICKER_JS_UPSTREAM:
+        raise PatchError(f"{PICKER_JS}: not the page of tdesktop 7.4.1; read it again for the picker on MapLibre (task 112)")
+    files = maplibre_files()
+    for rel in files:
+        if rel != PICKER_JS and (tree.root / rel).exists():
+            raise PatchError(f"{rel}: upstream has a file of this name; the picker on MapLibre (task 112) would replace it")
+    tree.expect(*MAPBOX_GEOCODER_GUARD)
+    for rel, old, new in LOCATION_PICKER_EDITS:
+        tree.replace(rel, old, new)
+    for rel, data in files.items():
+        tree.write_bytes(rel, data)
+
+
+def verify_maplibre_picker(tree):
+    for rel, data in maplibre_files().items():
+        if tree.read_bytes(rel) != data:
+            raise PatchError(f"{rel}: not the page of the picker on MapLibre (task 112)")
+    for rel, old, new in LOCATION_PICKER_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of the picker on MapLibre (task 112) is not there")
+    rel, s = MAPBOX_GEOCODER_GUARD
+    if tree.read(rel).count(s) != 1:
+        raise PatchError(f"{rel}: the geocoder of Mapbox no longer waits for a geo token; "
+                         "the picker on MapLibre (task 112) relies on it")
+    places, hosts = {}, {}
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        if text.count(MAPS_CONFIG_PLACE):
+            places[rel] = text.count(MAPS_CONFIG_PLACE)
+        if text.count(MAPBOX_HOST):
+            hosts[rel] = text.count(MAPBOX_HOST)
+    for found, expected, what in ((places, MAPS_CONFIG_PLACES, "the config of the location picker is made"),
+                                  (hosts, MAPBOX_HOSTS, f"{MAPBOX_HOST} is named")):
+        if found != expected:
+            diff = sorted(k for k in set(found) | set(expected) if found.get(k) != expected.get(k))
+            raise PatchError(f"{', '.join(diff)}: {what} in another place; "
+                             "read it for the picker on MapLibre (task 112)")
+    for rel in (PICKER_JS, PICKER_HTML + "/picker.css"):
+        if "mapbox" in tree.read(rel).lower():
+            raise PatchError(f"{rel}: the page of the picker still names Mapbox (task 112)")
+
+
+def maplibre_picker_edited():
+    """The upstream files maplibre_picker() edits."""
+    return tuple(dict.fromkeys(rel for rel, _, _ in LOCATION_PICKER_EDITS))
 
 
 def main(argv=None):
