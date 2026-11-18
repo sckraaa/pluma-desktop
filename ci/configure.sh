@@ -4,7 +4,9 @@
 #   configure.sh server  for the server the repository variables name.
 #
 # Environment for server: SERVER_IPV4, SERVER_PORT, SERVER_IPV6 (optional),
-# RSA_PUBLIC_KEY (PKCS#1 PEM).
+# RSA_PUBLIC_KEY (PKCS#1 PEM), EDGE_WS_URLS (optional, the edges of task 109).
+# A development build takes its edges from PLUMA_EDGE_WS_URLS (none in
+# config/dev; set it to try a stand with an edge).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 target=${1:?usage: configure.sh dev|server}
@@ -33,6 +35,7 @@ dev)
 	# The HTTPS CDN of the development stand may be plain HTTP at the
 	# development server (task 107); never in a build for the real one.
 	dev_cdn_http=$PLUMA_SERVER_IPV4
+	edge_urls=${PLUMA_EDGE_WS_URLS:-}
 	;;
 server)
 	# Half a configuration would build a client that cannot sign in.
@@ -48,6 +51,7 @@ server)
 		echo "configure: $update_keys is missing; ci/update-key.sh makes it (README, Releases)" >&2
 		exit 1
 	fi
+	edge_urls=${EDGE_WS_URLS:-}
 	;;
 *)
 	echo "usage: configure.sh dev|server" >&2
@@ -59,5 +63,6 @@ $python -I ci/patch.py --source "$dir" --upstream upstream.env --app config/app.
 	--server-ipv4 "$SERVER_IPV4" --server-port "$SERVER_PORT" --server-ipv6 "${SERVER_IPV6:-}" \
 	--rsa-public-key "$tmp/key.pem" --update-keys "$update_keys" \
 	--build "${PLUMA_BUILD:-0}" ${update_prefix:+--update-prefix "$update_prefix"} \
-	${data_name:+--data-name "$data_name"} ${dev_cdn_http:+--dev-cdn-http "$dev_cdn_http"}
+	${data_name:+--data-name "$data_name"} ${dev_cdn_http:+--dev-cdn-http "$dev_cdn_http"} \
+	--edge-ws-urls "$edge_urls"
 echo "configure: $target build"
