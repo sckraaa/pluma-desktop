@@ -117,10 +117,14 @@ client)
 	# build ships a PDB, and in every object it would only grow the cache.
 	# rcc writes the upstream commit's date in place of each resource
 	# file's mtime, so a fresh checkout yields the same resource sources.
-	# ccache knows the compiler by the full version of the toolset and its
-	# target, which vcvarsall.bat sets, not by the mtime and size of cl.exe
-	# (its default check): another image of the runner may install the same
-	# compiler with other mtimes, as the macOS images do with Xcode.
+	# ccache knows the compiler by the version line of cl.exe and by the
+	# toolset and its target, which vcvarsall.bat sets, not by the mtime and
+	# size of cl.exe (its default check): another image of the runner may
+	# install the same compiler with other mtimes, as the macOS images do
+	# with Xcode. The toolset alone is not enough: a Visual Studio update
+	# replaces cl.exe in the same folder (VCToolsVersion 14.44.35207 had cl
+	# 19.44.35229 in one image and 19.44.35230 in the next), and a
+	# precompiled header from the older build fails the newer one (C1853).
 	cache=
 	check=()
 	if [ -n "${CCACHE_DIR:-}" ]; then
@@ -132,8 +136,10 @@ client)
 		cache="-D CMAKE_C_COMPILER_LAUNCHER=$ccache -D CMAKE_CXX_COMPILER_LAUNCHER=$ccache"
 		check=('if not defined VCToolsVersion (echo windows: vcvarsall.bat set no VCToolsVersion & exit /b 1)'
 			'if not defined VSCMD_ARG_TGT_ARCH (echo windows: vcvarsall.bat set no VSCMD_ARG_TGT_ARCH & exit /b 1)'
-			'set "CCACHE_COMPILERCHECK=string:MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%"'
-			'echo windows: ccache knows the compiler as MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%')
+			"for /f \"delims=\" %%v in ('cl 2^>^&1 ^| findstr /c:\"Compiler Version\"') do set \"PLUMA_CL=%%v\""
+			'if not defined PLUMA_CL (echo windows: cl.exe printed no version & exit /b 1)'
+			'set "CCACHE_COMPILERCHECK=string:MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%, %PLUMA_CL%"'
+			'echo windows: ccache knows the compiler as MSVC %VCToolsVersion% %VSCMD_ARG_TGT_ARCH%, %PLUMA_CL%')
 	fi
 	QT_RCC_SOURCE_DATE_OVERRIDE=$(git -C "$dir" log -1 --format=%ct)
 	export QT_RCC_SOURCE_DATE_OVERRIDE
