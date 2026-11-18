@@ -21,6 +21,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 // bytes of pluma.probe and pluma.probeData, what a probe found, the score
 // of a path, the memory by network and the choice between the paths. Plain
 // C++ without Qt: path-selection/rules_test.cpp checks it.
+//
+// Every member of the structs here has a default initializer, so that a
+// designated initializer may leave members out under
+// -Wmissing-field-initializers (part of -Wextra in GCC).
 namespace MTP::details::path {
 
 // Milliseconds of the wall clock: the memory outlives the process.
@@ -32,7 +36,7 @@ inline const std::string kDirect = "direct";
 // --- pluma_probe of help.getAppConfig ----------------------------------------
 
 struct Params {
-	std::string country; // ISO 3166-1 alpha-2 of the client's address
+	std::string country = {}; // ISO 3166-1 alpha-2 of the client's address
 	int gateDown = 65536;
 	int rankDown = 196608;
 	int up = 20480;
@@ -53,18 +57,18 @@ struct Params {
 
 // A value of the pluma_probe object: a number, a string, or neither.
 struct Field {
-	std::optional<double> number;
-	std::optional<std::string> text;
+	std::optional<double> number = {};
+	std::optional<std::string> text = {};
 };
 
 namespace details {
 
 struct NumberRule {
-	const char *key;
-	double min;
-	double max;
-	bool whole;
-	void (*set)(Params &params, double value);
+	const char *key = nullptr;
+	double min = 0.;
+	double max = 0.;
+	bool whole = false;
+	void (*set)(Params &params, double value) = nullptr;
 };
 
 inline constexpr Time kSecond = 1000;
@@ -409,7 +413,7 @@ inline constexpr auto kHistory = 4;
 inline constexpr Time kFresh = Time(7) * 86400 * 1000;
 
 struct PathRecord {
-	std::string id;
+	std::string id = {};
 	Time score = 0; // 0: unknown
 	Outcome outcome = Outcome::Failed;
 	Time at = 0;
@@ -424,20 +428,20 @@ struct PathRecord {
 };
 
 struct Network {
-	std::string key;
+	std::string key = {};
 	Time at = 0; // last used
-	std::string best;
+	std::string best = {};
 	Time switchedAt = 0;
 	Time rankedAt = 0;
-	std::string pending; // a path that won one rank, waiting for another
+	std::string pending = {}; // a path that won one rank, waiting for another
 	Time pendingAt = 0;
-	std::vector<PathRecord> paths;
+	std::vector<PathRecord> paths = {};
 
 	friend inline bool operator==(const Network &, const Network &) = default;
 };
 
 struct Table {
-	std::vector<Network> networks;
+	std::vector<Network> networks = {};
 
 	friend inline bool operator==(const Table &, const Table &) = default;
 };
@@ -536,7 +540,7 @@ struct Table {
 // The paths of datacenter 1: the direct one and the edges, in the order of
 // pluma_edge (edgesFirst: "order":["edge","direct"]).
 struct Paths {
-	std::vector<std::string> edges;
+	std::vector<std::string> edges = {};
 	bool edgesFirst = false;
 };
 
@@ -599,8 +603,8 @@ namespace details {
 // alone first; without, the first group of the default order (the edges
 // or the direct path).
 struct Race {
-	std::vector<std::string> first;
-	std::vector<std::string> later;
+	std::vector<std::string> first = {};
+	std::vector<std::string> later = {};
 };
 
 [[nodiscard]] inline Race GateRace(
@@ -659,7 +663,7 @@ struct Race {
 // --- Probes into the memory --------------------------------------------------
 
 struct Result {
-	std::string id;
+	std::string id = {};
 	Outcome outcome = Outcome::Failed;
 	Time rtt = 0;
 	double speed = 0.; // bytes a second
@@ -814,9 +818,9 @@ inline void MarkFrozen(
 
 // What to do after a rank round recorded in the network.
 struct Choice {
-	std::string to;   // the path to go to, empty to stay
-	bool now = false; // the current path failed: at once, no waiting
-	Time again = 0;   // a win not taken yet: rank again at this time
+	std::string to = {}; // the path to go to, empty to stay
+	bool now = false;    // the current path failed: at once, no waiting
+	Time again = 0;      // a win not taken yet: rank again at this time
 };
 
 // The current path failed the round: the best path that answered, at once

@@ -452,11 +452,11 @@ void Switch(
 struct PathRound {
 	uint64 id = 0;
 	path::Kind kind = path::Kind::Gate;
-	std::vector<QString> first;
-	std::vector<QString> later;
-	QString current;
-	path::Params params;
-	std::vector<path::Result> results;
+	std::vector<QString> first = {};
+	std::vector<QString> later = {};
+	QString current = {};
+	path::Params params = {};
+	std::vector<path::Result> results = {};
 	bool laterStarted = false;
 };
 
