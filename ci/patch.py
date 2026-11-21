@@ -151,8 +151,9 @@ DEEP_LINKS_SETTINGS = SOURCES + "/core/deep_links/deep_links_settings.cpp"
 LOCAL_URL_HANDLERS = SOURCES + "/core/local_url_handlers.cpp"
 DATA_PEER = SOURCES + "/data/data_peer.cpp"
 SETTINGS_INTRO = SOURCES + "/settings/settings_intro.cpp"
-# The other themes of Settings > Chat Settings (Day, Night), the bases of
-# chat themes, and the stylesheet of the HTML export: people's colours.
+# The other themes of Settings > Chat Settings (Day, Night) and the bases of
+# chat themes: Pluma's palettes and people's colours; the stylesheet of the
+# HTML export: people's colours.
 DAY_BLUE_THEME = "Telegram/Resources/day-blue.tdesktop-theme"
 NIGHT_GREEN_THEME = "Telegram/Resources/night-green.tdesktop-theme"
 DAY_BASE_THEME = "Telegram/Resources/day-custom-base.tdesktop-theme"
@@ -1807,6 +1808,119 @@ NIGHT_CONTRAST = ("""\
 			{ qstr("historyFileOutRadialFgSelected"), Pair{ cColor("b2ceb4"), cColor("ffffff") } }, // msgFileOutBgSelected
 		} };
 """)
+# The tiles of Day and Night (task 118, the owner's decision of 2026-11-21),
+# as those of Classic and Tinted: Day's background is the one-colour
+# background of its theme (DAY_NIGHT_BACKGROUNDS), its bubbles Classic's;
+# Night's greys and its accent take what Tinted's took. The accent the
+# picker of each starts from is its palette's.
+EMBEDDED_DAY = ("""\
+			EmbeddedType::DayBlue,
+			qColor("7ec4ea"),
+			qColor("d7f0ff"),
+			qColor("ffffff"),
+			qColor("d7f0ff"),
+			qColor("ffffff"),
+			name(tr::lng_settings_theme_day),
+			":/gui/day-blue.tdesktop-theme",
+			qColor("40a7e3")
+""", """\
+			EmbeddedType::DayBlue,
+			qColor("8fa992"), // pluma: the theme's background (task 118)
+			qColor("e3eae2"),
+			qColor("ffffff"),
+			qColor("e3eae2"),
+			qColor("ffffff"),
+			name(tr::lng_settings_theme_day),
+			":/gui/day-blue.tdesktop-theme",
+			qColor("5b7a5e") // pluma: the accent of brand/palette-day.txt
+""")
+EMBEDDED_NIGHT_GREEN = ("""\
+			EmbeddedType::NightGreen,
+			qColor("485761"),
+			qColor("6b808d"),
+			qColor("6b808d"),
+			qColor("6b808d"),
+			qColor("75bfb5"),
+			name(tr::lng_settings_theme_night),
+			":/gui/night-green.tdesktop-theme",
+			qColor("3fc1b0")
+""", """\
+			EmbeddedType::NightGreen,
+			qColor("3a423a"), // pluma: Tinted's greys and accent (task 118)
+			qColor("5f685f"),
+			qColor("5f685f"),
+			qColor("5f685f"),
+			qColor("7fa082"),
+			name(tr::lng_settings_theme_night),
+			":/gui/night-green.tdesktop-theme",
+			qColor("9dbb9f") // pluma: the accent of brand/palette-night.txt
+""")
+# Night takes Tinted's colours where the accent picker keeps the text on the
+# accent readable, so it keeps it as Tinted does (NIGHT_CONTRAST).
+NIGHT_GREEN_CONTRAST = ("""\
+	case EmbeddedType::NightGreen:
+		result.keepContrast = base::flat_map<QLatin1String, Pair>{ {
+			//{ qstr("windowFgActive"), Pair{ cColor("3fc1b0"), cColor("282e33") } }, // windowBgActive, windowBg
+			{ qstr("activeButtonFg"), Pair{ cColor("2da192"), cColor("282e33") } }, // activeButtonBg, windowBg
+			{ qstr("profileVerifiedCheckFg"), Pair{ cColor("3fc1b0"), cColor("282e33") } }, // profileVerifiedCheckBg, windowBg
+			{ qstr("overviewCheckFgActive"), Pair{ cColor("3fc1b0"), cColor("282e33") } }, // overviewCheckBgActive
+""", """\
+	case EmbeddedType::NightGreen:
+		// pluma: the night colours of brand/palette-night.txt (task 118).
+		result.keepContrast = base::flat_map<QLatin1String, Pair>{ {
+			{ qstr("activeButtonFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // activeButtonBg
+			{ qstr("profileVerifiedCheckFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // profileVerifiedCheckBg
+			{ qstr("overviewCheckFgActive"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }, // overviewCheckBgActive
+""")
+# The accent picker moves the colours within 15 degrees of hue of a theme's
+# accent (FollowsAccent) but the keys it ignores, among them most of the
+# Premium palette. Pluma's Premium palette is sage, as the accents are, so
+# the rest of it is ignored too and stays as brand/palette-day.txt has it.
+PREMIUM_IGNORED = ("""\
+	qstr("premiumIconBg1"),
+	qstr("premiumIconBg2"),
+} };
+""", """\
+	qstr("premiumIconBg1"),
+	qstr("premiumIconBg2"),
+	// pluma: the rest of the Premium palette, sage as the accents (task 118).
+	qstr("premiumIconBg3"),
+	qstr("stickerPanPremium1"),
+	qstr("stickerPanPremium2"),
+} };
+""")
+# The 3D star of the Premium screens on their gradient: white with a light
+# shade of Telegram's blue, Pluma's light sage (msgOutBg of
+# brand/palette-day.txt); its other colours follow the Premium palette.
+PREMIUM_STAR = (SOURCES + "/ui/effects/premium_top_bar.cpp",
+                "\t\t\t\t\tQColor(255, 255, 255),\n\t\t\t\t\tQColor(0xE3, 0xEC, 0xFA));\n",
+                "\t\t\t\t\tQColor(255, 255, 255),\n"
+                "\t\t\t\t\tQColor(0xE3, 0xEA, 0xE2)); // pluma: palette-day's msgOutBg (task 118)\n")
+# Telegram's Premium palette (colors.palette), in no theme of Pluma's.
+TELEGRAM_PREMIUM = ("55a5ff", "a767ff", "db5c9d", "f38926", "e44456", "4acd43", "5a99ff", "45b9f3")
+PREMIUM_KEYS = re.compile(r"premium(?:ButtonBg|IconBg)\d|stickerPanPremium\d")
+# A built-in theme the user chose is saved with its colours and read back
+# from the saved copy (InitializeFromSaved, window_theme.cpp): Day and Night
+# chosen in a build with Telegram's colours would keep them. A saved built-in
+# theme whose file the build carries differently is read from the build's
+# file again; the colorizer of the accent chosen for it applies as before.
+SAVED_BUILT_IN_THEME = (SOURCES + "/window/themes/window_theme.cpp",
+                        "bool InitializeFromSaved(Saved &&saved) {\n"
+                        "\tif (saved.object.content.size() < 4) {\n",
+                        "bool InitializeFromSaved(Saved &&saved) {\n"
+                        "\t// pluma: a built-in theme saved by an older build takes the\n"
+                        "\t// colours of this one; Day and Night were Telegram's (task 118).\n"
+                        "\tif (saved.object.pathAbsolute.startsWith(u\":/gui/\"_q)) {\n"
+                        "\t\tauto file = QFile(saved.object.pathAbsolute);\n"
+                        "\t\tif (file.open(QIODevice::ReadOnly)) {\n"
+                        "\t\t\tauto content = file.readAll();\n"
+                        "\t\t\tif (!content.isEmpty() && content != saved.object.content) {\n"
+                        "\t\t\t\tsaved.object.content = std::move(content);\n"
+                        "\t\t\t\tsaved.cache = Cached();\n"
+                        "\t\t\t}\n"
+                        "\t\t}\n"
+                        "\t}\n"
+                        "\tif (saved.object.content.size() < 4) {\n")
 # The circle under the mark in the centre of QR codes (sign-in, proxy).
 QR_COLORS = ((INTRO_QR, "\treturn QColor(0x40, 0xA7, 0xE3); // Default windowBgActive.\n",
               "\treturn QColor(0x5B, 0x7A, 0x5E); // pluma: the default windowBgActive.\n"),
@@ -1873,9 +1987,10 @@ IDENTITY_THEMES = {
     DAY_BASE_THEME: (False, {"historyPeer4NameFg": "windowActiveTextFg", "historyPeer7NameFg": "#2996ad"}),
     NIGHT_BASE_THEME: (True, {"historyPeer4NameFg": "#65bdf3", "historyPeer7NameFg": "#62d4e3"}),
 }
-# The zipped themes that keep Telegram's colours but these, with the SHA-256
-# of the pinned upstream's file: the patch writes their colours again and
-# keeps the rest of the zip as it is.
+# The zipped themes of Telegram's, with the SHA-256 of the pinned upstream's
+# file: the patch writes their colours again (people's, BASE_TABLES,
+# DAY_NIGHT_TABLES) and keeps the rest of the zip as it is, but the
+# backgrounds of DAY_NIGHT_BACKGROUNDS.
 TELEGRAM_THEMES = {
     DAY_BLUE_THEME: "4ae75620a0aac54b79604e17ed4406556f90b4f15143bf1a099b74fac12e3bb3",
     NIGHT_GREEN_THEME: "059752f44c98a2be714799a7d3aa89b17dc3a7587f5619ed502a73b988641d0d",
@@ -1898,6 +2013,30 @@ BASE_TABLES = {
     NIGHT_BASE_THEME: ("palette-night.txt", (("msgOutDateFgSelected", "#c2e4ffad", "#ffffff"),
                                              ("msgFileThumbLinkInFg", "#4aabf5", "lightButtonFg"))),
 }
+# The built-in themes Day and Night of Settings > Chat Settings take Pluma's
+# palettes as the bases do (task 118, the owner's decision of 2026-11-21):
+# Day the day table, Night the night table, each key the theme sets. What
+# the tables leave of Telegram's accent takes what Classic or Tinted has
+# there: in Day the service bubbles over its background (Classic's), the
+# colours of links and outgoing media (the palette's references), two keys
+# upstream no longer reads (historySystemBg, msgFileOutBgOver); in Night the
+# text of the unread bar in its teal (the accent text). The rest of each
+# theme, its greys and its colours of file types, stays its own. As
+# BASE_TABLES.
+DAY_NIGHT_TABLES = {
+    DAY_BLUE_THEME: ("palette-day.txt", (("msgServiceBg", "#00518059", "#517c417f"),
+                                         ("msgServiceBgSelected", "#62afdda2", "#96b38ba2"),
+                                         ("msgFileThumbLinkInFg", "#168acd", "lightButtonFg"),
+                                         ("mediaOutFg", "#80a3bd", "msgOutDateFg"),
+                                         ("mediaOutFgSelected", "#5f8fb3", "msgOutDateFgSelected"),
+                                         ("historySystemBg", "#89a0b47f", "msgServiceBg"),
+                                         ("msgFileOutBgOver", "#4eade3", "msgFileOutBg"))),
+    NIGHT_GREEN_THEME: ("palette-night.txt", (("historyUnreadBarFg", "#3cd3bf", "windowActiveTextFg"),)),
+}
+# Day and Night carry a background of one colour (background.png, 1x1):
+# Telegram's blue #74b4e0 in Day takes a sage of Classic's default wallpaper
+# (UI_POLISH_EDITS), Night's #18191d the background of Tinted.
+DAY_NIGHT_BACKGROUNDS = {DAY_BLUE_THEME: (0x8F, 0xA9, 0x92), NIGHT_GREEN_THEME: NIGHT_WALLPAPER}
 # The HTML export draws a letter avatar in one colour, the class userpic1 to
 # userpic8 by slot (export_output_html.cpp), from the export's style.css:
 # Telegram's colours there lie near the middle of the app's gradient
@@ -1915,10 +2054,9 @@ EXPORT_USERPICS = (
 TELEGRAM_BLUES = ("40a7e3", "419fd9", "39a5db", "2095d0", "37a1de", "54c3f3", "5288c1", "6ab3f3", "2f6ea5",
                   "4082bc", "2b5278", "6ab2f2", "72bcfd", "64b9fa", "5eb5f7")
 # Keys of the default themes that may stay blue (verify()): file type
-# colours and the Premium and statistics palettes; calls are Pluma's
-# (CALL_COLORS).
-KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]"
-                       r"|stickerPanPremium[12]|premiumButtonBg1|statisticsChart\w+")
+# colours and the statistics palette; calls (CALL_COLORS) and Premium
+# (brand/palette-day.txt, task 118) are Pluma's.
+KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45]|statisticsChart\w+")
 # The verified badge, Telegram's rosette with a check, in the default themes
 # (verify()): the rosette in the accent and the check in the colour of text on
 # it, as Telegram draws it in the accent of its theme (colors.palette refers
@@ -1927,8 +2065,9 @@ KEPT_BLUE = re.compile(r"msgFile1\w*|mediaviewFileBlueCornerFg|settingsIconBg[45
 # place that draws it takes these keys: the chat list, the chat's top bar,
 # lists of people and search (dialogs.style, peer_list_box.cpp), the profile
 # and Settings (info.style, settings.style), the box of a bot's web app
-# (attach_bot_webview.cpp). Day, Night and the bases keep Telegram's accent,
-# and their badge follows it. As {key: (Classic, Tinted)}.
+# (attach_bot_webview.cpp). Day, Night and the bases take Pluma's palettes
+# (task 118), and the badge follows their accent. As {key: (Classic,
+# Tinted)}.
 VERIFIED_BADGE = {
     "dialogsVerifiedIconBg": ("#5b7a5e", "#9dbb9f"),
     "dialogsVerifiedIconFg": ("#ffffff", "#131513"),
@@ -2033,10 +2172,15 @@ def zipped_colors(data, where):
         raise PatchError(f"{where}: not a zip")
 
 
-def with_colors(data, colors):
-    """A zipped theme with other colours, its other files as they were."""
+def with_colors(data, colors, background=None):
+    """A zipped theme with other colours, and another background.png if
+    given, its other files as they were."""
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        return theme_zip([(name, colors.encode("utf-8") if name == THEME_COLORS else z.read(name))
+        if background is not None and NIGHT_BACKGROUND not in z.namelist():
+            raise PatchError(f"{THEME_COLORS}: the theme holds {z.namelist()}, no {NIGHT_BACKGROUND}")
+        return theme_zip([(name, colors.encode("utf-8") if name == THEME_COLORS
+                           else background if name == NIGHT_BACKGROUND and background is not None
+                           else z.read(name))
                           for name in z.namelist()])
 
 
@@ -2057,11 +2201,17 @@ def identity(text, theme):
     return text
 
 
+def theme_tables():
+    """The zipped themes that take Pluma's palettes: the bases of chat themes
+    and Day and Night."""
+    return {**BASE_TABLES, **DAY_NIGHT_TABLES}
+
+
 def base_rows(colors, theme):
-    """The rows of a base of BASE_TABLES as recolor() takes them: each row of
-    its table whose key the base sets, from the base's own value, a new key
-    added where the base has none, and the base's own rows."""
-    table, own = BASE_TABLES[theme]
+    """The rows of a theme of theme_tables() as recolor() takes them: each
+    row of its table whose key the theme sets, from the theme's own value, a
+    new key added where the theme has none, and the theme's own rows."""
+    table, own = theme_tables()[theme]
     values = palette_values(colors)
     rows = []
     for key, old, new in load_table(BRAND / table):
@@ -2182,9 +2332,10 @@ def rebrand(tree, c):
             raise PatchError(f"{rel}: not the pinned upstream's file; upstream changed it (brand/render.sh)")
         tree.write_bytes(rel, (BRAND / "tree" / rel).read_bytes())
 
-    # The colours: the light palette compiled in, the night theme, the theme
-    # tiles and the accent picker, the QR codes; people's blue and cyan in
-    # every theme and in the export.
+    # The colours: the light palette compiled in with the Premium palette,
+    # the night theme, Day and Night and the bases of chat themes, the theme
+    # tiles and the accent picker, the QR codes, the Premium star; people's
+    # blue and cyan in every theme and in the export.
     palette = recolor(tree.read(PALETTE), load_table(BRAND / "palette-day.txt"), PALETTE)
     tree.write(PALETTE, identity(palette, PALETTE))
     data = tree.read_bytes(NIGHT_THEME)
@@ -2197,14 +2348,19 @@ def rebrand(tree, c):
         if hashlib.sha256(data).hexdigest() != sha256:
             raise PatchError(f"{rel}: not the pinned upstream's theme; upstream changed it")
         colors = zipped_colors(data, rel)
-        if rel in BASE_TABLES:
+        if rel in theme_tables():
             colors = recolor(colors, base_rows(colors, rel), f"{rel}: {THEME_COLORS}")
-        tree.write_bytes(rel, with_colors(data, identity(colors, rel)))
+        background = DAY_NIGHT_BACKGROUNDS.get(rel)
+        tree.write_bytes(rel, with_colors(data, identity(colors, rel),
+                                          png_1x1(background) if background else None))
     for old, slot in EXPORT_USERPICS:
         tree.replace(EXPORT_CSS, old, old.replace(f"\n.userpic{slot},", "")
                      + f".userpic{slot} {{\n    background-color: {export_userpic(slot)}; /* pluma */\n}}\n")
-    for old, new in (EMBEDDED_CLASSIC, EMBEDDED_NIGHT, NIGHT_CONTRAST):
+    for old, new in (EMBEDDED_CLASSIC, EMBEDDED_DAY, EMBEDDED_NIGHT, EMBEDDED_NIGHT_GREEN, NIGHT_CONTRAST,
+                     NIGHT_GREEN_CONTRAST, PREMIUM_IGNORED):
         tree.replace(EMBEDDED_THEMES, old, new)
+    for rel, old, new in (PREMIUM_STAR, SAVED_BUILT_IN_THEME):
+        tree.replace(rel, old, new)
     for rel, old, new in QR_COLORS:
         tree.replace(rel, old, new)
 
@@ -2295,11 +2451,12 @@ def verify_help_and_gifts(tree):
             raise PatchError(f"{rel}: a link opens the gift box without asking whether Premium can be bought")
 
 
-def verify_verified_badge(tree, day, night):
+def verify_verified_badge(tree, day, night, others=()):
     """The verified badge in Pluma's accent in Classic and Tinted
-    (VERIFIED_BADGE), and every icon of it in the styles drawn in those keys
-    but on a profile's own colour (VERIFIED_ON_COVER)."""
-    for i, (where, values) in enumerate(((PALETTE, day), (NIGHT_THEME, night))):
+    (VERIFIED_BADGE), and in the others given as (theme, colours, dark),
+    and every icon of it in the styles drawn in those keys but on a
+    profile's own colour (VERIFIED_ON_COVER)."""
+    for where, values, i in ((PALETTE, day, 0), (NIGHT_THEME, night, 1), *others):
         for key, colors in VERIFIED_BADGE.items():
             color = resolve(values, key) if key in values else "missing"
             if color.lower() != colors[i]:
@@ -2313,6 +2470,28 @@ def verify_verified_badge(tree, day, night):
                 raise PatchError(f"{rel}: the verified badge is drawn in {color}, not in a key of VERIFIED_BADGE")
     if not found:
         raise PatchError(f"{SOURCES}: no icon of the verified badge in the styles; upstream renamed them")
+
+
+def verify_day_night(tree):
+    """Day and Night with Pluma's backgrounds and tiles, the Premium palette
+    out of the accent picker, the Premium star, a saved built-in theme read
+    from the build (task 118)."""
+    for rel, rgb in DAY_NIGHT_BACKGROUNDS.items():
+        with zipfile.ZipFile(io.BytesIO(tree.read_bytes(rel))) as z:
+            if NIGHT_BACKGROUND not in z.namelist() or z.read(NIGHT_BACKGROUND) != png_1x1(rgb):
+                raise PatchError(f"{rel}: the background is not Pluma's #{bytes(rgb).hex()}")
+    embedded = tree.read(EMBEDDED_THEMES)
+    for old, new in (EMBEDDED_DAY, EMBEDDED_NIGHT_GREEN, NIGHT_GREEN_CONTRAST, PREMIUM_IGNORED):
+        if embedded.count(new) != 1 or old in embedded.replace(new, ""):
+            raise PatchError(f"{EMBEDDED_THEMES}: the tiles of Day and Night or the Premium palette are not "
+                             "Pluma's (task 118)")
+    for rel, old, new in (PREMIUM_STAR, SAVED_BUILT_IN_THEME):
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 118 is not there")
+    for rel in tree.sources():
+        if rel.startswith(SOURCES + "/ui/effects/premium") and "0xE3, 0xEC, 0xFA" in tree.scan(rel):
+            raise PatchError(f"{rel}: Telegram's light blue of the Premium star (task 118)")
 
 
 def verify_brand(tree):
@@ -2370,13 +2549,17 @@ def verify_brand(tree):
             raise PatchError(f"{p.relative_to(tree.root).as_posix()}: Telegram's paper plane; add the icon to ASSETS")
     day = palette_values(tree.read(PALETTE))
     night = {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))}
-    bases = [(rel, {**day, **palette_values(zipped_colors(tree.read_bytes(rel), rel))}) for rel in BASE_TABLES]
+    bases = [(rel, {**day, **palette_values(zipped_colors(tree.read_bytes(rel), rel))}) for rel in theme_tables()]
     for where, values in ((PALETTE, day), (NIGHT_THEME, night), *bases):
         for key in values:
             color = resolve(values, key)
             if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
                 raise PatchError(f"{where}: {key} is Telegram's blue {color}")
-    verify_verified_badge(tree, day, night)
+            if PREMIUM_KEYS.fullmatch(key) and color[1:7].lower() in TELEGRAM_PREMIUM:
+                raise PatchError(f"{where}: {key} is Telegram's Premium colour {color} (task 118)")
+    # Day, Night and the bases take Pluma's palettes, and their badge too.
+    verify_verified_badge(tree, day, night, [(rel, values, int(IDENTITY_THEMES[rel][0])) for rel, values in bases])
+    verify_day_night(tree)
 
     # People's blue and cyan in every theme, the colours a theme leaves out
     # taken from the palette, and in the export: Pluma's colour as drawn, or
@@ -9460,6 +9643,7 @@ def ui_polish_edited():
     """The text files ui_polish() edits."""
     return tuple(dict.fromkeys(tuple(rel for rel, _, _ in UI_POLISH_EDITS)
                                + (LANG_HARDCODED, LANG, EXPORT_CSS, EXPORT_RICH_CSS)))
+
 
 
 def main(argv=None):

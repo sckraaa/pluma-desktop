@@ -5,12 +5,13 @@
 #
 # One line per colour: "key: upstream value -> Pluma value". ci/patch.py
 # replaces each one and stops when the upstream value differs. The rest keeps
-# upstream's values: file type colours, alerts, greys, the Premium palette.
+# upstream's values: file type colours, alerts, greys.
 # The default chat background is a sage gradient pattern (UI_POLISH_EDITS in
 # ci/patch.py). People's colours are those of every theme (IDENTITY_COLORS in
 # ci/patch.py): blue sage, cyan teal, the rest Telegram's; so are the colours
 # of calls (CALL_COLORS in ci/patch.py). The base of chat themes by day,
-# day-custom-base.tdesktop-theme, takes this table too (BASE_TABLES).
+# day-custom-base.tdesktop-theme, and the Day theme, day-blue.tdesktop-theme,
+# take this table too (BASE_TABLES, DAY_NIGHT_TABLES).
 #
 # Background #ffffff, text #111111, secondary text #6b6f6b; accent #5b7a5e
 # with white on it (buttons, switches, counters, the current chat); soft
@@ -112,3 +113,18 @@ sideBarBadgeFg: #ffffff -> #131513
 photoEditorItemBaseHandleFg: #3ccaef -> #5b7a5e
 currencyFg: #168acd -> #4f6e52 | windowActiveTextFg
 dialogsMentionIconFg: #40a7e3 | dialogsVerifiedIconBg -> #5b7a5e | dialogsVerifiedIconBg
+# The Premium palette (task 118, the owner's decision of 2026-11-21): every
+# theme takes it from here. Telegram's blue, violet and pink of buttons,
+# badges and stars become sage from soft to deep (premiumButtonBg1 to 3), and
+# the orange, red and green of the icons of Premium's features, top to
+# bottom, the same sage from deep to soft (premiumIconBg1, 2, then
+# premiumButtonBg2, 1 and premiumIconBg3: FullHeightGradientStops of
+# premium_graphics.cpp); the icon of premium sticker sets, deep to soft.
+stickerPanPremium1: #5a99ff -> #5b7a5e
+stickerPanPremium2: #45b9f3 -> #7fa082
+premiumButtonBg1: #55a5ff -> #7fa082
+premiumButtonBg2: #a767ff -> #5b7a5e
+premiumButtonBg3: #db5c9d -> #4f6e52
+premiumIconBg1: #f38926 -> #4d6850
+premiumIconBg2: #e44456 -> #557258
+premiumIconBg3: #4acd43 -> #9dbb9f

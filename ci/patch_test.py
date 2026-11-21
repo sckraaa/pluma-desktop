@@ -908,6 +908,15 @@ DAMAGE += ((patch.LANG, '"lng_group_about3" = "Public links such as t.me/title";
            (patch.LANG_HARDCODED, "inline QString ServerError() {", "inline QString InternalError() {"),
            (patch.EXPORT_CSS, "    color: #3892db;", "    color: #3892dc;"),
            (patch.EXPORT_RICH_CSS, "a { color: #168acd;", "a { color: #168acd; border-color: #168acd;"))
+# The owner's decisions on task 118: the tiles and contrast of Day and Night,
+# the Premium palette and star, a saved built-in theme read from the build,
+# damaged in the pinned upstream, and a Premium colour upstream changed, stop
+# the patch with the file's name.
+DAMAGE += tuple((patch.EMBEDDED_THEMES, old, old[:-2] + "~" + old[-1])
+                for old, _ in (patch.EMBEDDED_DAY, patch.EMBEDDED_NIGHT_GREEN, patch.NIGHT_GREEN_CONTRAST,
+                               patch.PREMIUM_IGNORED))
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in (patch.PREMIUM_STAR, patch.SAVED_BUILT_IN_THEME))
+DAMAGE += ((patch.PALETTE, "\npremiumButtonBg3: #db5c9d;", "\npremiumButtonBg3: #db5c9e;"),)
 # The picker on MapLibre (task 112): every edit, the geocoder's wait for a
 # token and upstream's page, damaged in the pinned upstream, stop the patch
 # with the file's name.
@@ -1172,22 +1181,24 @@ class UpstreamTest(unittest.TestCase):
                 pinned, patched = files(self.files[rel]), files(tree.read_bytes(rel))
                 self.assertEqual(list(pinned), list(patched))
                 for name in pinned:
-                    if name != patch.THEME_COLORS:
+                    if name == patch.NIGHT_BACKGROUND and rel in patch.DAY_NIGHT_BACKGROUNDS:
+                        self.assertEqual(patched[name], patch.png_1x1(patch.DAY_NIGHT_BACKGROUNDS[rel]))
+                    elif name != patch.THEME_COLORS:
                         self.assertEqual(pinned[name], patched[name])
                 before, after = (patch.palette_values(f[patch.THEME_COLORS].decode("utf-8")) for f in (pinned, patched))
                 # And the colours of calls (CALL_COLORS) of those the theme sets,
-                # and in the bases of chat themes their tables (BASE_TABLES).
+                # and in the bases of chat themes and in Day and Night their
+                # tables (BASE_TABLES, DAY_NIGHT_TABLES).
                 calls = {key: color for key, _, color in patch.CALL_COLORS if key in before and before[key] != color}
                 bases = {}
-                if rel in patch.BASE_TABLES:
+                if rel in patch.theme_tables():
                     colors = pinned[patch.THEME_COLORS].decode("utf-8")
                     bases = {key: new for key, old, new in patch.base_rows(colors, rel) if before.get(key) != new}
                 self.assertEqual({key: after[key] for key in after if after.get(key) != before.get(key)},
                                  {**bases, **{key: color for key, color in people.items() if color}, **calls})
         # The avatars of Saved Messages, Replies and My Notes: Classic and
-        # Tinted take the palettes' sage, and so do the bases, which take
-        # their tables (task 118); Day and Night refer to the blue slot for
-        # the second colour and leave the rest to Classic, so sage too.
+        # Tinted take the palettes' sage, and so do the bases and Day and
+        # Night, which take their tables (task 118).
         day = patch.palette_values(tree.read(patch.PALETTE))
         saved = {}
         for rel in patch.IDENTITY_THEMES:
@@ -1196,8 +1207,8 @@ class UpstreamTest(unittest.TestCase):
             saved[rel] = tuple(patch.resolve(values, key)
                                for key in ("historyPeerSavedMessagesBg", "historyPeerSavedMessagesBg2"))
         self.assertEqual(saved, {patch.PALETTE: ("#6f8f72", "#5b7a5e"), patch.NIGHT_THEME: ("#7fa082", "#5b7a5e"),
-                                 patch.DAY_BLUE_THEME: ("#6f8f72", "#5b7a5e"),
-                                 patch.NIGHT_GREEN_THEME: ("#6f8f72", "#5b7a5e"),
+                                 patch.DAY_BLUE_THEME: saved[patch.PALETTE],
+                                 patch.NIGHT_GREEN_THEME: saved[patch.NIGHT_THEME],
                                  patch.DAY_BASE_THEME: saved[patch.PALETTE],
                                  patch.NIGHT_BASE_THEME: saved[patch.NIGHT_THEME]})
         css = tree.read(patch.EXPORT_CSS)
@@ -1266,7 +1277,7 @@ class UpstreamTest(unittest.TestCase):
                 "historyPeer7NameFg: #53ccc6;", "historyPeer7NameFg: #1f8a80;"))),
             # Telegram's blue back in its themes, and in the export.
             (patch.DAY_BLUE_THEME, lambda d: patch.with_colors(d, patch.zipped_colors(d, "").replace(
-                "historyPeer4NameFg: #4f6e52;", "historyPeer4NameFg: windowActiveTextFg;"))),
+                "historyPeer4NameFg: #4f6e52;", "historyPeer4NameFg: #168acd;"))),
             (patch.NIGHT_BASE_THEME, lambda d: patch.with_colors(d, patch.zipped_colors(d, "").replace(
                 "historyPeer4UserpicBg2: #5b7a5e;", "historyPeer4UserpicBg2: #408acf;"))),
             (patch.EXPORT_CSS, lambda d: d + b".userpic4 {\n    background-color: #4f9cd9;\n}\n"),
@@ -1296,26 +1307,20 @@ class UpstreamTest(unittest.TestCase):
     def test_verified_badge(self):
         """The verified badge is Pluma's accent with the colour of text on it
         in Classic and Tinted, everywhere it is drawn, and in the bases of chat
-        themes, which take their palettes; Day and Night keep Telegram's,
-        which follows their accent."""
+        themes and Day and Night, which take their palettes (task 118)."""
         tree, c = self.run_patch()
         day = patch.palette_values(tree.read(patch.PALETTE))
         night = {**day, **patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))}
         for i, values in enumerate((day, night)):
             self.assertEqual({key: patch.resolve(values, key) for key in patch.VERIFIED_BADGE},
                              {key: colors[i] for key, colors in patch.VERIFIED_BADGE.items()})
-        upstream = patch.palette_values(self.files[patch.PALETTE].decode("utf-8"))
+        self.assertEqual(set(patch.theme_tables()), set(patch.TELEGRAM_THEMES))
         for rel in patch.TELEGRAM_THEMES:
             with self.subTest(rel=rel):
-                before = {**upstream, **patch.palette_values(patch.zipped_colors(self.files[rel], rel))}
                 after = {**day, **patch.palette_values(patch.zipped_colors(tree.read_bytes(rel), rel))}
-                if rel in patch.BASE_TABLES:
-                    i = 1 if rel == patch.NIGHT_BASE_THEME else 0
-                    self.assertEqual({key: patch.resolve(after, key) for key in patch.VERIFIED_BADGE},
-                                     {key: colors[i] for key, colors in patch.VERIFIED_BADGE.items()})
-                    continue
-                self.assertEqual({key: after[key] for key in patch.VERIFIED_BADGE},
-                                 {key: before[key] for key in patch.VERIFIED_BADGE})
+                i = int(patch.IDENTITY_THEMES[rel][0])
+                self.assertEqual({key: patch.resolve(after, key) for key in patch.VERIFIED_BADGE},
+                                 {key: colors[i] for key, colors in patch.VERIFIED_BADGE.items()})
         # The accent picker of Tinted keeps the check readable on the accent.
         self.assertIn('{ qstr("profileVerifiedCheckFg"), Pair{ cColor("9dbb9f"), cColor("ffffff") } }',
                       tree.read(patch.EMBEDDED_THEMES))
@@ -2714,6 +2719,135 @@ class UpstreamTest(unittest.TestCase):
                 (S + "/apiwrap.cpp", lambda t: t + "// tr::lng_pluma_missing(tr::now)\n", "lng_pluma_missing is not in")):
             with self.subTest(rel=rel, message=message):
                 stops(rel, text, message)
+        patch.verify(tree, c)
+
+    def test_day_night_themes(self):
+        """Day and Night take Pluma's palettes as the bases do (task 118):
+        each key of the table the theme sets has the table's value, their own
+        rows Classic's or Tinted's, no Telegram blue or Night's teal accent is
+        left, their backgrounds and tiles are Pluma's, and the accent picker
+        of Night keeps the text on the accent readable as Tinted's does."""
+        tree, c = self.run_patch()
+        day = patch.palette_values(tree.read(patch.PALETTE))
+        night = {**day, **patch.palette_values(patch.night_colors(tree.read_bytes(patch.NIGHT_THEME)))}
+        for rel, (table, own) in patch.DAY_NIGHT_TABLES.items():
+            with self.subTest(rel=rel):
+                before = patch.palette_values(patch.zipped_colors(self.files[rel], rel))
+                after = patch.palette_values(patch.zipped_colors(tree.read_bytes(rel), rel))
+                rows = {key: new for key, old, new in patch.load_table(patch.BRAND / table) + list(own)
+                        if key in before or old == "-"}
+                for key, value in rows.items():
+                    self.assertEqual(after[key].split("|")[0].strip(), value.split("|")[0].strip(), key)
+                values = {**day, **after}
+                reference = night if rel == patch.NIGHT_GREEN_THEME else day
+                for key in values:
+                    color = patch.resolve(values, key)
+                    if not patch.KEPT_BLUE.fullmatch(key):
+                        self.assertFalse(patch.is_blue(color) or color[1:7].lower() in patch.TELEGRAM_BLUES,
+                                         (key, color))
+                # The accent and what it fills are Classic's or Tinted's.
+                for key in ("windowBgActive", "activeButtonBg", "activeButtonFg", "windowActiveTextFg",
+                            "msgOutBg", "dialogsBgActive"):
+                    self.assertEqual(patch.resolve(values, key), patch.resolve(reference, key), key)
+                with zipfile.ZipFile(io.BytesIO(tree.read_bytes(rel))) as z:
+                    self.assertEqual(z.read(patch.NIGHT_BACKGROUND), patch.png_1x1(patch.DAY_NIGHT_BACKGROUNDS[rel]))
+        # Night's teal text of the unread bar is the accent text.
+        values = {**day, **patch.palette_values(patch.zipped_colors(tree.read_bytes(patch.NIGHT_GREEN_THEME), ""))}
+        self.assertEqual(patch.resolve(values, "historyUnreadBarFg"), patch.resolve(night, "windowActiveTextFg"))
+        embedded = tree.read(patch.EMBEDDED_THEMES)
+        for old, new in (patch.EMBEDDED_DAY, patch.EMBEDDED_NIGHT_GREEN, patch.NIGHT_GREEN_CONTRAST):
+            self.assertEqual(embedded.count(new), 1)
+            self.assertNotIn(old, embedded)
+        for color in ("7ec4ea", "d7f0ff", "485761", "6b808d", "75bfb5", "3fc1b0", "2da192", "282e33"):
+            self.assertNotIn(f'"{color}"', embedded.split("std::vector<QColor> DefaultAccentColors")[0])
+        # Day's tile shows its background, its picker starts from Classic's
+        # accent; Night's from Tinted's.
+        self.assertIn('qColor("8fa992"), // pluma', embedded)
+        self.assertEqual(embedded.count('qColor("5b7a5e") // pluma: the accent of brand/palette-day.txt'), 2)
+        self.assertEqual(embedded.count('qColor("9dbb9f") // pluma: the accent of brand/palette-night.txt'), 2)
+        # A built-in theme saved by an older build is read from the build.
+        self.assertIn("\tif (saved.object.pathAbsolute.startsWith(u\":/gui/\"_q)) {\n",
+                      tree.read(patch.WINDOW_THEME))
+        # verify() finds Telegram's background, tile or contrast back.
+        rel = patch.DAY_BLUE_THEME
+        patched = tree.read_bytes(rel)
+        self.written.add(rel)
+        tree.write_bytes(rel, patch.with_colors(patched, patch.zipped_colors(patched, rel),
+                                                patch.png_1x1((0x74, 0xB4, 0xE0))))
+        try:
+            with self.assertRaisesRegex(patch.PatchError, "day-blue.*background is not Pluma's #8fa992"):
+                patch.verify(tree, c)
+        finally:
+            tree.write_bytes(rel, patched)
+        for old, new in (patch.EMBEDDED_DAY, patch.EMBEDDED_NIGHT_GREEN, patch.NIGHT_GREEN_CONTRAST,
+                         patch.PREMIUM_IGNORED):
+            with self.subTest(old=old[:40]):
+                self.written.add(patch.EMBEDDED_THEMES)
+                tree.write(patch.EMBEDDED_THEMES, embedded.replace(new, old))
+                try:
+                    with self.assertRaisesRegex(patch.PatchError, "window_themes_embedded.cpp.*task 118"):
+                        patch.verify(tree, c)
+                finally:
+                    tree.write(patch.EMBEDDED_THEMES, embedded)
+        rel = patch.SAVED_BUILT_IN_THEME[0]
+        text = tree.read(rel)
+        tree.write(rel, text.replace(patch.SAVED_BUILT_IN_THEME[2], patch.SAVED_BUILT_IN_THEME[1]))
+        try:
+            with self.assertRaisesRegex(patch.PatchError, "window_theme.cpp.*task 118"):
+                patch.verify(tree, c)
+        finally:
+            tree.write(rel, text)
+        patch.verify(tree, c)
+
+    def test_premium_palette(self):
+        """The Premium palette is Pluma's in every theme (task 118): the keys
+        of brand/palette-day.txt, which no theme sets, nothing of Telegram's
+        blue, violet, pink, orange, red or green left; the accent picker
+        leaves the whole palette; the 3D star's light shade is sage."""
+        tree, c = self.run_patch()
+        rows = {key: new for key, _, new in patch.load_table(patch.BRAND / "palette-day.txt")
+                if patch.PREMIUM_KEYS.fullmatch(key)}
+        self.assertEqual(set(rows), {"premiumButtonBg1", "premiumButtonBg2", "premiumButtonBg3", "premiumIconBg1",
+                                     "premiumIconBg2", "premiumIconBg3", "stickerPanPremium1",
+                                     "stickerPanPremium2"})
+        day = patch.palette_values(tree.read(patch.PALETTE))
+        themes = [(patch.PALETTE, day),
+                  (patch.NIGHT_THEME, {**day, **patch.palette_values(patch.night_colors(
+                      tree.read_bytes(patch.NIGHT_THEME)))})]
+        themes += [(rel, {**day, **patch.palette_values(patch.zipped_colors(tree.read_bytes(rel), rel))})
+                   for rel in patch.TELEGRAM_THEMES]
+        for rel, values in themes:
+            with self.subTest(rel=rel):
+                self.assertEqual({key: patch.resolve(values, key) for key in rows}, rows)
+        # Every colour is one of Pluma's sages of the palette tables.
+        sages = {new.lower() for key, _, new in patch.load_table(patch.BRAND / "palette-day.txt")
+                 + patch.load_table(patch.BRAND / "palette-night.txt") if not patch.PREMIUM_KEYS.fullmatch(key)}
+        self.assertLessEqual(set(rows.values()), sages)
+        embedded = tree.read(patch.EMBEDDED_THEMES)
+        ignored = embedded[embedded.index("kColorizeIgnoredKeys"):]
+        ignored = ignored[:ignored.index("} };")]
+        for key in rows:
+            self.assertIn(f'qstr("{key}"),', ignored)
+        star = tree.read(patch.PREMIUM_STAR[0])
+        self.assertIn("QColor(0xE3, 0xEA, 0xE2)); // pluma", star)
+        self.assertNotIn("0xE3, 0xEC, 0xFA", star)
+        # verify() finds Telegram's Premium colour or star back.
+        palette = tree.read(patch.PALETTE)
+        self.written.add(patch.PALETTE)
+        tree.write(patch.PALETTE, palette.replace("\npremiumButtonBg2: #5b7a5e;", "\npremiumButtonBg2: #a767ff;"))
+        try:
+            with self.assertRaisesRegex(patch.PatchError, "colors.palette: premiumButtonBg2 is Telegram's Premium"):
+                patch.verify(tree, c)
+        finally:
+            tree.write(patch.PALETTE, palette)
+        rel = patch.PREMIUM_STAR[0]
+        self.written.add(rel)
+        tree.write(rel, star.replace(patch.PREMIUM_STAR[2], patch.PREMIUM_STAR[1]))
+        try:
+            with self.assertRaisesRegex(patch.PatchError, "premium_top_bar.cpp"):
+                patch.verify(tree, c)
+        finally:
+            tree.write(rel, star)
         patch.verify(tree, c)
 
     def test_damage(self):
