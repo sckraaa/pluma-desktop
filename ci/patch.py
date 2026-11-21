@@ -158,6 +158,7 @@ NIGHT_GREEN_THEME = "Telegram/Resources/night-green.tdesktop-theme"
 DAY_BASE_THEME = "Telegram/Resources/day-custom-base.tdesktop-theme"
 NIGHT_BASE_THEME = "Telegram/Resources/night-custom-base.tdesktop-theme"
 EXPORT_CSS = "Telegram/Resources/export_html/css/style.css"
+EXPORT_RICH_CSS = "Telegram/Resources/export_rich/css/rich_message.css"
 # In the lib_ui and lib_base submodules.
 PALETTE = "Telegram/lib_ui/ui/colors.palette"
 TEXT_ENTITY = "Telegram/lib_ui/ui/text/text_entity.cpp"
@@ -251,7 +252,7 @@ MARKER = "pluma-patch.txt"
 UPSTREAM_PATHS = (".gitmodules", SOURCES, CMAKE_APP, CMAKE_OPTIONS, PLIST, ENTITLEMENTS, WIN_RC, DESKTOP_FILE,
                   UPDATE_RESOURCES, QT_VERSION_PY, PREPARE, DOCKER_ENV, BUILDING_WIN, LINUX_WORKFLOW,
                   LANG, NIGHT_THEME, DAY_BLUE_THEME, NIGHT_GREEN_THEME, DAY_BASE_THEME, NIGHT_BASE_THEME, EXPORT_CSS,
-                  SHELL_PAGE, CUSTOM_SHORTCUTS, "Telegram/Resources/picker_html",
+                  EXPORT_RICH_CSS, SHELL_PAGE, CUSTOM_SHORTCUTS, "Telegram/Resources/picker_html",
                   "Telegram/Resources/qrc/telegram/picker.qrc") + tuple(path for path, _ in ASSETS)
 # The same for files of submodules: (submodule, path inside it).
 SUBMODULE_PATHS = (("cmake", "variables.cmake"), ("Telegram/lib_ui", "ui/colors.palette"),
@@ -1728,7 +1729,8 @@ NIGHT_COLORS, NIGHT_BACKGROUND = THEME_COLORS, "background.png"
 NIGHT_WALLPAPER = (0x0F, 0x11, 0x0F)
 
 # The theme tiles of Settings > Chat Settings and the base colour of the
-# accent picker, which recolours what is near it: the Pluma accent.
+# accent picker, which recolours what is near it: the Pluma accent; the tile
+# of Classic shows the default wallpaper (task 118).
 EMBEDDED_CLASSIC = ("""\
 			EmbeddedType::Default,
 			qColor("9bd494"),
@@ -1741,7 +1743,7 @@ EMBEDDED_CLASSIC = ("""\
 			qColor("40a7e3")
 """, """\
 			EmbeddedType::Default,
-			qColor("9bd494"),
+			qColor("a3b8a4"), // pluma: the default wallpaper's (task 118)
 			qColor("e3eae2"),
 			qColor("ffffff"),
 			qColor("e3eae2"),
@@ -1879,6 +1881,22 @@ TELEGRAM_THEMES = {
     NIGHT_GREEN_THEME: "059752f44c98a2be714799a7d3aa89b17dc3a7587f5619ed502a73b988641d0d",
     DAY_BASE_THEME: "3e32484edd81fbebfa1725847737709d7b4b288561aa466566d8069bc288829b",
     NIGHT_BASE_THEME: "ca675f580b40f8ecfb1d581f29ebd777c03eab4c27821251a369ed16f6f5cb5d",
+}
+# The bases of chat themes (themes a chat takes from the server, and the
+# previews of wallpapers by day and by night): PreparePaletteCallback
+# (window_themes_embedded.cpp 453-479) loads them with a colorizer from the
+# accent of Classic or Tinted, which moves only the colours within 15 degrees
+# of hue of that accent (ColorizerFrom 220-231, FollowsAccent 202-215). Pluma's
+# accents are sage, so the bases take Pluma's palette too: every key of
+# brand/palette-day.txt (the day base) and brand/palette-night.txt (the night
+# base) the base sets takes the table's Pluma value, the base's own value
+# pinned by the SHA-256 of TELEGRAM_THEMES, and the night base's own blues
+# that the tables leave out take what Tinted has there (task 118). As {base:
+# (table, (key, the base's value, Pluma's))}.
+BASE_TABLES = {
+    DAY_BASE_THEME: ("palette-day.txt", ()),
+    NIGHT_BASE_THEME: ("palette-night.txt", (("msgOutDateFgSelected", "#c2e4ffad", "#ffffff"),
+                                             ("msgFileThumbLinkInFg", "#4aabf5", "lightButtonFg"))),
 }
 # The HTML export draws a letter avatar in one colour, the class userpic1 to
 # userpic8 by slot (export_output_html.cpp), from the export's style.css:
@@ -2039,6 +2057,25 @@ def identity(text, theme):
     return text
 
 
+def base_rows(colors, theme):
+    """The rows of a base of BASE_TABLES as recolor() takes them: each row of
+    its table whose key the base sets, from the base's own value, a new key
+    added where the base has none, and the base's own rows."""
+    table, own = BASE_TABLES[theme]
+    values = palette_values(colors)
+    rows = []
+    for key, old, new in load_table(BRAND / table):
+        if key in values:
+            rows.append((key, values[key], new))
+        elif old == "-":
+            rows.append((key, old, new))
+    for key, old, new in own:
+        if values.get(key) != old:
+            raise PatchError(f"{theme}: {key} is {values.get(key)}, not {old}; upstream changed the colour")
+        rows.append((key, old, new))
+    return rows
+
+
 def middle(a, b):
     """The colour halfway between two #rrggbb."""
     return "#" + "".join(f"{(int(a[i:i + 2], 16) + int(b[i:i + 2], 16) + 1) // 2:02x}" for i in (1, 3, 5))
@@ -2159,7 +2196,10 @@ def rebrand(tree, c):
         data = tree.read_bytes(rel)
         if hashlib.sha256(data).hexdigest() != sha256:
             raise PatchError(f"{rel}: not the pinned upstream's theme; upstream changed it")
-        tree.write_bytes(rel, with_colors(data, identity(zipped_colors(data, rel), rel)))
+        colors = zipped_colors(data, rel)
+        if rel in BASE_TABLES:
+            colors = recolor(colors, base_rows(colors, rel), f"{rel}: {THEME_COLORS}")
+        tree.write_bytes(rel, with_colors(data, identity(colors, rel)))
     for old, slot in EXPORT_USERPICS:
         tree.replace(EXPORT_CSS, old, old.replace(f"\n.userpic{slot},", "")
                      + f".userpic{slot} {{\n    background-color: {export_userpic(slot)}; /* pluma */\n}}\n")
@@ -2320,8 +2360,8 @@ def verify_brand(tree):
         if tree.read(rel).count(new) != 1:
             raise PatchError(f"{rel}: the list of URL schemes does not take plm://")
 
-    # Pluma's icons, and no Telegram blue in the default themes but what
-    # KEPT_BLUE keeps.
+    # Pluma's icons, and no Telegram blue in the default themes and the bases
+    # of chat themes but what KEPT_BLUE keeps.
     for rel, _ in ASSETS:
         if tree.read_bytes(rel) != (BRAND / "tree" / rel).read_bytes():
             raise PatchError(f"{rel}: not Pluma's (brand/tree)")
@@ -2330,7 +2370,8 @@ def verify_brand(tree):
             raise PatchError(f"{p.relative_to(tree.root).as_posix()}: Telegram's paper plane; add the icon to ASSETS")
     day = palette_values(tree.read(PALETTE))
     night = {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))}
-    for where, values in ((PALETTE, day), (NIGHT_THEME, night)):
+    bases = [(rel, {**day, **palette_values(zipped_colors(tree.read_bytes(rel), rel))}) for rel in BASE_TABLES]
+    for where, values in ((PALETTE, day), (NIGHT_THEME, night), *bases):
         for key in values:
             color = resolve(values, key)
             if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
@@ -2524,7 +2565,7 @@ def check_upstream(tree, c):
     for rel in (EDITED + brand_edited() + links_edited() + login_code_edited() + no_ai_editor_edited()
                 + call_parameters_edited() + service_account_edited() + group_calls_e2e_edited()
                 + call_colors_edited() + cdn_https_edited() + edges_edited() + paths_edited()
-                + maplibre_picker_edited()):
+                + maplibre_picker_edited() + ui_polish_edited()):
         tree.lf_only(rel)
 
 
@@ -2712,6 +2753,7 @@ def patch(tree, c):
     edges(tree, c)
     paths(tree, c)
     maplibre_picker(tree)
+    ui_polish(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -2865,6 +2907,7 @@ def verify(tree, c):
     verify_edges(tree, c)
     verify_paths(tree, c)
     verify_maplibre_picker(tree)
+    verify_ui_polish(tree)
 
 
 
@@ -4832,7 +4875,8 @@ GROUP_CALLS_E2E_EDITS = (
      "\t\tUi::Toast::Show(u\"Could not generate join block.\"_q);\n"
      "\t\treturn;\n"
      "\t}\n",
-     "\t\tUi::Toast::Show(u\"Could not generate join block.\"_q);\n"
+     "\t\t// pluma: a key, not a text in English (task 118).\n"
+     "\t\tUi::Toast::Show(tr::lng_pluma_group_call_join_failed(tr::now));\n"
      "\t\treturn;\n"
      "\t}\n"
      "\t_e2eKeySent = (_e2e != nullptr); // pluma: task 094\n"),
@@ -5816,18 +5860,25 @@ def group_calls_e2e_edited():
 # - the answer and hang-up buttons and leaving a call keep the green and
 #   red every call app has, the ones of Classic in every theme (Telegram's
 #   Night and the night base answer in blue);
+# - Telegram's greys with a blue cast (the status of a one-to-one call, the
+#   members who have not joined, the icons of inactive members, which the
+#   call's menus also take for their disabled items, shortcuts and submenu
+#   arrows: groupCallMenu in calls.style) the greys of Tinted, which lean to
+#   sage: windowSubTextFgOver, windowSubTextFg and dialogsTextFg of
+#   brand/palette-night.txt (task 118);
 # - the volume of a member, red to blue in the code (calls_volume_item.cpp
 #   262-267), the weak signal's to the accent.
 # Every theme the app carries takes them: Classic (colors.palette), Tinted
 # (night.tdesktop-theme) and Telegram's themes and bases (TELEGRAM_THEMES),
 # which leave the new keys to Classic. verify_call_colors() stops a call
-# palette with any other colour (but white and grey) and any of Telegram's
-# call colours in the sources of calls.
+# palette with any other colour (but white and a grey without a blue cast)
+# and any of Telegram's call colours in the sources of calls.
 # As (key, Telegram's value in Classic or None for a new key, Pluma's value).
 CALL_COLORS = (
     ("callBg", "#26282cf2", "#2c3a2df2"),
     ("callBgOpaque", "#1b1f23", "#2c3a2d"),
     ("callBgButton", "#1b1f237f", "#2c3a2d7f"),
+    ("callStatusFg", "#aaabac", "#a6aea6"),
     ("callAnswerBg", "#66c95b", "#66c95b"),
     ("callAnswerRipple", "#52b149", "#52b149"),
     ("callAnswerBgOuter", "#50eb4126", "#50eb4126"),
@@ -5840,7 +5891,9 @@ CALL_COLORS = (
     ("groupCallMembersBgRipple", "#39424f", "#4f6e52"),
     ("groupCallMemberActiveIcon", "#8deb90", "#b2ceb4"),
     ("groupCallMemberActiveStatus", "#8deb90", "#b2ceb4"),
+    ("groupCallMemberInactiveIcon", "#84888f", "#8c978c"),
     ("groupCallMemberInactiveStatus", "#61c0ff", "#9dbb9f"),
+    ("groupCallMemberNotJoinedStatus", "#91979e", "#9aa29a"),
     ("groupCallMemberMutedIcon", "#ed7372", "#b97a55"),
     ("groupCallLive1", "#0dcc39", "#6f8f72"),
     ("groupCallLive2", "#0bb6bd", "#7fa082"),
@@ -6095,12 +6148,13 @@ def call_colors(tree):
 
 def is_neutral(value):
     """White, black or a grey: #rrggbb(aa) whose channels differ by less than
-    an eighth."""
+    an eighth, and whose blue is not above both red and green, as in
+    Telegram's greys of calls (#aaabac, #91979e)."""
     m = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", value)
     if not m:
         return False
-    channels = [int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4)]
-    return max(channels) - min(channels) < 0.12 * 255
+    r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4))
+    return max(r, g, b) - min(r, g, b) < 0.12 * 255 and b <= max(r, g)
 
 
 def call_sources(tree):
@@ -8971,6 +9025,441 @@ def verify_maplibre_picker(tree):
 def maplibre_picker_edited():
     """The upstream files maplibre_picker() edits."""
     return tuple(dict.fromkeys(rel for rel, _, _ in LOCATION_PICKER_EDITS))
+
+
+# --- Pluma's colours and texts everywhere (task 118) ---------------------------
+# What the audit of 2026-11-21 found still Telegram's in colour or untranslated
+# in reachable places (lines of the pinned tdesktop):
+# - Cocoon, Telegram's network that its translations run on, in the menu of
+#   the translation bar: "Translations are powered by Cocoon" and its box
+#   (history_view_translate_bar.cpp 487-514), false in Pluma, whose server
+#   translates (task 101). The item and the separator above it go; the box
+#   stays reachable only from the header of a summary
+#   (history_view_summary_header.cpp 71), which the server never gives
+#   (messages.summarizeText is not served), and from the AI editor, which the
+#   patch closes (NO_AI_EDITOR_EDITS).
+# - The pin of the location picker (task 112) in MapLibre's #3FB1CE
+#   (location_picker.cpp 134): the accent of the theme, which the page gets
+#   as --td-window-bg-active beside --td-window-bg (ComputeStyles, 78-83).
+# - The volume of the video editor's audio (editor_audio_menu.cpp 162-168), a
+#   copy of the volume of a call member: the same colours as CALL_COLORS_EDITS
+#   gives that one.
+# - The default wallpaper (data_wall_paper.cpp 695-706), Telegram's green
+#   gradient, and the tile of Classic that shows it: the gradient of Pluma's
+#   Web K (W-030 of the server repository), in the same four points. A
+#   default wallpaper saved with Telegram's colours (Local::writeBackground,
+#   ChatBackground::set, window_theme.cpp 772-776) takes Pluma's.
+# - The HTML export: links, quotes and the active colour in Telegram's blues,
+#   its dark mode in Telegram's palette of group calls (style.css 51-1720,
+#   rich_message.css 17-272): the light colours of brand/palette-day.txt,
+#   the dark ones of CALL_COLORS, by the comments the dark mode names them
+#   with.
+# - The page of a WEB proxy in the browser (web_proxy_transport.cpp
+#   1617-1618), in Telegram's blue and greys: the light palette's.
+# - The links of the built-in English that read t.me/: a group's public link
+#   (lng_group_about3), the Premium limits (lng_premium_double_limits_about_
+#   links), the links a fact check takes (lng_factcheck_links, which the app
+#   takes pluma.chat for too: LINK_HOSTS). The server's language pack writes
+#   the same for tdesktop.
+# - Texts without a key: the errors of group calls and conferences, which the
+#   end-to-end calls of task 094 meet more often than Telegram does
+#   (calls_group_call.cpp, calls_group_common.cpp 493-525: a raw error code
+#   or an English sentence; the toast of a join block that could not be made,
+#   calls_group_call.cpp 1650-1656, is the edit of task 094 there), a message that failed in a call's chat
+#   (calls_group_messages_ui.cpp 676), the name of a window to share
+#   (desktop_capture_choose_source.cpp 466), the raw error of a one-to-one call
+#   (calls_call.cpp 1663-1670) and its "{user}" left unreplaced
+#   (calls_panel.cpp 878), every text of Lang::Hard (lang_hardcoded.h: the
+#   server's errors in two-step verification and recovery email, a call of an
+#   incompatible app, the title of favourite stickers, autostart, the proxy
+#   settings, Passport), an unknown error of recording (history_widget.cpp
+#   1425, history_view_compose_controls.cpp 4543), a WebView that does not
+#   start (location_picker.cpp, payments_panel.cpp, iv_controller.cpp,
+#   iv_markdown_embed_overlay.cpp: the built-in key lng_bot_webview_failed of
+#   the same text), the box after a crash of OpenGL (application.cpp
+#   537-546). The English stays upstream's; UI_POLISH_STRINGS adds the keys,
+#   which the server's language pack translates (own.json, patchkeys.json).
+HISTORY_TRANSLATE_BAR = SOURCES + "/history/view/history_view_translate_bar.cpp"
+EDITOR_AUDIO_MENU = SOURCES + "/editor/editor_audio_menu.cpp"
+DATA_WALL_PAPER = SOURCES + "/data/data_wall_paper.cpp"
+WINDOW_THEME = SOURCES + "/window/themes/window_theme.cpp"
+WEB_PROXY_TRANSPORT = SOURCES + "/mtproto/web_proxy/web_proxy_transport.cpp"
+GROUP_CALL_COMMON = SOURCES + "/calls/group/calls_group_common.cpp"
+GROUP_CALL_MESSAGES_UI = SOURCES + "/calls/group/calls_group_messages_ui.cpp"
+CHOOSE_SOURCE = SOURCES + "/calls/group/ui/desktop_capture_choose_source.cpp"
+LANG_HARDCODED = SOURCES + "/lang/lang_hardcoded.h"
+COMPOSE_CONTROLS = SOURCES + "/history/view/controls/history_view_compose_controls.cpp"
+PAYMENTS_PANEL = SOURCES + "/payments/ui/payments_panel.cpp"
+IV_CONTROLLER = SOURCES + "/iv/iv_controller.cpp"
+IV_EMBED_OVERLAY = SOURCES + "/iv/markdown/iv_markdown_embed_overlay.cpp"
+
+# The keys the edits use, with their English (upstream's text where there
+# was one), after the entry UI_POLISH_STRINGS_AFTER.
+UI_POLISH_STRINGS_AFTER = '"lng_group_call_screen_title" = "Screen {index}";\n'
+UI_POLISH_STRINGS = {
+    "lng_pluma_group_call_window_title": "Window {index}",
+    "lng_pluma_group_call_join_failed": "Couldn't join the call. Please try again.",
+    "lng_pluma_group_call_create_failed": "Couldn't create the call. Please try again.",
+    "lng_pluma_group_call_message_failed": "Failed to send the message.",
+    "lng_pluma_call_failed": "Couldn't make the call. Please try again.",
+    "lng_pluma_call_error_incompatible": "{user}'s app is using an incompatible protocol. "
+                                         "They need to update their app before you can call them.",
+    "lng_pluma_faved_set_title": "Favorite stickers",
+    "lng_pluma_server_error": "Internal server error.",
+    "lng_pluma_clear_path_failed": "Clear failed :(",
+    "lng_pluma_proxy_config_error": "The proxy you are using is not configured correctly. "
+                                    "Do you want to disable it and use your system connection settings?",
+    "lng_pluma_no_authorization_bot": "Could not get authorization bot.",
+    "lng_pluma_secure_save_error": "Error saving value.",
+    "lng_pluma_secure_accept_error": "Error accepting form.",
+    "lng_pluma_passport_corrupted": "It seems your Pluma Passport data was corrupted.\\n\\n"
+                                    "You can reset your Pluma Passport and restart this authorization.",
+    "lng_pluma_passport_corrupted_change": "It seems your Pluma Passport data was corrupted.\\n\\n"
+                                           "You can reset your Pluma Passport and change your cloud password.",
+    "lng_pluma_passport_corrupted_reset": "Reset",
+    "lng_pluma_passport_corrupted_reset_sure": "Are you sure you want to reset your Pluma Passport data?",
+    "lng_pluma_unknown_scan_error": "Unknown scan read error.",
+    "lng_pluma_email_confirmation_expired": "This email confirmation has expired. "
+                                            "Please setup two-step verification once again.",
+    "lng_pluma_autostart_error": "Could not register for autostart.",
+    "lng_pluma_unknown_error": "Unknown error.",
+    "lng_pluma_opengl_crash_text": "There may be a problem with your graphics drivers and OpenGL. "
+                                   "Try updating your drivers.\\n\\nOpenGL has been disabled. You can try "
+                                   "to enable it again or keep it disabled if crashes continue.",
+    "lng_pluma_opengl_keep_disabled": "Keep Disabled",
+}
+# Lang::Hard, each function the text of a key (lang_hardcoded.h): (function,
+# key, the arguments after tr::now). The call of an incompatible app keeps
+# "{user}", which its callers replace.
+LANG_HARD = (
+    ("FavedSetTitle", "lng_pluma_faved_set_title", ""),
+    ("CallErrorIncompatible", "lng_pluma_call_error_incompatible", ", lt_user, u\"{user}\"_q"),
+    ("ServerError", "lng_pluma_server_error", ""),
+    ("ClearPathFailed", "lng_pluma_clear_path_failed", ""),
+    ("ProxyConfigError", "lng_pluma_proxy_config_error", ""),
+    ("NoAuthorizationBot", "lng_pluma_no_authorization_bot", ""),
+    ("SecureSaveError", "lng_pluma_secure_save_error", ""),
+    ("SecureAcceptError", "lng_pluma_secure_accept_error", ""),
+    ("PassportCorrupted", "lng_pluma_passport_corrupted", ""),
+    ("PassportCorruptedChange", "lng_pluma_passport_corrupted_change", ""),
+    ("PassportCorruptedReset", "lng_pluma_passport_corrupted_reset", ""),
+    ("PassportCorruptedResetSure", "lng_pluma_passport_corrupted_reset_sure", ""),
+    ("UnknownSecureScanError", "lng_pluma_unknown_scan_error", ""),
+    ("EmailConfirmationExpired", "lng_pluma_email_confirmation_expired", ""),
+    ("AutostartEnableError", "lng_pluma_autostart_error", ""),
+)
+LANG_HARD_HEAD = "namespace Lang {\nnamespace Hard {\n"
+LANG_HARD_TAIL = "} // namespace Hard\n} // namespace Lang\n"
+
+
+def lang_hard_body():
+    return ("\n// pluma: each text is a key of the language pack, translated as the\n"
+            "// rest of the app is; the English is upstream's (task 118).\n"
+            + "".join(f"inline QString {name}() {{\n\treturn tr::{key}(tr::now{args});\n}}\n\n"
+                      for name, key, args in LANG_HARD))
+
+
+# The colours of the HTML export: (Telegram's, Pluma's, how many times in
+# style.css, in rich_message.css). An eight-digit colour keeps its alpha.
+EXPORT_COLORS = (
+    ("#168acd", "#4f6e52", 8, 1),  # windowActiveTextFg: links
+    ("#3892db", "#5b7a5e", 2, 1),  # the bar of quotes and replies: windowBgActive
+    ("#40a6e2", "#5b7a5e", 1, 0),  # windowBgActive
+    ("#4db8ff", "#9dbb9f", 11, 2),  # groupCallActiveFg
+    ("#61c0ff", "#9dbb9f", 1, 0),  # groupCallMemberInactiveStatus
+    ("#1a2026", "#2c3a2d", 7, 1),  # groupCallBg
+    ("#2c333d", "#36473a", 13, 9),  # groupCallMembersBg
+    ("#323a45", "#3a4a3c", 9, 4),  # groupCallMembersBgOver
+    ("#39424f", "#4f6e52", 2, 0),  # groupCallMembersBgRipple
+    ("#91979e", "#9aa29a", 3, 3),  # groupCallMemberNotJoinedStatus
+)
+
+UI_POLISH_EDITS = (
+    (HISTORY_TRANSLATE_BAR,
+     "\t\t&st::menuIconCancel);\n"
+     "\t_menu->addSeparator();\n"
+     "\n"
+     "\tconst auto cocoon = ChatHelpers::GenerateLocalTgsSticker(\n"
+     "\t\t&_history->session(),\n"
+     "\t\tu\"cocoon\"_q,\n"
+     "\t\ttrue);\n"
+     "\tauto item = base::make_unique_q<Ui::Menu::MultilineAction>(\n"
+     "\t\t_menu->menu(),\n"
+     "\t\tst::defaultMenu,\n"
+     "\t\tst::historyTranslateCocoonLabel,\n"
+     "\t\tQPoint(\n"
+     "\t\t\tst::defaultMenu.itemPadding.left(),\n"
+     "\t\t\tst::defaultMenu.itemPadding.top()),\n"
+     "\t\ttr::lng_translate_cocoon_menu(\n"
+     "\t\t\ttr::now,\n"
+     "\t\t\tlt_emoji,\n"
+     "\t\t\tData::SingleCustomEmoji(cocoon),\n"
+     "\t\t\tlt_link,\n"
+     "\t\t\ttr::link(tr::lng_translate_cocoon_link(tr::now, tr::bold)),\n"
+     "\t\t\ttr::rich),\n"
+     "\t\tCore::TextContext({\n"
+     "\t\t\t.session = &_history->session(),\n"
+     "\t\t\t.customEmojiLoopLimit = -1,\n"
+     "\t\t}));\n"
+     "\titem->clicks(\n"
+     "\t) | rpl::on_next([controller = _controller] {\n"
+     "\t\tcontroller->show(Box(Ui::AboutCocoonBox));\n"
+     "\t}, item->lifetime());\n"
+     "\t_menu->addAction(std::move(item));\n",
+     "\t\t&st::menuIconCancel);\n"
+     "\t// pluma: no \"Translations are powered by Cocoon\": the Pluma server\n"
+     "\t// translates (task 101), Cocoon is Telegram's (task 118).\n"),
+    (LOCATION_PICKER,
+     "\t\t{ \"window-bg\", &st::windowBg },\n"
+     "\t};\n",
+     "\t\t{ \"window-bg\", &st::windowBg },\n"
+     "\t\t// pluma: the pin in the theme's accent (task 118).\n"
+     "\t\t{ \"window-bg-active\", &st::windowBgActive },\n"
+     "\t};\n"),
+    (LOCATION_PICKER,
+     "\t<path fill=\"#3FB1CE\" d=\"M27,13.5C27,19.07 ",
+     # The SVG is in a raw string R"( ... )": the style ends in ";" so that
+     # no ')"' closes the string early.
+     "\t<path style=\"fill: var(--td-window-bg-active);\" d=\"M27,13.5C27,19.07 "),
+    (LOCATION_PICKER,
+     "\t\t: TextWithEntities{ u\"Error: Could not initialize WebView.\"_q };\n",
+     "\t\t: TextWithEntities{ tr::lng_bot_webview_failed(tr::now) }; // pluma: task 118\n"),
+    (PAYMENTS_PANEL,
+     "\t\t\tshowCriticalError({ \"Error: Could not initialize WebView.\" });\n",
+     "\t\t\t// pluma: a key, not a text in English (task 118).\n"
+     "\t\t\tshowCriticalError({ tr::lng_bot_webview_failed(tr::now) });\n"),
+    (IV_CONTROLLER,
+     "\t\tshowWebviewError({ \"Error: Could not initialize WebView.\" });\n",
+     "\t\t// pluma: a key, not a text in English (task 118).\n"
+     "\t\tshowWebviewError({ tr::lng_bot_webview_failed(tr::now) });\n"),
+    (IV_EMBED_OVERLAY,
+     "\treturn { u\"Error: Could not initialize WebView.\"_q };\n",
+     "\treturn { tr::lng_bot_webview_failed(tr::now) }; // pluma: task 118\n"),
+    (EDITOR_AUDIO_MENU,
+     "\tconst auto colors = std::array<QColor, 4>{ {\n"
+     "\t\tUi::ColorFromSerialized(0xF66464),\n"
+     "\t\tUi::ColorFromSerialized(0xD0B738),\n"
+     "\t\tUi::ColorFromSerialized(0x24CD80),\n"
+     "\t\tUi::ColorFromSerialized(0x3BBCEC),\n"
+     "\t} };\n",
+     "\t// pluma: the colours of the volume of a call member (task 118).\n"
+     "\tconst auto colors = std::array<QColor, 4>{ {\n"
+     "\t\tUi::ColorFromSerialized(0xB97A55),\n"
+     "\t\tUi::ColorFromSerialized(0xA86B4C),\n"
+     "\t\tUi::ColorFromSerialized(0x7FA082),\n"
+     "\t\tUi::ColorFromSerialized(0x9DBB9F),\n"
+     "\t} };\n"),
+    (DATA_WALL_PAPER,
+     "\t).withPatternIntensity(50).withBackgroundColors({\n"
+     "\t\tQColor(219, 221, 187),\n"
+     "\t\tQColor(107, 165, 135),\n"
+     "\t\tQColor(213, 216, 141),\n"
+     "\t\tQColor(136, 184, 132),\n"
+     "\t});\n",
+     "\t).withPatternIntensity(50).withBackgroundColors({\n"
+     "\t\t// pluma: the gradient of Pluma's Web K in the same points (task 118).\n"
+     "\t\tQColor(213, 221, 211),\n"
+     "\t\tQColor(143, 169, 146),\n"
+     "\t\tQColor(201, 212, 197),\n"
+     "\t\tQColor(163, 184, 164),\n"
+     "\t});\n"),
+    (WINDOW_THEME,
+     "\t\t} else if (Data::IsDefaultWallPaper(_paper)\n"
+     "\t\t\t|| (_paper.backgroundColors().empty() && image.isNull())) {\n"
+     "\t\t\tsetPaper(Data::DefaultWallPaper().withParamsFrom(_paper));\n",
+     "\t\t} else if (Data::IsDefaultWallPaper(_paper)\n"
+     "\t\t\t|| (_paper.backgroundColors().empty() && image.isNull())) {\n"
+     "\t\t\t// pluma: the default wallpaper saved with Telegram's colours\n"
+     "\t\t\t// takes Pluma's, the rest of it as it was saved (task 118).\n"
+     "\t\t\tconst auto telegram = std::vector<QColor>{\n"
+     "\t\t\t\tQColor(219, 221, 187),\n"
+     "\t\t\t\tQColor(107, 165, 135),\n"
+     "\t\t\t\tQColor(213, 216, 141),\n"
+     "\t\t\t\tQColor(136, 184, 132),\n"
+     "\t\t\t};\n"
+     "\t\t\tconst auto saved = (_paper.backgroundColors() == telegram)\n"
+     "\t\t\t\t? _paper.withBackgroundColors({})\n"
+     "\t\t\t\t: _paper;\n"
+     "\t\t\tsetPaper(Data::DefaultWallPaper().withParamsFrom(saved));\n"),
+    (WEB_PROXY_TRANSPORT,
+     "\tconst auto html = uR\"HTML(<!doctype html>\n",
+     "\t// pluma: the light colours of Pluma's palette (task 118).\n"
+     "\tconst auto html = uR\"HTML(<!doctype html>\n"),
+    (WEB_PROXY_TRANSPORT, "background:#f4f6f8;color:#17212b}", "background:#f1f2f0;color:#111111}"),
+    (WEB_PROXY_TRANSPORT, "#state{color:#5288c1}", "#state{color:#5b7a5e}"),
+    (WEB_PROXY_TRANSPORT, "border:1px solid #dce3e9;", "border:1px solid #e3eae2;"),
+    (WEB_PROXY_TRANSPORT, ".traffic dt{font-size:.8rem;color:#6c7883}", ".traffic dt{font-size:.8rem;color:#6b6f6b}"),
+    (WEB_PROXY_TRANSPORT, "color:#5288c1;font-size:.8rem;", "color:#5b7a5e;font-size:.8rem;"),
+    (WEB_PROXY_TRANSPORT, ".note{font-size:.8rem;color:#6c7883}", ".note{font-size:.8rem;color:#6b6f6b}"),
+    (LANG, '"lng_group_about3" = "Public links such as t.me/title";\n',
+     '"lng_group_about3" = "Public links such as pluma.chat/title";\n'),
+    (LANG, '"lng_premium_double_limits_about_links#one" = "Reserve up to {count} t.me/username link";\n',
+     '"lng_premium_double_limits_about_links#one" = "Reserve up to {count} pluma.chat/username link";\n'),
+    (LANG, '"lng_premium_double_limits_about_links#other" = "Reserve up to {count} t.me/username links";\n',
+     '"lng_premium_double_limits_about_links#other" = "Reserve up to {count} pluma.chat/username links";\n'),
+    (LANG, '"lng_factcheck_links" = "Only **t.me/** links are allowed.";\n',
+     '"lng_factcheck_links" = "Only **pluma.chat/** links are allowed.";\n'),
+    (GROUP_CALL,
+     "\t\t\tUi::Toast::Show(u\"Bad Updates in GroupCallChainBlocks.\"_q);\n",
+     "\t\t\tUi::Toast::Show(tr::lng_pluma_group_call_join_failed(tr::now)); // pluma: task 118\n"),
+    (GROUP_CALL,
+     "\t\tLOG((\"Call Error: Could not get last block, error: %1\").arg(type));\n"
+     "\t\thangup();\n"
+     "\t\tUi::Toast::Show(error.type());\n",
+     "\t\tLOG((\"Call Error: Could not get last block, error: %1\").arg(type));\n"
+     "\t\thangup();\n"
+     "\t\t// pluma: the code goes to the log above, not to the user (task 118).\n"
+     "\t\tUi::Toast::Show(tr::lng_pluma_group_call_join_failed(tr::now));\n"),
+    (GROUP_CALL,
+     "\t\t? tr::lng_confcall_not_accessible(tr::now)\n"
+     "\t\t: error);\n",
+     "\t\t? tr::lng_confcall_not_accessible(tr::now)\n"
+     "\t\t// pluma: the code goes to the log above, not to the user (task 118).\n"
+     "\t\t: tr::lng_pluma_group_call_join_failed(tr::now));\n"),
+    (GROUP_CALL_COMMON,
+     "\tconst auto fail = [=](QString error) {\n"
+     "\t\tshow->showToast(error);\n",
+     "\tconst auto fail = [=](QString error) {\n"
+     "\t\t// pluma: the code goes to the log, not to the user (task 118).\n"
+     "\t\tLOG((\"Call Error: Could not create a call, error: %1\").arg(error));\n"
+     "\t\tshow->showToast(tr::lng_pluma_group_call_create_failed(tr::now));\n"),
+    (GROUP_CALL_MESSAGES_UI,
+     "\t\t\ttr::italic(u\"Failed to send the message.\"_q)),\n",
+     "\t\t\ttr::italic(tr::lng_pluma_group_call_message_failed(tr::now))), // pluma: task 118\n"),
+    (CHOOSE_SOURCE,
+     "\t\t\t: \"Window \" + QString::number(++windowIndex);\n",
+     "\t\t\t: tr::lng_pluma_group_call_window_title( // pluma: task 118\n"
+     "\t\t\t\ttr::now,\n"
+     "\t\t\t\tlt_index,\n"
+     "\t\t\t\tQString::number(++windowIndex));\n"),
+    (CALLS_CALL,
+     "\t\t\t_user->name())\n"
+     "\t\t: error;\n",
+     "\t\t\t_user->name())\n"
+     "\t\t// pluma: the code goes to the log, not to the user (task 118).\n"
+     "\t\t: tr::lng_pluma_call_failed(tr::now);\n"
+     "\tLOG((\"Call Error: Request failed, error: %1\").arg(error));\n"),
+    (CALLS_PANEL,
+     "\t\t\t\treturn Lang::Hard::CallErrorIncompatible();\n",
+     "\t\t\t\t// pluma: the name in place of \"{user}\" (task 118).\n"
+     "\t\t\t\treturn Lang::Hard::CallErrorIncompatible().replace(\n"
+     "\t\t\t\t\tu\"{user}\"_q,\n"
+     "\t\t\t\t\t_user->name());\n"),
+    (LANG_HARDCODED,
+     "#pragma once\n",
+     "#pragma once\n\n#include \"lang_auto.h\" // pluma: the keys of Lang::Hard (task 118)\n"),
+    (HISTORY_WIDGET,
+     "\t\t\tcontroller()->showToast(u\"Unknown error.\"_q);\n",
+     "\t\t\tcontroller()->showToast(tr::lng_pluma_unknown_error(tr::now)); // pluma: task 118\n"),
+    (COMPOSE_CONTROLS,
+     "\t\t\t_show->showToast(u\"Unknown error.\"_q);\n",
+     "\t\t\t_show->showToast(tr::lng_pluma_unknown_error(tr::now)); // pluma: task 118\n"),
+    (APPLICATION,
+     "\t\t.text = \"\"\n"
+     "\t\t\"There may be a problem with your graphics drivers and OpenGL. \"\n"
+     "\t\t\"Try updating your drivers.\\n\\n\"\n"
+     "\t\t\"OpenGL has been disabled. You can try to enable it again \"\n"
+     "\t\t\"or keep it disabled if crashes continue.\",\n"
+     "\t\t.confirmed = enable,\n"
+     "\t\t.cancelled = keepDisabled,\n"
+     "\t\t.confirmText = \"Enable\",\n"
+     "\t\t.cancelText = \"Keep Disabled\",\n",
+     "\t\t// pluma: keys, not texts in English (task 118).\n"
+     "\t\t.text = tr::lng_pluma_opengl_crash_text(tr::now),\n"
+     "\t\t.confirmed = enable,\n"
+     "\t\t.cancelled = keepDisabled,\n"
+     "\t\t.confirmText = tr::lng_sure_enable(tr::now),\n"
+     "\t\t.cancelText = tr::lng_pluma_opengl_keep_disabled(tr::now),\n"),
+)
+# What the edits leave: the other ways to the box about Cocoon, which nothing
+# reaches (above), each exactly so many times; a new one stops the patch
+# until it is read.
+UI_POLISH_GUARDS = (
+    (SOURCES + "/history/view/history_view_summary_header.cpp", "Box(Ui::AboutCocoonBox)", 1),
+    (SOURCES + "/boxes/create_ai_box.cpp", "Box(Ui::AboutCocoonBox)", 1),
+    (SOURCES + "/boxes/compose_ai_box.cpp", "Box(Ui::AboutCocoonBox)", 2),
+)
+# What no source may hold after the edits: Telegram's colours of the volume
+# of a call outside the sources of calls (whose own verify_call_colors()
+# checks), the texts given keys above. "Call not found!" and "Call link not
+# found!" stay as codes for the log.
+VOLUME_COLORS = re.compile(r"0x(?:F66464|D0B738|24CD80|3BBCEC)\b", re.I)
+UI_POLISH_GONE = re.compile(r"Error: Could not initialize WebView"
+                            r"|\"(?:Unknown error\.|Failed to send the message\.|Window )\""
+                            r"|Toast::Show\(u\"Could not generate join block", re.I)
+
+
+def ui_polish_strings():
+    return "".join(f'"{key}" = "{value}";\n' for key, value in UI_POLISH_STRINGS.items())
+
+
+def export_colors(tree):
+    for rel, index in ((EXPORT_CSS, 2), (EXPORT_RICH_CSS, 3)):
+        for row in EXPORT_COLORS:
+            old, new, count = row[0], row[1], row[index]
+            text = tree.read(rel)
+            found = len(re.findall(re.escape(old), text, re.I))
+            if found != count:
+                raise PatchError(f"{rel}: {found} occurrences of {old}, expected {count}; upstream changed it")
+            tree.write(rel, re.sub(re.escape(old), new, text, flags=re.I))
+
+
+def ui_polish(tree):
+    for rel, old, new in UI_POLISH_EDITS:
+        tree.replace(rel, old, new)
+    tree.replace_body(LANG_HARDCODED, LANG_HARD_HEAD, LANG_HARD_TAIL, lang_hard_body(),
+                      must_contain=tuple(f"inline QString {name}() {{\n" for name, _, _ in LANG_HARD))
+    tree.replace(LANG, UI_POLISH_STRINGS_AFTER, UI_POLISH_STRINGS_AFTER + ui_polish_strings())
+    export_colors(tree)
+
+
+def verify_ui_polish(tree):
+    entries = [(m["key"], m["value"]) for m in lang_entries(tree.read(LANG))]
+    for key, value in UI_POLISH_STRINGS.items():
+        if entries.count((key, value)) != 1 or [k for k, _ in entries].count(key) != 1:
+            raise PatchError(f"{LANG}: {key} is not the text of task 118")
+    for rel, old, new in UI_POLISH_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 118 is not there")
+    hard = tree.read(LANG_HARDCODED)
+    functions = re.findall(r"inline QString (\w+)\(\) \{\n\treturn ([^\n]*);\n\}", hard)
+    if (functions != [(name, f"tr::{key}(tr::now{args})") for name, key, args in LANG_HARD]
+            or hard.count("inline ") != len(LANG_HARD) or '_q;' in hard):
+        raise PatchError(f"{LANG_HARDCODED}: Lang::Hard is not the keys of LANG_HARD (task 118)")
+    for rel, s, count in UI_POLISH_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another way to the box about Cocoon (task 118)")
+    calls = set(call_sources(tree))
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        m = UI_POLISH_GONE.search(text) or (rel not in calls and VOLUME_COLORS.search(text))
+        if m:
+            raise PatchError(f"{rel}: {m.group(0)!r}, which task 118 gave Pluma's colour or a key")
+    for rel in (EXPORT_CSS, EXPORT_RICH_CSS):
+        text = tree.read(rel)
+        for old, _, _, _ in EXPORT_COLORS:
+            if old.lower() in text.lower():
+                raise PatchError(f"{rel}: Telegram's {old} in the export (task 118)")
+    # Every key of Pluma's the sources use is in the built-in English, and
+    # every one there is used: the language pack of the server has the same.
+    defined = {key for key, _ in entries if key.startswith("lng_pluma_")}
+    used = {}
+    for rel in tree.sources():
+        for key in re.findall(r"\btr::(lng_pluma_\w+)\b", tree.scan(rel)):
+            used.setdefault(key, rel)
+    for key in sorted(set(used) - defined):
+        raise PatchError(f"{used[key]}: {key} is not in {LANG} (task 118)")
+    for key in sorted(defined - set(used)):
+        raise PatchError(f"{LANG}: {key} is used by no source (task 118)")
+
+
+def ui_polish_edited():
+    """The text files ui_polish() edits."""
+    return tuple(dict.fromkeys(tuple(rel for rel, _, _ in UI_POLISH_EDITS)
+                               + (LANG_HARDCODED, LANG, EXPORT_CSS, EXPORT_RICH_CSS)))
 
 
 def main(argv=None):
