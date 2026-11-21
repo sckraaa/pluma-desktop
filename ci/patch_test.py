@@ -896,6 +896,18 @@ DAMAGE += ((S + "/mtproto/connection_http.cpp", "namespace MTP {\n",
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.BUSINESS_EDITS)
 DAMAGE += tuple((rel, kept, kept[:-2] + "~" + kept[-1]) for rel, kept in patch.BUSINESS_KEPT)
 
+# Pluma's colours and keys everywhere (task 118): every edit, the entry the
+# keys follow, the body of Lang::Hard and a colour of the export upstream
+# added or changed, damaged in the pinned upstream, stop the patch with the
+# file's name.
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in patch.UI_POLISH_EDITS
+                if rel != patch.LANG)
+DAMAGE += ((patch.LANG, '"lng_group_about3" = "Public links such as t.me/title";',
+            '"lng_group_about3" = "Public links such as t.me/name";'),
+           (patch.LANG, patch.UI_POLISH_STRINGS_AFTER, patch.UI_POLISH_STRINGS_AFTER.replace("Screen", "Display")),
+           (patch.LANG_HARDCODED, "inline QString ServerError() {", "inline QString InternalError() {"),
+           (patch.EXPORT_CSS, "    color: #3892db;", "    color: #3892dc;"),
+           (patch.EXPORT_RICH_CSS, "a { color: #168acd;", "a { color: #168acd; border-color: #168acd;"))
 # The picker on MapLibre (task 112): every edit, the geocoder's wait for a
 # token and upstream's page, damaged in the pinned upstream, stop the patch
 # with the file's name.
@@ -1877,13 +1889,18 @@ class UpstreamTest(unittest.TestCase):
     def test_group_calls_e2e_changes_nothing_else(self):
         """Every file differs from the patch without task 094 by the edits of
         task 094 alone."""
+        # Without the keys of task 118 in either run: one of them replaces
+        # a text an edit of task 094 keeps.
+        polish = (unittest.mock.patch.object(patch, "ui_polish"),
+                  unittest.mock.patch.object(patch, "verify_ui_polish"))
         with unittest.mock.patch.object(patch, "group_calls_e2e"), \
-                unittest.mock.patch.object(patch, "verify_group_calls_e2e"):
+                unittest.mock.patch.object(patch, "verify_group_calls_e2e"), polish[0], polish[1]:
             self.run_patch()
         names = sorted(set(self.files) | self.written)
         before = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
         self.tearDown()
-        self.run_patch()
+        with polish[0], polish[1]:
+            self.run_patch()
         after = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
         self.assertEqual(set(before), set(after))
         expected = dict(before)
@@ -2591,6 +2608,112 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaises(patch.PatchError):
             self.run_patch()
 
+    def test_ui_polish(self):
+        """Pluma's colours and keys where task 118 found Telegram's colours or
+        texts in English."""
+        tree, _ = self.run_patch()
+        entries = {m["key"]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+        for key, value in patch.UI_POLISH_STRINGS.items():
+            self.assertEqual(entries[key], value, key)
+            self.assertTrue(key.startswith("lng_pluma_"), key)
+        # The English of every key is upstream's text, where there was one.
+        sources = "".join(self.files[rel].decode("utf-8", "replace") for rel in self.files
+                          if rel.startswith(patch.SOURCES + "/") and rel.endswith((".cpp", ".h")))
+        for key, value in patch.UI_POLISH_STRINGS.items():
+            if key not in ("lng_pluma_group_call_join_failed", "lng_pluma_group_call_create_failed",
+                           "lng_pluma_call_failed", "lng_pluma_group_call_window_title"):
+                text = value.replace("Pluma", "Telegram")
+                self.assertIn(text, sources.replace('"\n\t\t"', "").replace('" "', " "), key)
+        # Cocoon is out of the translation bar's menu.
+        bar = tree.read(patch.HISTORY_TRANSLATE_BAR)
+        self.assertNotIn("AboutCocoonBox)", bar)
+        self.assertNotIn("lng_translate_cocoon_menu", bar)
+        self.assertIn("\t\t&st::menuIconCancel);\n\t// pluma: no \"Translations are powered by Cocoon\"", bar)
+        # The pin of the location picker in the accent of the theme.
+        picker = tree.read(patch.LOCATION_PICKER)
+        self.assertNotIn("3FB1CE", picker.upper())
+        self.assertIn('\t\t{ "window-bg-active", &st::windowBgActive },\n', picker)
+        self.assertEqual(picker.count("fill: var(--td-window-bg-active)"), 1)
+        # The volume of the video editor, as of a call member.
+        self.assertIn("\t\tUi::ColorFromSerialized(0xB97A55),\n\t\tUi::ColorFromSerialized(0xA86B4C),\n"
+                      "\t\tUi::ColorFromSerialized(0x7FA082),\n\t\tUi::ColorFromSerialized(0x9DBB9F),\n",
+                      tree.read(patch.EDITOR_AUDIO_MENU))
+        # The default wallpaper: Web K's gradient, a saved Telegram one
+        # taken over, the tile of Classic.
+        paper = tree.read(patch.DATA_WALL_PAPER)
+        for rgb in ((213, 221, 211), (143, 169, 146), (201, 212, 197), (163, 184, 164)):
+            self.assertIn("\t\tQColor(%d, %d, %d),\n" % rgb, paper)
+        self.assertNotIn("QColor(219, 221, 187)", paper)
+        self.assertIn("\t\t\tsetPaper(Data::DefaultWallPaper().withParamsFrom(saved));\n",
+                      tree.read(patch.WINDOW_THEME))
+        self.assertIn('qColor("a3b8a4"), // pluma', tree.read(patch.EMBEDDED_THEMES))
+        self.assertNotIn('qColor("9bd494")', tree.read(patch.EMBEDDED_THEMES))
+        # The export and the page of a WEB proxy.
+        for rel in (patch.EXPORT_CSS, patch.EXPORT_RICH_CSS):
+            css = tree.read(rel).lower()
+            for old, new, *_ in patch.EXPORT_COLORS:
+                self.assertNotIn(old, css, rel)
+            self.assertIn("#4f6e52", css)
+            self.assertIn("#9dbb9f", css)
+        self.assertIn("#state{color:#5b7a5e}", tree.read(patch.WEB_PROXY_TRANSPORT))
+        self.assertNotIn("5288c1", tree.read(patch.WEB_PROXY_TRANSPORT))
+        # pluma.chat in the texts that read t.me.
+        self.assertEqual(entries["lng_group_about3"], "Public links such as pluma.chat/title")
+        self.assertEqual(entries["lng_factcheck_links"], "Only **pluma.chat/** links are allowed.")
+        self.assertEqual(entries["lng_premium_double_limits_about_links#other"],
+                         "Reserve up to {count} pluma.chat/username links")
+        # No raw error of a call reaches the user.
+        group_call = tree.read(patch.GROUP_CALL)
+        self.assertNotIn("Ui::Toast::Show(error.type());", group_call)
+        self.assertNotIn('Ui::Toast::Show(u"', group_call)
+        self.assertNotIn("\t\t: error);\n", group_call)
+        self.assertNotIn("show->showToast(error);", tree.read(patch.GROUP_CALL_COMMON))
+        self.assertNotIn("\t\t: error;\n", tree.read(patch.CALLS_CALL))
+        self.assertIn("tr::lng_pluma_group_call_window_title(", tree.read(patch.CHOOSE_SOURCE))
+        # Lang::Hard is keys alone.
+        hard = tree.read(patch.LANG_HARDCODED)
+        self.assertNotIn('"_q;', hard)
+        for name, key, _ in patch.LANG_HARD:
+            self.assertIn(f"inline QString {name}() {{\n\treturn tr::{key}(tr::now", hard)
+            self.assertIn(key, patch.UI_POLISH_STRINGS)
+
+    def test_ui_polish_is_verified(self):
+        """verify() stops a tree where an edit of task 118 is undone, a text
+        or colour it removed comes back elsewhere, Lang::Hard has a text, or a
+        key of Pluma's is missing or unused."""
+        tree, c = self.run_patch()
+        patch.verify_ui_polish(tree)
+
+        def stops(rel, text, message):
+            patched = tree.read_bytes(rel)
+            self.written.add(rel)
+            tree.write_bytes(rel, text(patched.decode("utf-8")).encode("utf-8"))
+            try:
+                with self.assertRaisesRegex(patch.PatchError, re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                    patch.verify_ui_polish(tree)
+            finally:
+                tree.write_bytes(rel, patched)
+
+        for i, (rel, old, new) in enumerate(patch.UI_POLISH_EDITS):
+            with self.subTest(edit=i):
+                stops(rel, lambda t: t.replace(new, old), "task 118")
+        for rel, text, message in (
+                (S + "/history/view/history_view_summary_header.cpp", lambda t: t + "// Box(Ui::AboutCocoonBox)\n",
+                 "the box about Cocoon"),
+                (S + "/history/history_inner_widget.cpp", lambda t: t + 'auto x = u"Unknown error."_q;\n',
+                 "Unknown error"),
+                (S + "/media/view/media_view_overlay_widget.cpp", lambda t: t + "// 0x3BBCEC\n", "0x3BBCEC"),
+                (patch.LANG_HARDCODED, lambda t: t.replace("tr::lng_pluma_server_error(tr::now)",
+                                                            'u"Internal server error."_q'), "Lang::Hard"),
+                (patch.EXPORT_RICH_CSS, lambda t: t + "a { color: #168ACD; }\n", "#168acd"),
+                (patch.LANG, lambda t: t.replace('"lng_pluma_unknown_error" = "Unknown error.";\n', ""),
+                 "lng_pluma_unknown_error"),
+                (patch.LANG, lambda t: t + '"lng_pluma_nowhere" = "Nowhere";\n', "lng_pluma_nowhere is used by no"),
+                (S + "/apiwrap.cpp", lambda t: t + "// tr::lng_pluma_missing(tr::now)\n", "lng_pluma_missing is not in")):
+            with self.subTest(rel=rel, message=message):
+                stops(rel, text, message)
+        patch.verify(tree, c)
+
     def test_damage(self):
         for rel, old, new in DAMAGE:
             with self.subTest(rel=rel, old=old[:60]):
@@ -3188,7 +3311,11 @@ class GroupCallsE2ETest(unittest.TestCase):
             self.assertTrue(key.startswith("lng_pluma_"))
             self.assertIn(f"tr::{key}(tr::now)", edits)
             self.assertNotIn("Telegram", value)
-        self.assertEqual(re.findall(r"tr::(lng_pluma_\w+)", edits), list(patch.GROUP_CALLS_E2E_STRINGS))
+        # And the toast of a join block that could not be made, a key of task
+        # 118's.
+        self.assertEqual(re.findall(r"tr::(lng_pluma_\w+)", edits),
+                         list(patch.GROUP_CALLS_E2E_STRINGS) + ["lng_pluma_group_call_join_failed"])
+        self.assertIn("lng_pluma_group_call_join_failed", patch.UI_POLISH_STRINGS)
 
     def test_report_is_v1(self):
         # The fields are those of the example of PlumaE2EStatus v1 in ADR 0060
@@ -3284,6 +3411,68 @@ class CallColorsTest(unittest.TestCase):
         # Telegram's greys of calls lean to blue (task 118).
         for value in ("#61c0ff", "#8deb90", "#5b7a5e", "#b97a55", "windowBg", "#aaabac", "#84888f", "#91979e"):
             self.assertFalse(patch.is_neutral(value), value)
+
+
+class UiPolishTest(unittest.TestCase):
+    """The keys and colours of task 118 on files made of the texts the patch
+    expects."""
+
+    def tree(self, root, files):
+        for rel in (patch.VERSION_H, patch.CMAKE_APP):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("")
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_strings(self):
+        keys = list(patch.UI_POLISH_STRINGS)
+        self.assertEqual(len(keys), len(set(keys)))
+        for key, value in patch.UI_POLISH_STRINGS.items():
+            with self.subTest(key=key):
+                self.assertRegex(key, r"^lng_pluma_[a-z0-9_]+$")
+                # One entry of lang.strings as the patch reads them back.
+                entry = f'"{key}" = "{value}";\n'
+                self.assertEqual([(m["key"], m["value"]) for m in patch.lang_entries(entry)], [(key, value)])
+                self.assertNotIn("Telegram", value)
+        # Lang::Hard: each function the key of one text, the incompatible
+        # app's "{user}" kept for its callers.
+        self.assertEqual(len({name for name, _, _ in patch.LANG_HARD}), len(patch.LANG_HARD))
+        for _, key, _ in patch.LANG_HARD:
+            self.assertIn(key, patch.UI_POLISH_STRINGS)
+        body = patch.lang_hard_body()
+        self.assertIn("inline QString CallErrorIncompatible() {\n"
+                      "\treturn tr::lng_pluma_call_error_incompatible(tr::now, lt_user, u\"{user}\"_q);\n}\n", body)
+        self.assertIn("{user}", patch.UI_POLISH_STRINGS["lng_pluma_call_error_incompatible"])
+        self.assertIn("{index}", patch.UI_POLISH_STRINGS["lng_pluma_group_call_window_title"])
+
+    def test_export_colors(self):
+        style = "a { color: #168acd; }\n.x { background: #168ACD1f; }\n"
+        rich = "a { color: #168acd; }\n"
+        with tempfile.TemporaryDirectory() as d:
+            table = (("#168acd", "#4f6e52", 2, 1),)
+            with unittest.mock.patch.object(patch, "EXPORT_COLORS", table):
+                tree = self.tree(pathlib.Path(d), {patch.EXPORT_CSS: style, patch.EXPORT_RICH_CSS: rich})
+                patch.export_colors(tree)
+                # The alpha of an eight-digit colour stays.
+                self.assertEqual(tree.read(patch.EXPORT_CSS), "a { color: #4f6e52; }\n.x { background: #4f6e521f; }\n")
+                self.assertEqual(tree.read(patch.EXPORT_RICH_CSS), "a { color: #4f6e52; }\n")
+                # Another count stops the patch: upstream changed the colours.
+                tree = self.tree(pathlib.Path(d), {patch.EXPORT_CSS: style + "b { color: #168acd; }\n",
+                                                   patch.EXPORT_RICH_CSS: rich})
+                with self.assertRaisesRegex(patch.PatchError, "style.css: 3 occurrences of #168acd, expected 2"):
+                    patch.export_colors(tree)
+
+    def test_export_colors_follow_the_tables(self):
+        # The light colours are those of brand/palette-day.txt, the dark ones
+        # those of CALL_COLORS, the counts of the pinned upstream's files.
+        day = {key: new for key, _, new in patch.load_table(patch.BRAND / "palette-day.txt")}
+        light = {"#168acd": day["windowActiveTextFg"], "#3892db": day["windowBgActive"],
+                 "#40a6e2": day["windowBgActive"]}
+        dark = {old: new for _, old, new in patch.CALL_COLORS if old}
+        self.assertEqual({old: new for old, new, _, _ in patch.EXPORT_COLORS},
+                         {**light, **{old: dark[old] for old, _, _, _ in patch.EXPORT_COLORS if old not in light}})
 
 
 class ServiceAccountTest(unittest.TestCase):
