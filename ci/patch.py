@@ -5816,18 +5816,25 @@ def group_calls_e2e_edited():
 # - the answer and hang-up buttons and leaving a call keep the green and
 #   red every call app has, the ones of Classic in every theme (Telegram's
 #   Night and the night base answer in blue);
+# - Telegram's greys with a blue cast (the status of a one-to-one call, the
+#   members who have not joined, the icons of inactive members, which the
+#   call's menus also take for their disabled items, shortcuts and submenu
+#   arrows: groupCallMenu in calls.style) the greys of Tinted, which lean to
+#   sage: windowSubTextFgOver, windowSubTextFg and dialogsTextFg of
+#   brand/palette-night.txt (task 118);
 # - the volume of a member, red to blue in the code (calls_volume_item.cpp
 #   262-267), the weak signal's to the accent.
 # Every theme the app carries takes them: Classic (colors.palette), Tinted
 # (night.tdesktop-theme) and Telegram's themes and bases (TELEGRAM_THEMES),
 # which leave the new keys to Classic. verify_call_colors() stops a call
-# palette with any other colour (but white and grey) and any of Telegram's
-# call colours in the sources of calls.
+# palette with any other colour (but white and a grey without a blue cast)
+# and any of Telegram's call colours in the sources of calls.
 # As (key, Telegram's value in Classic or None for a new key, Pluma's value).
 CALL_COLORS = (
     ("callBg", "#26282cf2", "#2c3a2df2"),
     ("callBgOpaque", "#1b1f23", "#2c3a2d"),
     ("callBgButton", "#1b1f237f", "#2c3a2d7f"),
+    ("callStatusFg", "#aaabac", "#a6aea6"),
     ("callAnswerBg", "#66c95b", "#66c95b"),
     ("callAnswerRipple", "#52b149", "#52b149"),
     ("callAnswerBgOuter", "#50eb4126", "#50eb4126"),
@@ -5840,7 +5847,9 @@ CALL_COLORS = (
     ("groupCallMembersBgRipple", "#39424f", "#4f6e52"),
     ("groupCallMemberActiveIcon", "#8deb90", "#b2ceb4"),
     ("groupCallMemberActiveStatus", "#8deb90", "#b2ceb4"),
+    ("groupCallMemberInactiveIcon", "#84888f", "#8c978c"),
     ("groupCallMemberInactiveStatus", "#61c0ff", "#9dbb9f"),
+    ("groupCallMemberNotJoinedStatus", "#91979e", "#9aa29a"),
     ("groupCallMemberMutedIcon", "#ed7372", "#b97a55"),
     ("groupCallLive1", "#0dcc39", "#6f8f72"),
     ("groupCallLive2", "#0bb6bd", "#7fa082"),
@@ -6095,12 +6104,13 @@ def call_colors(tree):
 
 def is_neutral(value):
     """White, black or a grey: #rrggbb(aa) whose channels differ by less than
-    an eighth."""
+    an eighth, and whose blue is not above both red and green, as in
+    Telegram's greys of calls (#aaabac, #91979e)."""
     m = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", value)
     if not m:
         return False
-    channels = [int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4)]
-    return max(channels) - min(channels) < 0.12 * 255
+    r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (0, 2, 4))
+    return max(r, g, b) - min(r, g, b) < 0.12 * 255 and b <= max(r, g)
 
 
 def call_sources(tree):

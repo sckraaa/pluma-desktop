@@ -1986,6 +1986,9 @@ class UpstreamTest(unittest.TestCase):
               "callBgWeak2")
         stops(patch.PALETTE, text(lambda t: t.replace("\ngroupCallMembersFg: #ffffff;", "\ngroupCallMembersFg: #61c0ff;")),
               "groupCallMembersFg of calls is #61c0ff, not a colour of CALL_COLORS")
+        # A grey with Telegram's blue cast (task 118).
+        stops(patch.PALETTE, text(lambda t: t.replace("\ngroupCallMembersFg: #ffffff;", "\ngroupCallMembersFg: #91979e;")),
+              "groupCallMembersFg of calls is #91979e, not a colour of CALL_COLORS")
         stops(patch.PALETTE, text(lambda t: t + "groupCallSpeaking: #8deb90;\n"), "groupCallSpeaking")
         stops(patch.NIGHT_THEME, lambda data: patch.night_theme(patch.night_colors(data) + "callAnswerBg: #488fc9;\n"),
               "callAnswerBg of calls is #488fc9")
@@ -3147,6 +3150,11 @@ class CallColorsTest(unittest.TestCase):
     WEAK = ("#8a5a44", "#a86b4c", "#7a4e3b", "#b97a55")
     SAGE = ("#131513", "#232623", "#2c3a2d", "#36473a", "#9dbb9f", "#7fa082", "#b2ceb4", "#5b7a5e", "#6f8f72",
             "#4f6e52", "#e3eae2")
+    # The greys of Tinted for Telegram's greys with a blue cast (task 118):
+    # windowSubTextFgOver, dialogsTextFg and windowSubTextFg of
+    # brand/palette-night.txt.
+    GREYS = {"callStatusFg": "windowSubTextFgOver", "groupCallMemberInactiveIcon": "dialogsTextFg",
+             "groupCallMemberNotJoinedStatus": "windowSubTextFg"}
 
     def test_table(self):
         keys = [key for key, _, _ in patch.CALL_COLORS]
@@ -3157,6 +3165,11 @@ class CallColorsTest(unittest.TestCase):
                      for i in range(4)}
         self.assertEqual(new, gradients)
         allowed = set(self.CONNECTING + self.CONNECTED + self.WEAK + self.SAGE)
+        night = {key: new for key, _, new in patch.load_table(patch.BRAND / "palette-night.txt")}
+        for key, grey in self.GREYS.items():
+            self.assertIn((key, night[grey]), [(k, v) for k, _, v in patch.CALL_COLORS])
+            self.assertTrue(patch.is_neutral(night[grey]), grey)
+            allowed.add(night[grey])
         for key, telegram, value in patch.CALL_COLORS:
             with self.subTest(key=key):
                 self.assertRegex(value, r"^#[0-9a-f]{6}([0-9a-f]{2})?$")
@@ -3187,9 +3200,10 @@ class CallColorsTest(unittest.TestCase):
             patch.recolor("callBgWeak1: #000000;\n", [("callBgWeak1", "-", "#8a5a44")], "palette")
 
     def test_neutral(self):
-        for value in ("#ffffff", "#000000", "#aaabac", "#84888f", "#91979e", "#ffffff1f", "#222222"):
+        for value in ("#ffffff", "#000000", "#ffffff1f", "#222222", "#9aa29a", "#8c978c", "#a6aea6", "#8f8f8f"):
             self.assertTrue(patch.is_neutral(value), value)
-        for value in ("#61c0ff", "#8deb90", "#5b7a5e", "#b97a55", "windowBg"):
+        # Telegram's greys of calls lean to blue (task 118).
+        for value in ("#61c0ff", "#8deb90", "#5b7a5e", "#b97a55", "windowBg", "#aaabac", "#84888f", "#91979e"):
             self.assertFalse(patch.is_neutral(value), value)
 
 
