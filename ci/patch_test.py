@@ -828,6 +828,50 @@ def upstream_files():
     return files
 
 
+class ErrorTextTest(unittest.TestCase):
+    """The texts of the server's errors (task 118), without the upstream."""
+
+    def test_table(self):
+        codes = [code for _, cs in patch.ERROR_TEXTS for code in cs]
+        self.assertEqual(len(codes), len(set(codes)))
+        for code in codes:
+            self.assertRegex(code, r"^[A-Z][A-Z0-9_]*$")
+            self.assertFalse(code.startswith(("FLOOD_WAIT_", "FLOOD_PREMIUM_WAIT_")), code)
+        keys = [key for key, _ in patch.ERROR_TEXTS]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertIn(patch.ERROR_TEXT_FALLBACK, patch.ERROR_TEXT_STRINGS)
+        self.assertNotIn(patch.ERROR_TEXT_FALLBACK, keys)
+        self.assertEqual({key for key in keys if key.startswith("lng_pluma_")} | {patch.ERROR_TEXT_FALLBACK},
+                         set(patch.ERROR_TEXT_STRINGS))
+        for key in patch.ERROR_TEXT_STRINGS:
+            self.assertTrue(key.startswith("lng_pluma_error_"), key)
+
+    def test_definition(self):
+        definition = patch.error_text_definition()
+        for key, codes in patch.ERROR_TEXTS:
+            for code in codes:
+                self.assertEqual(definition.count(f'Known{{ "{code}", tr::{key} }},\n'), 1, code)
+        self.assertIn(f"\treturn tr::{patch.ERROR_TEXT_FALLBACK}(tr::now);\n}}\n", definition)
+        self.assertIn('LOG(("Server Error: %1, shown as a text.").arg(error));', definition)
+        self.assertIn("\tif (!code) {\n\t\treturn error;\n\t}\n", definition)
+
+    def test_wrap(self):
+        self.assertEqual(patch.error_text_wrap("showToast(error.type())"), "showToast(Lang::ErrorText(error.type()))")
+        self.assertEqual(patch.error_text_wrap("rpl::single(err)"), "rpl::single(Lang::ErrorText(err))")
+
+    def test_raw(self):
+        raw = ("show->showToast(error.type());", 'showToast(u"Error: "_q + type);', 'showToast({ "Error: " + id });',
+               "x ? tr::lng_flood_error(tr::now) : error.type()")
+        kept = ("showToast(Lang::ErrorText(error.type()));", '(error.type() == u"URL_EXPIRED"_q)',
+                "(error.type() == falseError.type())", "showToast(tr::lng_attach_failed(tr::now));")
+        for text in raw:
+            self.assertTrue(patch.ERROR_TEXT_RAW.search(text), text)
+        for text in kept:
+            self.assertFalse(patch.ERROR_TEXT_RAW.search(text), text)
+        self.assertEqual(list(patch.ui_call_args("a->showToast(f(error.type()), x); showError(rpl::single(t));")),
+                         ["f(error.type()), x", "rpl::single(t)"])
+
+
 class RecordingTree(patch.Tree):
     """A tree that remembers what the patch wrote."""
 
@@ -910,13 +954,19 @@ DAMAGE += ((patch.LANG, '"lng_group_about3" = "Public links such as t.me/title";
            (patch.EXPORT_RICH_CSS, "a { color: #168acd;", "a { color: #168acd; border-color: #168acd;"))
 # The owner's decisions on task 118: the tiles and contrast of Day and Night,
 # the Premium palette and star, a saved built-in theme read from the build,
-# damaged in the pinned upstream, and a Premium colour upstream changed, stop
-# the patch with the file's name.
+# and every place that showed the code of an error, damaged in the pinned
+# upstream, and a Premium colour upstream changed, stop the patch with the
+# file's name.
 DAMAGE += tuple((patch.EMBEDDED_THEMES, old, old[:-2] + "~" + old[-1])
                 for old, _ in (patch.EMBEDDED_DAY, patch.EMBEDDED_NIGHT_GREEN, patch.NIGHT_GREEN_CONTRAST,
                                patch.PREMIUM_IGNORED))
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in (patch.PREMIUM_STAR, patch.SAVED_BUILT_IN_THEME))
-DAMAGE += ((patch.PALETTE, "\npremiumButtonBg3: #db5c9d;", "\npremiumButtonBg3: #db5c9e;"),)
+DAMAGE += ((patch.PALETTE, "\npremiumButtonBg3: #db5c9d;", "\npremiumButtonBg3: #db5c9e;"),
+           (patch.LANG_KEYS_H, patch.ERROR_TEXT_DECLARATION[0], patch.ERROR_TEXT_DECLARATION[0].replace("int", "long")),
+           (patch.LANG_KEYS, patch.ERROR_TEXT_DEFINITION_AFTER, patch.ERROR_TEXT_DEFINITION_AFTER.replace("Weekday", "Day")),
+           (patch.LANG, patch.ERROR_TEXT_STRINGS_AFTER, patch.ERROR_TEXT_STRINGS_AFTER.replace("tries", "attempts")))
+DAMAGE += tuple((rel, call, call[:-2] + "~" + call[-1]) for rel, call, _ in patch.ERROR_TEXT_CALLS)
+DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _, _ in patch.ERROR_TEXT_EDITS)
 # The picker on MapLibre (task 112): every edit, the geocoder's wait for a
 # token and upstream's page, damaged in the pinned upstream, stop the patch
 # with the file's name.
@@ -1573,7 +1623,8 @@ class UpstreamTest(unittest.TestCase):
             self.assertNotIn('"https://t.me/', tree.read(rel), rel)
         # Each file differs from the pinned upstream by its edits alone (and
         # by the other edits there: plm:// in place of tg://, the tags of
-        # Saved Messages, the colour of QR codes, the name).
+        # Saved Messages, the colour of QR codes, the name, the texts of the
+        # server's errors).
         for rel in patch.links_edited():
             if rel == patch.TEXT_ENTITY:
                 continue  # its plm, which the brand's checks cover
@@ -1581,7 +1632,9 @@ class UpstreamTest(unittest.TestCase):
             edits = ([(o, n) for r, o, n in patch.LINK_HOSTS + patch.SAVED_TAGS + patch.QR_COLORS + patch.BIRTHDAY_GIFTS if r == rel]
                      + [(o, n) for r, o, n, _ in patch.PREMIUM_STICKERS if r == rel]
                      + [(o, n.replace("{name}", "Pluma")) for r, o, n, _ in patch.CODE_NAMES if r == rel]
-                     + [(o, o.replace("t.me", patch.LINK_HOST)) for r, o, _ in patch.LINK_BUILDERS if r == rel])
+                     + [(o, o.replace("t.me", patch.LINK_HOST)) for r, o, _ in patch.LINK_BUILDERS if r == rel]
+                     + [(c, patch.error_text_wrap(c)) for r, c, _ in patch.ERROR_TEXT_CALLS if r == rel]
+                     + [(o, n) for r, o, n, _ in patch.ERROR_TEXT_EDITS if r == rel])
             for old, new in edits:
                 text = text.replace(old, new)
             self.assertEqual(tree.read(rel).replace("plm://", "tg://"), text, rel)
@@ -1895,16 +1948,18 @@ class UpstreamTest(unittest.TestCase):
         """Every file differs from the patch without task 094 by the edits of
         task 094 alone."""
         # Without the keys of task 118 in either run: one of them replaces
-        # a text an edit of task 094 keeps.
+        # a text an edit of task 094 keeps, and the check of the texts of
+        # errors finds the code that text showed.
         polish = (unittest.mock.patch.object(patch, "ui_polish"),
-                  unittest.mock.patch.object(patch, "verify_ui_polish"))
+                  unittest.mock.patch.object(patch, "verify_ui_polish"),
+                  unittest.mock.patch.object(patch, "verify_error_texts"))
         with unittest.mock.patch.object(patch, "group_calls_e2e"), \
-                unittest.mock.patch.object(patch, "verify_group_calls_e2e"), polish[0], polish[1]:
+                unittest.mock.patch.object(patch, "verify_group_calls_e2e"), polish[0], polish[1], polish[2]:
             self.run_patch()
         names = sorted(set(self.files) | self.written)
         before = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
         self.tearDown()
-        with polish[0], polish[1]:
+        with polish[0], polish[1], polish[2]:
             self.run_patch()
         after = {rel: (self.root / rel).read_bytes() for rel in names if (self.root / rel).is_file()}
         self.assertEqual(set(before), set(after))
@@ -2848,6 +2903,74 @@ class UpstreamTest(unittest.TestCase):
                 patch.verify(tree, c)
         finally:
             tree.write(rel, star)
+        patch.verify(tree, c)
+
+    def test_error_texts(self):
+        """No toast or box shows the code of an error of the server (task
+        118): every place of ERROR_TEXT_CALLS and ERROR_TEXT_EDITS takes
+        Lang::ErrorText, which maps each code of ERROR_TEXTS to its key, and
+        no other call shows error.type() or "Error: " and a code."""
+        tree, c = self.run_patch()
+        entries = {m["key"]: m["value"] for m in patch.lang_entries(tree.read(patch.LANG))}
+        for key, value in patch.ERROR_TEXT_STRINGS.items():
+            self.assertEqual(entries[key], value, key)
+            self.assertTrue(key.startswith("lng_pluma_error_"), key)
+        # Every key exists, and each upstream key is Telegram's own, not one
+        # of Pluma's.
+        for key, codes in patch.ERROR_TEXTS:
+            self.assertIn(key, entries, key)
+        upstream = patch.lang_entries(self.files[patch.LANG].decode("utf-8"))
+        upstream_keys = {m["key"] for m in upstream}
+        self.assertLessEqual({key for key, _ in patch.ERROR_TEXTS if not key.startswith("lng_pluma_")},
+                             upstream_keys)
+        self.assertTrue(set(patch.ERROR_TEXT_STRINGS).isdisjoint(upstream_keys))
+        # Every Pluma key is used by Lang::ErrorText.
+        definition = tree.read(patch.LANG_KEYS)
+        for key in patch.ERROR_TEXT_STRINGS:
+            self.assertIn(f"tr::{key}", definition, key)
+        known = re.findall(r'Known\{ "(\w+)", tr::(\w+) \}', definition)
+        self.assertEqual(known, [(code, key) for key, codes in patch.ERROR_TEXTS for code in codes])
+        self.assertIn("[[nodiscard]] QString ErrorText(const QString &error);\n", tree.read(patch.LANG_KEYS_H))
+        # The places: the raw codes are gone, their texts wrapped.
+        for rel, call, count in patch.ERROR_TEXT_CALLS:
+            text = tree.read(rel)
+            self.assertNotIn(call, text, rel)
+            self.assertGreaterEqual(text.count(patch.error_text_wrap(call)), count, rel)
+        self.assertNotIn('"Error: "', tree.read(patch.LOCAL_URL_HANDLERS))
+        self.assertNotIn('"Error: "', tree.read(patch.SESSION_CONTROLLER))
+        self.assertNotIn('"Error: " + id', tree.read(patch.CHECKOUT_PROCESS))
+        self.assertNotIn("ShowErrorFallback", tree.read(patch.CREDITS_GRAPHICS))
+        # The login code screen of task 076 too.
+        self.assertIn("\t\tshowCodeError(rpl::single(Lang::ErrorText(type))); // pluma", tree.read(patch.INTRO_CODE))
+        # verify() finds a place that shows a code again, a new one, the
+        # fallback called again, or a key gone.
+        cases = [(rel, lambda t, call=call: t.replace(patch.error_text_wrap(call), call), "task 118")
+                 for rel, call, _ in patch.ERROR_TEXT_CALLS[::7]]
+        cases += [(rel, lambda t, old=old, new=new: t.replace(new, old), "task 118")
+                  for rel, old, new, _ in patch.ERROR_TEXT_EDITS[::4]]
+        cases += [
+            (S + "/boxes/peers/edit_contact_box.cpp", lambda t: t + "void F() { show->showToast(error.type()); }\n",
+             "show the code of an error: 1"),
+            (S + "/history/history_widget.cpp", lambda t: t + 'void F() { showToast(u"Error: "_q + type); }\n',
+             "show the code of an error: 1"),
+            (S + "/apiwrap.cpp", lambda t: t + "void F() { MTP::ShowErrorFallback(show, error); }\n",
+             "ShowErrorFallback"),
+            (patch.LANG, lambda t: t.replace('"lng_pluma_error_privacy" =', '"lng_pluma_error_privacies" ='),
+             "lng_pluma_error_privacy"),
+            (patch.LANG_KEYS, lambda t: t.replace('Known{ "PEER_ID_INVALID"', 'Known{ "PEER_ID_INVALIDATED"'),
+             "Lang::ErrorText"),
+        ]
+        for rel, damaged, message in cases:
+            with self.subTest(rel=rel, message=message):
+                text = tree.read(rel)
+                self.written.add(rel)
+                tree.write(rel, damaged(text))
+                try:
+                    with self.assertRaisesRegex(patch.PatchError,
+                                                re.escape(pathlib.PurePath(rel).name) + ".*" + message):
+                        patch.verify_error_texts(tree)
+                finally:
+                    tree.write(rel, text)
         patch.verify(tree, c)
 
     def test_damage(self):

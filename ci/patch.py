@@ -2937,6 +2937,7 @@ def patch(tree, c):
     paths(tree, c)
     maplibre_picker(tree)
     ui_polish(tree)
+    error_texts(tree)
 
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     tree.write(MARKER, f"Patched by pluma-desktop ci/patch.py: {c.app_id} \"{name}\", layer {c.layer}, "
@@ -3091,6 +3092,7 @@ def verify(tree, c):
     verify_paths(tree, c)
     verify_maplibre_picker(tree)
     verify_ui_polish(tree)
+    verify_error_texts(tree)
 
 
 
@@ -3615,7 +3617,7 @@ LOGIN_CODE_NO_CODE_FAIL = """\
 \t} else if (type == u"PHONE_CODE_EXPIRED"_q) {
 \t\tgoBack(); // pluma: as codeSubmitFail, not the error's name
 \t} else if (!MTP::IgnoreError(error)) {
-\t\tshowCodeError(rpl::single(type));
+\t\tshowCodeError(rpl::single(Lang::ErrorText(type))); // pluma: the code to the log (task 118)
 \t}"""
 
 LOGIN_CODE_ADMINISTRATOR_BOX = """\
@@ -9644,6 +9646,323 @@ def ui_polish_edited():
     return tuple(dict.fromkeys(tuple(rel for rel, _, _ in UI_POLISH_EDITS)
                                + (LANG_HARDCODED, LANG, EXPORT_CSS, EXPORT_RICH_CSS)))
 
+
+
+# --- Texts of the server's errors (task 118) ----------------------------------
+# The owner's decision of 2026-11-21: a toast or box that showed the raw code
+# of an error of the server (error.type(), "Error: " + code) shows a text of
+# the language pack, and the code goes to the log. Lang::ErrorText
+# (lang_keys.cpp) maps a code to a key; a text that is not a code (upper
+# case, digits, underscores) stays as it is, so a place that shows a code or
+# a text of the pack takes either.
+LANG_KEYS_H = SOURCES + "/lang/lang_keys.h"
+LANG_KEYS = SOURCES + "/lang/lang_keys.cpp"
+PASSPORT_FORM = SOURCES + "/passport/passport_form_controller.cpp"
+CHECKOUT_PROCESS = SOURCES + "/payments/payments_checkout_process.cpp"
+CREDITS_GRAPHICS = SOURCES + "/settings/settings_credits_graphics.cpp"
+SESSION_CONTROLLER = SOURCES + "/window/window_session_controller.cpp"
+STARREF_COMMON = SOURCES + "/info/bot/starref/info_bot_starref_common.cpp"
+STARREF_JOIN = SOURCES + "/info/bot/starref/info_bot_starref_join_widget.cpp"
+TRANSFER_GIFT_BOX = SOURCES + "/boxes/transfer_gift_box.cpp"
+URL_AUTH_BOX = SOURCES + "/boxes/url_auth_box.cpp"
+
+# Pluma's keys with their English, after the entry ERROR_TEXT_STRINGS_AFTER.
+ERROR_TEXT_STRINGS_AFTER = '"lng_flood_error" = "Too many tries. Please try again later.";\n'
+ERROR_TEXT_STRINGS = {
+    "lng_pluma_error_unknown": "Something went wrong. Please try again later.",
+    "lng_pluma_error_chat_inaccessible": "Sorry, this chat is not accessible.",
+    "lng_pluma_error_user_inaccessible": "Sorry, this user is not accessible.",
+    "lng_pluma_error_privacy": "Sorry, you can't do this because of the user's privacy settings.",
+    "lng_pluma_error_too_long": "Sorry, this text is too long.",
+}
+# Each key with the codes it is for, each code once: Telegram's own text
+# where upstream shows one for the code (lang.strings and the code that
+# compares the code), Pluma's else. The codes are those the Pluma server
+# answers (rpc_error_codes.go of its teamgram-proto), ERR_ENTERPRISE_IS_BLOCKED
+# and METHOD_NOT_IMPL for what it does not serve. FLOOD_WAIT_* and
+# FLOOD_PREMIUM_WAIT_* take lng_flood_error (as MTP::IsFloodError), any other
+# code ERROR_TEXT_FALLBACK.
+ERROR_TEXTS = (
+    ("lng_cant_do_this", ("CHAT_ADMIN_REQUIRED", "CHAT_WRITE_FORBIDDEN", "RIGHT_FORBIDDEN", "USER_RESTRICTED",
+                          "MESSAGE_AUTHOR_REQUIRED", "PREMIUM_ACCOUNT_REQUIRED", "BOT_ACCESS_FORBIDDEN",
+                          "BOT_METHOD_INVALID", "BOT_WEBVIEW_DISABLED", "BROADCAST_REQUIRED",
+                          "ERR_ENTERPRISE_IS_BLOCKED", "METHOD_NOT_IMPL")),
+    ("lng_pluma_error_chat_inaccessible", ("CHANNEL_PRIVATE", "CHANNEL_INVALID", "CHAT_ID_INVALID", "PEER_ID_INVALID",
+                                           "USER_BANNED_IN_CHANNEL", "CHANNEL_PUBLIC_GROUP_NA",
+                                           "BROADCAST_ID_INVALID", "MEGAGROUP_ID_INVALID")),
+    ("lng_pluma_error_user_inaccessible", ("USER_ID_INVALID", "PARTICIPANT_ID_INVALID", "INPUT_USER_DEACTIVATED",
+                                           "USER_DEACTIVATED", "CONTACT_ID_INVALID", "BOT_INVALID")),
+    ("lng_pluma_error_privacy", ("USER_PRIVACY_RESTRICTED", "USER_IS_BLOCKED")),
+    ("lng_pluma_error_too_long", ("MESSAGE_TOO_LONG", "MEDIA_CAPTION_TOO_LONG", "CHAT_ABOUT_TOO_LONG")),
+    ("lng_message_not_found", ("MESSAGE_ID_INVALID", "MSG_ID_INVALID")),
+    ("lng_edit_error", ("MESSAGE_NOT_MODIFIED", "MESSAGE_EDIT_TIME_EXPIRED")),
+    ("lng_username_invalid", ("USERNAME_INVALID",)),
+    ("lng_username_occupied", ("USERNAME_OCCUPIED",)),
+    ("lng_group_invite_bad_link", ("INVITE_HASH_EXPIRED", "INVITE_HASH_INVALID", "INVITE_HASH_EMPTY",
+                                   "INVITE_SLUG_EXPIRED", "INVITE_SLUG_EMPTY")),
+    ("lng_group_full", ("USERS_TOO_MUCH",)),
+    ("lng_group_request_sent", ("INVITE_REQUEST_SENT",)),
+    ("lng_error_schedule_limit", ("SCHEDULE_TOO_MUCH",)),
+    ("lng_error_noforwards_user", ("CHAT_FORWARDS_RESTRICTED",)),
+    ("lng_failed_add_not_mutual", ("USER_NOT_MUTUAL_CONTACT",)),
+    ("lng_cant_invite_banned", ("USER_KICKED",)),
+    ("lng_error_cant_add_bot", ("BOT_GROUPS_BLOCKED",)),
+    ("lng_cant_invite_bot_to_channel", ("USER_BOT",)),
+    ("lng_error_admin_limit", ("ADMINS_TOO_MUCH",)),
+    ("lng_error_user_admin_invalid", ("USER_ADMIN_INVALID",)),
+    ("lng_error_add_admin_not_member", ("CHAT_ADMIN_INVITE_REQUIRED",)),
+    ("lng_error_you_blocked_user", ("YOU_BLOCKED_USER",)),
+    ("lng_stickers_not_found", ("STICKERSET_INVALID",)),
+    ("lng_edit_media_invalid_file", ("MEDIA_INVALID",)),
+    ("lng_bad_phone", ("PHONE_NUMBER_INVALID",)),
+    ("lng_bad_code", ("PHONE_CODE_INVALID", "PHONE_CODE_EMPTY")),
+    ("lng_signin_wrong_code", ("CODE_INVALID",)),
+    ("lng_error_phone_flood", ("PHONE_NUMBER_FLOOD",)),
+    ("lng_bad_name", ("FIRSTNAME_INVALID", "LASTNAME_INVALID")),
+    ("lng_cloud_password_bad_email", ("EMAIL_INVALID",)),
+    ("lng_signin_bad_password", ("PASSWORD_HASH_INVALID",)),
+)
+ERROR_TEXT_FALLBACK = "lng_pluma_error_unknown"
+ERROR_TEXT_DECLARATION = (
+    "[[nodiscard]] tr::phrase<> WeekdayFull(int index);\n\n} // namespace Lang\n",
+    "[[nodiscard]] tr::phrase<> WeekdayFull(int index);\n\n"
+    "// pluma: the text a user sees for an error of the server: the code of an\n"
+    "// RPC error becomes a text of the language pack and goes to the log; any\n"
+    "// other text stays as it is (task 118).\n"
+    "[[nodiscard]] QString ErrorText(const QString &error);\n\n} // namespace Lang\n")
+ERROR_TEXT_DEFINITION_AFTER = "\tUnexpected(\"Index in WeekdayFull.\");\n}\n"
+
+
+def error_text_definition():
+    """Lang::ErrorText of ERROR_TEXTS."""
+    known = "".join(f'\t\tKnown{{ "{code}", tr::{key} }},\n' for key, codes in ERROR_TEXTS for code in codes)
+    return ("\n// pluma: Telegram's text for a code where upstream shows one, Pluma's\n"
+            "// else; the codes are those the Pluma server answers (task 118).\n"
+            "QString ErrorText(const QString &error) {\n"
+            "\tconst auto code = !error.isEmpty() && ranges::all_of(error, [](QChar ch) {\n"
+            "\t\tconst auto c = ch.unicode();\n"
+            "\t\treturn (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || (c == '_');\n"
+            "\t});\n"
+            "\tif (!code) {\n"
+            "\t\treturn error;\n"
+            "\t}\n"
+            "\tLOG((\"Server Error: %1, shown as a text.\").arg(error));\n"
+            "\tif (error.startsWith(u\"FLOOD_WAIT_\"_q)\n"
+            "\t\t|| error.startsWith(u\"FLOOD_PREMIUM_WAIT_\"_q)) {\n"
+            "\t\treturn tr::lng_flood_error(tr::now);\n"
+            "\t}\n"
+            "\tstruct Known {\n"
+            "\t\tconst char *code = nullptr;\n"
+            "\t\ttr::phrase<> phrase;\n"
+            "\t};\n"
+            "\tstatic const auto kKnown = std::array{\n"
+            + known +
+            "\t};\n"
+            "\tfor (const auto &known : kKnown) {\n"
+            "\t\tif (error == QLatin1String(known.code)) {\n"
+            "\t\t\treturn known.phrase(tr::now);\n"
+            "\t\t}\n"
+            "\t}\n"
+            f"\treturn tr::{ERROR_TEXT_FALLBACK}(tr::now);\n"
+            "}\n")
+
+
+def error_text_wrap(call):
+    """'f(arg)' as 'f(Lang::ErrorText(arg))'."""
+    i = call.index("(")
+    return call[:i + 1] + "Lang::ErrorText(" + call[i + 1:-1] + "))"
+
+
+# The places that showed a code, as (file, the call, how many times the file
+# has it, all of them such places): the argument, the code of the error
+# (error.type(), or the QString a request's fail gives), is wrapped in
+# Lang::ErrorText. Upstream line numbers of 7.4.1 in the registry entry.
+ERROR_TEXT_CALLS = tuple((SOURCES + "/" + rel, call, count) for rel, call, count in (
+    ("api/api_compose_with_ai.cpp", "showToast(type)", 1),
+    ("api/api_earn.cpp", "showToast(message)", 1),
+    ("api/api_suggest_post.cpp", "showToast(error.type())", 3),
+    ("apiwrap.cpp", "showToast(error)", 2),
+    ("boxes/compose_ai_box.cpp", "showError(error.type())", 2),
+    ("boxes/create_ai_box.cpp", "showToast(error.type())", 1),
+    ("boxes/create_ai_tone_box.cpp", "showToast(error.type())", 1),
+    ("boxes/edit_todo_list_box.cpp", "showToast(error)", 1),
+    ("boxes/filters/edit_filter_links.cpp", "showToast(error)", 1),
+    ("boxes/gift_premium_box.cpp", "showToast(error)", 1),
+    ("boxes/peers/community_box.cpp", "showToast(error.type())", 1),
+    ("boxes/peers/create_managed_bot_box.cpp", "showToast(type)", 1),
+    ("boxes/peers/edit_participants_box.cpp", "showToast(error.type())", 5),
+    ("boxes/peers/edit_participants_box.cpp", "showToast(errorType)", 1),
+    ("boxes/peers/edit_peer_color_box.cpp", "showToast(error.type())", 1),
+    ("boxes/peers/edit_peer_color_box.cpp", "showToast(type)", 1),
+    ("boxes/peers/edit_peer_info_box.cpp", "showToast(error.type())", 9),
+    ("boxes/peers/edit_peer_info_box.cpp", "showToast(type)", 3),
+    ("boxes/peers/manage_community_box.cpp", "showToast(error.type())", 1),
+    ("boxes/peers/verify_peers_box.cpp", "showToast(error)", 2),
+    ("boxes/preview_ai_tone_box.cpp", "showToast(error.type())", 2),
+    ("boxes/send_gif_with_caption_box.cpp", "showToast(e)", 1),
+    ("boxes/star_gift_box.cpp", "showToast(error.type())", 3),
+    ("boxes/star_gift_box.cpp", "showToast(type)", 3),
+    ("boxes/sticker_set_box.cpp", "showToast(error)", 1),
+    ("boxes/sticker_set_box.cpp", "showToast(error.type())", 3),
+    ("boxes/transfer_gift_box.cpp", "showToast(error.type())", 2),
+    ("boxes/transfer_gift_box.cpp", "showToast(type)", 1),
+    ("boxes/url_auth_box.cpp", "showToast(error.type())", 1),
+    ("core/local_url_handlers.cpp", "showToast(error.type())", 1),
+    ("data/components/recent_shared_media_gifts.cpp", "showToast(error.type())", 1),
+    ("history/view/media/history_view_premium_gift.cpp", "showToast(error.type())", 1),
+    ("info/bot/earn/info_bot_earn_list.cpp", "showToast(error)", 1),
+    ("info/channel_statistics/boosts/create_giveaway_box.cpp", "showToast(error)", 3),
+    ("info/channel_statistics/earn/info_channel_earn_list.cpp", "showToast(e)", 1),
+    ("info/channel_statistics/earn/info_channel_earn_list.cpp", "showToast(error)", 2),
+    ("info/community_requests/info_community_requests_widget.cpp", "showToast(error)", 2),
+    ("info/peer_gifts/info_peer_gifts_collections.cpp", "showToast(error.type())", 1),
+    ("info/peer_gifts/info_peer_gifts_widget.cpp", "showToast(error.type())", 5),
+    ("info/profile/info_profile_actions.cpp", "showToast(error)", 1),
+    ("info/stories/info_stories_albums.cpp", "showToast(type)", 1),
+    ("info/stories/info_stories_inner_widget.cpp", "showToast(error.type())", 1),
+    ("inline_bots/bot_attach_web_view.cpp", "showToast(error.type())", 4),
+    ("intro/intro_code.cpp", "rpl::single(err)", 1),
+    ("intro/intro_password_check.cpp", "rpl::single(type)", 2),
+    ("intro/intro_phone.cpp", "rpl::single(err)", 1),
+    ("intro/intro_qr.cpp", "rpl::single(error)", 1),
+    ("intro/intro_qr.cpp", "rpl::single(error.type())", 1),
+    ("intro/intro_signup.cpp", "rpl::single(err)", 1),
+    ("intro/intro_widget.cpp", "rpl::single(type)", 1),
+    ("settings/business/settings_away_message.cpp", "showToast(error)", 1),
+    ("settings/business/settings_greeting.cpp", "showToast(error)", 1),
+    ("settings/business/settings_working_hours.cpp", "showToast(error)", 1),
+    ("settings/sections/settings_business.cpp", "showToast(error)", 1),
+    ("settings/sections/settings_credits.cpp", "showToast(error)", 1),
+    ("settings/settings_credits_graphics.cpp", "showToast(e)", 2),
+    ("settings/settings_credits_graphics.cpp", "showToast(error)", 1),
+    ("settings/settings_credits_graphics.cpp", "showToast(error.type())", 2),
+    ("ui/boxes/peer_qr_box.cpp", "showToast(error)", 1),
+    ("wallet/wallet_collectibles.cpp", "showToast(error.type())", 1),
+    ("wallet/wallet_ton_connect.cpp", "showToast(error)", 1),
+    ("window/themes/window_theme_editor_box.cpp", "showToast(error)", 1),
+    ("window/window_peer_menu.cpp", "showToast(error.type())", 1),
+    ("window/window_peer_menu.cpp", "showToast(error)", 1),
+))
+# The places that showed "Error: " or "Failed: " and a code, a code after a
+# text, or a code as the second choice: (file, old, new, how many times).
+ERROR_TEXT_EDITS = (
+    (LOCAL_URL_HANDLERS, 'u"Error: "_q + error.type()', "Lang::ErrorText(error.type())", 5),
+    (SESSION_CONTROLLER, 'u"Error: "_q + error.type()', "Lang::ErrorText(error.type())", 3),
+    (SESSION_CONTROLLER, 'showToast(u"Error: "_q + type);', "showToast(Lang::ErrorText(type));", 1),
+    (STARREF_COMMON, 'u"Failed: "_q + error.type()', "Lang::ErrorText(error.type())", 1),
+    (STARREF_COMMON, 'showToast(u"Failed: "_q + error);', "showToast(Lang::ErrorText(error));", 1),
+    (STARREF_JOIN, 'u"Failed: "_q + error.type()', "Lang::ErrorText(error.type())", 1),
+    (TRANSFER_GIFT_BOX, "\t\t\t\t? Lang::Hard::ServerError()\n\t\t\t\t: error.type());\n",
+     "\t\t\t\t? Lang::Hard::ServerError()\n\t\t\t\t: Lang::ErrorText(error.type()));\n", 1),
+    (URL_AUTH_BOX, "\t\t\t\t\t\t\t\ttr::now)\n\t\t\t\t\t\t\t: error.type());\n",
+     "\t\t\t\t\t\t\t\ttr::now)\n\t\t\t\t\t\t\t: Lang::ErrorText(error.type()));\n", 1),
+    (PASSPORT_FORM, 'Lang::Hard::SecureAcceptError() + "\\n" + error.type()));\n',
+     'Lang::Hard::SecureAcceptError() + "\\n" + Lang::ErrorText(error.type())));\n', 1),
+    (PASSPORT_FORM, "\t\t\t+ '\\n'\n\t\t\t+ error.type()));\n",
+     "\t\t\t+ '\\n'\n\t\t\t+ Lang::ErrorText(error.type())));\n", 1),
+    (PASSPORT_FORM, 'Lang::Hard::SecureSaveError() + "\\n" + error.type()));\n',
+     'Lang::Hard::SecureSaveError() + "\\n" + Lang::ErrorText(error.type())));\n', 1),
+    (PASSPORT_FORM, "\t\t\t_passwordError.fire_copy(error.type());\n",
+     "\t\t\t_passwordError.fire(Lang::ErrorText(error.type()));\n", 1),
+    (PASSPORT_FORM, "\t\t\t\t\tverificationError(nonconst, error.type());\n",
+     "\t\t\t\t\tverificationError(nonconst, Lang::ErrorText(error.type()));\n", 2),
+    (PASSPORT_FORM, '\t\t\ttr::lng_passport_form_error(tr::now) + "\\n" + error);\n',
+     '\t\t\ttr::lng_passport_form_error(tr::now) + "\\n" + Lang::ErrorText(error));\n', 1),
+    (CHECKOUT_PROCESS, '\t\t\t_panel->showCriticalError({ "Error: " + id });\n',
+     "\t\t\t_panel->showCriticalError({ Lang::ErrorText(id) });\n", 1),
+    (CHECKOUT_PROCESS, '\t\t\tshowToast({ "Error: " + id });\n',
+     "\t\t\tshowToast({ Lang::ErrorText(id) });\n", 2),
+    # After Telegram's text that the card has not been billed: the code
+    # alone, which goes to the log.
+    (CHECKOUT_PROCESS, '\t\t\tshowToast({ "Error: " + id + ". Your card has not been billed." });\n',
+     '\t\t\tLOG(("Payments Error: %1").arg(id)); // pluma: not to the user (task 118)\n', 1),
+    (CREDITS_GRAPHICS, "\t\t\tMTP::ShowErrorFallback(show, error);\n",
+     "\t\t\tshow->showToast(Lang::ErrorText(error.type())); // pluma: task 118\n", 1),
+)
+# A UI call whose argument has the code of an error not wrapped in
+# Lang::ErrorText (verify_error_texts). The sources that compare codes pass
+# them to these calls only through a variable, which ERROR_TEXT_CALLS lists.
+ERROR_TEXT_SINK = re.compile(r"\b(?:showToast|Toast::Show|showError|showPhoneError|showCodeError|"
+                             r"showCriticalError|MakeInformBox|showServerError)\(")
+ERROR_TEXT_RAW = re.compile(r"(?<!ErrorText\()(?<![=!]= )\b\w+\.type\(\)(?!\s*[=!]=)|\"(?:Error|Failed): \"")
+# What stays: MTP::ShowErrorFallback, which nothing calls (it would show the
+# code; the header is the MTProto library's, without the language pack).
+ERROR_TEXT_KEPT = {SOURCES + "/mtproto/mtproto_response.h": 1}
+
+
+def ui_call_args(text):
+    """The argument texts of the UI calls of ERROR_TEXT_SINK in a source."""
+    for m in ERROR_TEXT_SINK.finditer(text):
+        depth = 0
+        for j in range(m.end() - 1, len(text)):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if not depth:
+                    yield text[m.end():j]
+                    break
+
+
+def error_text_strings():
+    return "".join(f'"{key}" = "{value}";\n' for key, value in ERROR_TEXT_STRINGS.items())
+
+
+def error_texts(tree):
+    """Texts of the language pack in place of the codes of the server's
+    errors (task 118)."""
+    tree.replace(LANG, ERROR_TEXT_STRINGS_AFTER, ERROR_TEXT_STRINGS_AFTER + error_text_strings())
+    tree.replace(LANG_KEYS_H, *ERROR_TEXT_DECLARATION)
+    tree.replace(LANG_KEYS, ERROR_TEXT_DEFINITION_AFTER, ERROR_TEXT_DEFINITION_AFTER + error_text_definition())
+    for rel, call, count in ERROR_TEXT_CALLS:
+        tree.replace(rel, call, error_text_wrap(call), count=count)
+    for rel, old, new, count in ERROR_TEXT_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_error_texts(tree):
+    entries = [(m["key"], m["value"]) for m in lang_entries(tree.read(LANG))]
+    keys = {key for key, _ in entries}
+    for key, value in ERROR_TEXT_STRINGS.items():
+        if entries.count((key, value)) != 1 or [k for k, _ in entries].count(key) != 1:
+            raise PatchError(f"{LANG}: {key} is not the text of task 118")
+    codes = [code for _, cs in ERROR_TEXTS for code in cs]
+    if len(codes) != len(set(codes)):
+        raise PatchError("ERROR_TEXTS: a code has two keys")
+    for key, _ in ERROR_TEXTS + ((ERROR_TEXT_FALLBACK, ()), ("lng_flood_error", ())):
+        if key not in keys:
+            raise PatchError(f"{LANG}: no {key}, the text of an error of the server (task 118)")
+    if tree.read(LANG_KEYS_H).count(ERROR_TEXT_DECLARATION[1]) != 1 \
+            or tree.read(LANG_KEYS).count(error_text_definition()) != 1:
+        raise PatchError(f"{LANG_KEYS}: Lang::ErrorText is not that of ERROR_TEXTS (task 118)")
+    # A place may take the text of both tables (local_url_handlers.cpp).
+    for rel, call, count in ERROR_TEXT_CALLS:
+        text = tree.read(rel)
+        if text.count(error_text_wrap(call)) < count or call in text:
+            raise PatchError(f"{rel}: {call} shows the code of an error, not its text (task 118)")
+    for rel, old, new, count in ERROR_TEXT_EDITS:
+        text = tree.read(rel)
+        if text.count(new) < count or old in text:
+            raise PatchError(f"{rel}: the edit of task 118 is not there")
+    found = {}
+    for rel in tree.sources():
+        text = tree.scan(rel)
+        raw = sum(1 for args in ui_call_args(text) if ERROR_TEXT_RAW.search(args))
+        if raw:
+            found[rel] = raw
+    for rel in sorted(set(found) | set(ERROR_TEXT_KEPT)):
+        if found.get(rel) != ERROR_TEXT_KEPT.get(rel):
+            raise PatchError(f"{rel}: places that show the code of an error: {found.get(rel, 0)}, "
+                             f"expected {ERROR_TEXT_KEPT.get(rel, 0)} (task 118)")
+    for rel in tree.sources():
+        if rel != SOURCES + "/mtproto/mtproto_response.h" and "ShowErrorFallback(" in tree.scan(rel):
+            raise PatchError(f"{rel}: MTP::ShowErrorFallback shows the code of an error (task 118)")
+
+
+def error_texts_edited():
+    """The text files error_texts() edits."""
+    return tuple(dict.fromkeys((LANG, LANG_KEYS_H, LANG_KEYS) + tuple(rel for rel, _, _ in ERROR_TEXT_CALLS)
+                               + tuple(rel for rel, _, _, _ in ERROR_TEXT_EDITS)))
 
 
 def main(argv=None):
