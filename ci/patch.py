@@ -1880,6 +1880,22 @@ TELEGRAM_THEMES = {
     DAY_BASE_THEME: "3e32484edd81fbebfa1725847737709d7b4b288561aa466566d8069bc288829b",
     NIGHT_BASE_THEME: "ca675f580b40f8ecfb1d581f29ebd777c03eab4c27821251a369ed16f6f5cb5d",
 }
+# The bases of chat themes (themes a chat takes from the server, and the
+# previews of wallpapers by day and by night): PreparePaletteCallback
+# (window_themes_embedded.cpp 453-479) loads them with a colorizer from the
+# accent of Classic or Tinted, which moves only the colours within 15 degrees
+# of hue of that accent (ColorizerFrom 220-231, FollowsAccent 202-215). Pluma's
+# accents are sage, so the bases take Pluma's palette too: every key of
+# brand/palette-day.txt (the day base) and brand/palette-night.txt (the night
+# base) the base sets takes the table's Pluma value, the base's own value
+# pinned by the SHA-256 of TELEGRAM_THEMES, and the night base's own blues
+# that the tables leave out take what Tinted has there (task 118). As {base:
+# (table, (key, the base's value, Pluma's))}.
+BASE_TABLES = {
+    DAY_BASE_THEME: ("palette-day.txt", ()),
+    NIGHT_BASE_THEME: ("palette-night.txt", (("msgOutDateFgSelected", "#c2e4ffad", "#ffffff"),
+                                             ("msgFileThumbLinkInFg", "#4aabf5", "lightButtonFg"))),
+}
 # The HTML export draws a letter avatar in one colour, the class userpic1 to
 # userpic8 by slot (export_output_html.cpp), from the export's style.css:
 # Telegram's colours there lie near the middle of the app's gradient
@@ -2039,6 +2055,25 @@ def identity(text, theme):
     return text
 
 
+def base_rows(colors, theme):
+    """The rows of a base of BASE_TABLES as recolor() takes them: each row of
+    its table whose key the base sets, from the base's own value, a new key
+    added where the base has none, and the base's own rows."""
+    table, own = BASE_TABLES[theme]
+    values = palette_values(colors)
+    rows = []
+    for key, old, new in load_table(BRAND / table):
+        if key in values:
+            rows.append((key, values[key], new))
+        elif old == "-":
+            rows.append((key, old, new))
+    for key, old, new in own:
+        if values.get(key) != old:
+            raise PatchError(f"{theme}: {key} is {values.get(key)}, not {old}; upstream changed the colour")
+        rows.append((key, old, new))
+    return rows
+
+
 def middle(a, b):
     """The colour halfway between two #rrggbb."""
     return "#" + "".join(f"{(int(a[i:i + 2], 16) + int(b[i:i + 2], 16) + 1) // 2:02x}" for i in (1, 3, 5))
@@ -2159,7 +2194,10 @@ def rebrand(tree, c):
         data = tree.read_bytes(rel)
         if hashlib.sha256(data).hexdigest() != sha256:
             raise PatchError(f"{rel}: not the pinned upstream's theme; upstream changed it")
-        tree.write_bytes(rel, with_colors(data, identity(zipped_colors(data, rel), rel)))
+        colors = zipped_colors(data, rel)
+        if rel in BASE_TABLES:
+            colors = recolor(colors, base_rows(colors, rel), f"{rel}: {THEME_COLORS}")
+        tree.write_bytes(rel, with_colors(data, identity(colors, rel)))
     for old, slot in EXPORT_USERPICS:
         tree.replace(EXPORT_CSS, old, old.replace(f"\n.userpic{slot},", "")
                      + f".userpic{slot} {{\n    background-color: {export_userpic(slot)}; /* pluma */\n}}\n")
@@ -2320,8 +2358,8 @@ def verify_brand(tree):
         if tree.read(rel).count(new) != 1:
             raise PatchError(f"{rel}: the list of URL schemes does not take plm://")
 
-    # Pluma's icons, and no Telegram blue in the default themes but what
-    # KEPT_BLUE keeps.
+    # Pluma's icons, and no Telegram blue in the default themes and the bases
+    # of chat themes but what KEPT_BLUE keeps.
     for rel, _ in ASSETS:
         if tree.read_bytes(rel) != (BRAND / "tree" / rel).read_bytes():
             raise PatchError(f"{rel}: not Pluma's (brand/tree)")
@@ -2330,7 +2368,8 @@ def verify_brand(tree):
             raise PatchError(f"{p.relative_to(tree.root).as_posix()}: Telegram's paper plane; add the icon to ASSETS")
     day = palette_values(tree.read(PALETTE))
     night = {**day, **palette_values(night_colors(tree.read_bytes(NIGHT_THEME)))}
-    for where, values in ((PALETTE, day), (NIGHT_THEME, night)):
+    bases = [(rel, {**day, **palette_values(zipped_colors(tree.read_bytes(rel), rel))}) for rel in BASE_TABLES]
+    for where, values in ((PALETTE, day), (NIGHT_THEME, night), *bases):
         for key in values:
             color = resolve(values, key)
             if (is_blue(color) or color[1:7].lower() in TELEGRAM_BLUES) and not KEPT_BLUE.fullmatch(key):
