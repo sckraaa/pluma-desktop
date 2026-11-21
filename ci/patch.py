@@ -9218,7 +9218,9 @@ UI_POLISH_EDITS = (
      "\t};\n"),
     (LOCATION_PICKER,
      "\t<path fill=\"#3FB1CE\" d=\"M27,13.5C27,19.07 ",
-     "\t<path style=\"fill: var(--td-window-bg-active)\" d=\"M27,13.5C27,19.07 "),
+     # The SVG is in a raw string R"( ... )": the style ends in ";" so that
+     # no ')"' closes the string early.
+     "\t<path style=\"fill: var(--td-window-bg-active);\" d=\"M27,13.5C27,19.07 "),
     (LOCATION_PICKER,
      "\t\t: TextWithEntities{ u\"Error: Could not initialize WebView.\"_q };\n",
      "\t\t: TextWithEntities{ tr::lng_bot_webview_failed(tr::now) }; // pluma: task 118\n"),

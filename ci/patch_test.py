@@ -2634,6 +2634,8 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("3FB1CE", picker.upper())
         self.assertIn('\t\t{ "window-bg-active", &st::windowBgActive },\n', picker)
         self.assertEqual(picker.count("fill: var(--td-window-bg-active)"), 1)
+        # The page is a raw string R"( ... )": nothing inside may read ')"'.
+        self.assertNotIn('var(--td-window-bg-active)"', picker)
         # The volume of the video editor, as of a call member.
         self.assertIn("\t\tUi::ColorFromSerialized(0xB97A55),\n\t\tUi::ColorFromSerialized(0xA86B4C),\n"
                       "\t\tUi::ColorFromSerialized(0x7FA082),\n\t\tUi::ColorFromSerialized(0x9DBB9F),\n",
