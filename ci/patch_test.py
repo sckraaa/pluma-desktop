@@ -963,7 +963,7 @@ DAMAGE += tuple((patch.EMBEDDED_THEMES, old, old[:-2] + "~" + old[-1])
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _ in (patch.PREMIUM_STAR, patch.SAVED_BUILT_IN_THEME))
 DAMAGE += ((patch.PALETTE, "\npremiumButtonBg3: #db5c9d;", "\npremiumButtonBg3: #db5c9e;"),
            (patch.LANG_KEYS_H, patch.ERROR_TEXT_DECLARATION[0], patch.ERROR_TEXT_DECLARATION[0].replace("int", "long")),
-           (patch.LANG_KEYS, patch.ERROR_TEXT_DEFINITION_AFTER, patch.ERROR_TEXT_DEFINITION_AFTER.replace("Weekday", "Day")),
+           (patch.LANG_INSTANCE, patch.ERROR_TEXT_DEFINITION_AFTER, patch.ERROR_TEXT_DEFINITION_AFTER.replace("details", "detail")),
            (patch.LANG, patch.ERROR_TEXT_STRINGS_AFTER, patch.ERROR_TEXT_STRINGS_AFTER.replace("tries", "attempts")))
 DAMAGE += tuple((rel, call, call[:-2] + "~" + call[-1]) for rel, call, _ in patch.ERROR_TEXT_CALLS)
 DAMAGE += tuple((rel, old, old[:-2] + "~" + old[-1]) for rel, old, _, _ in patch.ERROR_TEXT_EDITS)
@@ -2925,7 +2925,9 @@ class UpstreamTest(unittest.TestCase):
                              upstream_keys)
         self.assertTrue(set(patch.ERROR_TEXT_STRINGS).isdisjoint(upstream_keys))
         # Every Pluma key is used by Lang::ErrorText.
-        definition = tree.read(patch.LANG_KEYS)
+        definition = tree.read(patch.LANG_INSTANCE)
+        # Not in td_lang's lang_keys.cpp, which has neither LOG nor ranges.
+        self.assertNotIn("ErrorText", tree.read(patch.LANG_KEYS))
         for key in patch.ERROR_TEXT_STRINGS:
             self.assertIn(f"tr::{key}", definition, key)
         known = re.findall(r'Known\{ "(\w+)", tr::(\w+) \}', definition)
@@ -2957,7 +2959,7 @@ class UpstreamTest(unittest.TestCase):
              "ShowErrorFallback"),
             (patch.LANG, lambda t: t.replace('"lng_pluma_error_privacy" =', '"lng_pluma_error_privacies" ='),
              "lng_pluma_error_privacy"),
-            (patch.LANG_KEYS, lambda t: t.replace('Known{ "PEER_ID_INVALID"', 'Known{ "PEER_ID_INVALIDATED"'),
+            (patch.LANG_INSTANCE, lambda t: t.replace('Known{ "PEER_ID_INVALID"', 'Known{ "PEER_ID_INVALIDATED"'),
              "Lang::ErrorText"),
         ]
         for rel, damaged, message in cases:

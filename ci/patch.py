@@ -9657,6 +9657,9 @@ def ui_polish_edited():
 # a text of the pack takes either.
 LANG_KEYS_H = SOURCES + "/lang/lang_keys.h"
 LANG_KEYS = SOURCES + "/lang/lang_keys.cpp"
+# Lang::ErrorText is defined here, in the app's own target: lang_keys.cpp is
+# built in td_lang, which has neither LOG nor the precompiled header's ranges.
+LANG_INSTANCE = SOURCES + "/lang/lang_instance.cpp"
 PASSPORT_FORM = SOURCES + "/passport/passport_form_controller.cpp"
 CHECKOUT_PROCESS = SOURCES + "/payments/payments_checkout_process.cpp"
 CREDITS_GRAPHICS = SOURCES + "/settings/settings_credits_graphics.cpp"
@@ -9730,7 +9733,7 @@ ERROR_TEXT_DECLARATION = (
     "// RPC error becomes a text of the language pack and goes to the log; any\n"
     "// other text stays as it is (task 118).\n"
     "[[nodiscard]] QString ErrorText(const QString &error);\n\n} // namespace Lang\n")
-ERROR_TEXT_DEFINITION_AFTER = "\tUnexpected(\"Index in WeekdayFull.\");\n}\n"
+ERROR_TEXT_DEFINITION_AFTER = "} // namespace details\n"
 
 
 def error_text_definition():
@@ -9913,7 +9916,7 @@ def error_texts(tree):
     errors (task 118)."""
     tree.replace(LANG, ERROR_TEXT_STRINGS_AFTER, ERROR_TEXT_STRINGS_AFTER + error_text_strings())
     tree.replace(LANG_KEYS_H, *ERROR_TEXT_DECLARATION)
-    tree.replace(LANG_KEYS, ERROR_TEXT_DEFINITION_AFTER, ERROR_TEXT_DEFINITION_AFTER + error_text_definition())
+    tree.replace(LANG_INSTANCE, ERROR_TEXT_DEFINITION_AFTER, ERROR_TEXT_DEFINITION_AFTER + error_text_definition())
     for rel, call, count in ERROR_TEXT_CALLS:
         tree.replace(rel, call, error_text_wrap(call), count=count)
     for rel, old, new, count in ERROR_TEXT_EDITS:
@@ -9933,8 +9936,8 @@ def verify_error_texts(tree):
         if key not in keys:
             raise PatchError(f"{LANG}: no {key}, the text of an error of the server (task 118)")
     if tree.read(LANG_KEYS_H).count(ERROR_TEXT_DECLARATION[1]) != 1 \
-            or tree.read(LANG_KEYS).count(error_text_definition()) != 1:
-        raise PatchError(f"{LANG_KEYS}: Lang::ErrorText is not that of ERROR_TEXTS (task 118)")
+            or tree.read(LANG_INSTANCE).count(error_text_definition()) != 1:
+        raise PatchError(f"{LANG_INSTANCE}: Lang::ErrorText is not that of ERROR_TEXTS (task 118)")
     # A place may take the text of both tables (local_url_handlers.cpp).
     for rel, call, count in ERROR_TEXT_CALLS:
         text = tree.read(rel)
@@ -9961,7 +9964,7 @@ def verify_error_texts(tree):
 
 def error_texts_edited():
     """The text files error_texts() edits."""
-    return tuple(dict.fromkeys((LANG, LANG_KEYS_H, LANG_KEYS) + tuple(rel for rel, _, _ in ERROR_TEXT_CALLS)
+    return tuple(dict.fromkeys((LANG, LANG_KEYS_H, LANG_INSTANCE) + tuple(rel for rel, _, _ in ERROR_TEXT_CALLS)
                                + tuple(rel for rel, _, _, _ in ERROR_TEXT_EDITS)))
 
 
